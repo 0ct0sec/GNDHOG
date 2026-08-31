@@ -252,16 +252,18 @@ void App::drawTerminal(Surface& s) {
 
     // Completion candidates take over the body's last rows when present.
     if (!completions_.empty()) {
-        const int listRows = std::min(3, static_cast<int>((completions_.size() + 4) / 5));
+        const int colW = 11;
+        const int perRow = std::max(1, (cols - 1) / colW);
+        const int listRows = std::min(
+            3, static_cast<int>((completions_.size() + perRow - 1) / perRow));
         const int y0 = inputY - listRows * kGlyphH;
         fillRect(s, 0, y0, s.w, listRows * kGlyphH, theme::panel);
         int col = 0, row = 0;
-        const int colW = 11;
         for (const std::string& c : completions_) {
             if (row >= listRows) break;
             drawTextClipped(s, 2 + col * colW * kGlyphW, y0 + row * kGlyphH, c, colW - 1,
                             theme::textDim);
-            if (++col * colW + colW > cols) { col = 0; ++row; }
+            if (++col >= perRow) { col = 0; ++row; }
         }
     }
 

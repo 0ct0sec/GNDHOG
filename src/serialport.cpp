@@ -135,12 +135,18 @@ bool isDfuId(const std::string& vid, const std::string& pid) {
 std::vector<PortInfo> enumeratePorts() {
     std::vector<PortInfo> out;
 #if defined(__linux__)
-    auto addDevice = [&out](const std::string& dev, const std::string& kind) {
-        for (const PortInfo& existing : out) {
-            if (existing.device == dev) return;
-        }
+    // /dev/serial0 is a symlink to /dev/ttyAMA0 or /dev/ttyS0 on this board,
+    // so compare where the names actually point: the picker should offer the
+    // Grove UART once, not two or three times.
+    std::vector<std::string> seen;
+    auto addDevice = [&out, &seen](const std::string& dev, const std::string& kind) {
         struct stat st{};
         if (::stat(dev.c_str(), &st) != 0) return;
+        const std::string real = resolve(dev);
+        for (const std::string& s : seen) {
+            if (s == real) return;
+        }
+        seen.push_back(real);
         PortInfo p;
         p.device = dev;
         p.kind = kind;

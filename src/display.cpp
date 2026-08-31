@@ -1,5 +1,6 @@
 #include "display.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -107,9 +108,14 @@ void Display::present() {
     const Color* src = const_cast<Canvas&>(canvas_).surface().px;
     if (!src) return;
 
+    const size_t rowBytes = static_cast<size_t>(w_) * 2;
     for (int y = 0; y < h_; ++y) {
-        uint8_t* dstRow = map_ + static_cast<size_t>(y + yOffset_) * lineLength_ +
-                          static_cast<size_t>(xOffset_) * 2;
+        const size_t offset = static_cast<size_t>(y + yOffset_) * lineLength_ +
+                              static_cast<size_t>(xOffset_) * 2;
+        // A driver whose stride or pan offset disagrees with yres must cost a
+        // missing row, not a write past the mapping.
+        if (offset + rowBytes > mapLen_) break;
+        uint8_t* dstRow = map_ + offset;
         const Color* srcRow = src + static_cast<size_t>(y) * w_;
         if (plainRgb565_) {
             std::memcpy(dstRow, srcRow, static_cast<size_t>(w_) * 2);
@@ -186,7 +192,9 @@ bool Backlight::setPercent(int percent) {
     if (!available()) return false;
     if (percent < 1) percent = 1;      // never blank the panel entirely
     if (percent > 100) percent = 100;
-    const int value = percent * max_ / 100;
+    // A panel whose max_brightness is small rounds a low percentage down to
+    // zero, which is a dark screen with no way back. Keep one step of light.
+    const int value = std::max(1, percent * max_ / 100);
     std::ofstream f(path_ + "/brightness");
     if (!f) return false;
     f << value;

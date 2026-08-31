@@ -53,16 +53,20 @@ void Terminal::rewrapLast() {
 
 void Terminal::pushLine(const std::string& text, LineKind kind) {
     lines_.push_back(TermLine{text, kind});
+    ++linesEver_;
     appendRowsFor(static_cast<int>(lines_.size()) - 1);
 
     if (lines_.size() > maxLines_) {
         // Drop the oldest quarter at once so trimming is amortised rather than
         // re-wrapping the whole buffer on every single line.
         const size_t drop = maxLines_ / 4 + 1;
+        const size_t rowsBefore = rows_.size();
         lines_.erase(lines_.begin(), lines_.begin() + static_cast<long>(drop));
         captureFromLine_ = captureFromLine_ > drop ? captureFromLine_ - drop : 0;
         rewrapAll();
-        scroll_ = std::max(0, scroll_ - static_cast<int>(drop));
+        // Scroll is measured in display rows, not lines: a dropped line can be
+        // several wrapped rows, so subtract what the rewrap actually removed.
+        scroll_ = std::max(0, scroll_ - static_cast<int>(rowsBefore - rows_.size()));
     }
 }
 
@@ -247,12 +251,15 @@ void LineEditor::killWordBack() {
 
 std::string LineEditor::commit() {
     std::string out = text_;
-    if (!out.empty() && (history_.empty() || history_.back() != out)) {
-        history_.push_back(out);
-        if (history_.size() > 200) history_.erase(history_.begin());
-    }
+    pushHistory(out);
     clear();
     return out;
+}
+
+void LineEditor::pushHistory(const std::string& line) {
+    if (line.empty() || (!history_.empty() && history_.back() == line)) return;
+    history_.push_back(line);
+    if (history_.size() > 200) history_.erase(history_.begin());
 }
 
 void LineEditor::loadHistory(std::vector<std::string> h) { history_ = std::move(h); }

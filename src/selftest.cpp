@@ -181,6 +181,29 @@ void testTerminal() {
     for (int i = 0; i < 500; ++i) t.addLine("line " + std::to_string(i), LineKind::Fc);
     check(t.lineCount() <= 50, "scrollback is trimmed to the cap");
     check(t.line(t.lineCount() - 1).text == "line 499", "newest line survives trimming");
+
+    // Ctrl+L in the middle of a `diff` clears the view, but a command boundary
+    // is counting arrivals, so the counter must not rewind under it.
+    const uint64_t ever = t.linesEver();
+    t.clear();
+    check(t.linesEver() == ever, "clearing the screen does not rewind the line counter");
+    t.addLine("after", LineKind::Fc);
+    check(t.linesEver() == ever + 1, "the line counter keeps climbing after a clear");
+
+    // Scrolled back, the viewport must keep its place when the buffer trims:
+    // one dropped line can be several wrapped rows.
+    t.clear();
+    t.setWidth(10);
+    t.setMaxLines(40);
+    for (int i = 0; i < 40; ++i) {
+        t.addLine("row" + std::to_string(i) + "-0123456789", LineKind::Fc);
+    }
+    t.scrollToBottom(6);
+    t.scrollBy(-20, 6);
+    const std::string atTop = t.rowText(static_cast<size_t>(t.scroll()));
+    t.addLine("one more, which trims the oldest quarter", LineKind::Fc);
+    checkEq(t.rowText(static_cast<size_t>(t.scroll())), atTop,
+            "the viewport keeps its place across a trim");
 }
 
 void testEditor() {
@@ -224,6 +247,15 @@ void testEditor() {
     checkEq(e.wordPrefix(), "gyro_lpf", "word prefix at the cursor");
     e.replaceWord("gyro_lpf1_static_hz");
     checkEq(e.text(), "set gyro_lpf1_static_hz", "word replacement");
+
+    // A quick command from the menu is recorded, but whatever was half-typed
+    // when the menu opened is still there afterwards.
+    e.clear();
+    e.insert("set gyro_l");
+    e.pushHistory("tasks");
+    checkEq(e.text(), "set gyro_l", "a menu command leaves the input line alone");
+    e.historyPrev();
+    checkEq(e.text(), "tasks", "a menu command is still recorded in the history");
 }
 
 // -------------------------------------------------------------- completion
@@ -410,6 +442,50 @@ void testSession() {
     check(!s.connected(), "disconnect closes the port");
 }
 
+// A full scrollback is the normal state after a session or two, and it is the
+// one that used to break: trimming renumbers the buffer, so a command boundary
+// that compared raw line counts could never fire again.
+void testFullScrollback() {
+    section("commands with a full scrollback");
+    SimFc sim;
+    std::string err;
+    if (!sim.start(err)) {
+        std::printf("  SKIP  simulator unavailable: %s\n", err.c_str());
+        return;
+    }
+
+    Terminal term;
+    term.setWidth(53);
+    term.setMaxLines(40);
+    Completer completer;
+    Session s(term, completer);
+
+    check(s.connect(sim.devicePath(), 115200, err), "connect to the pty: " + err);
+    check(spin(sim, s, 4000, [&] { return s.ready(); }), "reaches the CLI prompt");
+
+    // Fill the scrollback to the cap, exactly as a long session does.
+    while (term.lineCount() < 40) term.addLine("old output", LineKind::Fc);
+
+    check(s.send("status"), "send status with the scrollback already full");
+    check(spin(sim, s, 4000, [&] { return s.ready(); }),
+          "a command completes even when every new line trims an old one");
+
+    bool done = false, ok = false;
+    std::string captured;
+    check(s.startCapture("diff all", "test", [&](bool o, const std::string& text) {
+              done = true;
+              ok = o;
+              captured = text;
+          }),
+          "capture starts on a full scrollback");
+    check(spin(sim, s, 8000, [&] { return done; }), "capture finishes on a full scrollback");
+    check(ok, "capture reports success on a full scrollback");
+    check(captured.find("batch end") != std::string::npos,
+          "the tail of the dump is still captured");
+
+    s.disconnect();
+}
+
 } // namespace
 
 int runSelfTest() {
@@ -422,6 +498,7 @@ int runSelfTest() {
     testStorage();
     testGraphics();
     testSession();
+    testFullScrollback();
     std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;
 }

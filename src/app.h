@@ -169,6 +169,7 @@ private:
 
     std::string status_;
     uint64_t statusUntil_ = 0;
+    bool linkLossHandled_ = false;
 };
 
 // Renders every screen once into `dir` as PPM files, for host-side inspection.

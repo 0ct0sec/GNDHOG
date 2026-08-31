@@ -287,10 +287,14 @@ void App::submitLine() {
 
     const RiskNote risk = riskFor(line);
     auto fire = [this]() {
-        const std::string text = editor_.commit();
-        if (!session_.send(text)) {
+        // Commit only once the line is actually on the wire. Committing first
+        // threw the text away whenever the FC was still busy with a `diff`.
+        if (!session_.send(editor_.text())) {
             pushLocal("busy - wait for the current command to finish", LineKind::Warn);
+            dirty_ = true;
+            return;
         }
+        editor_.commit();
         term_.scrollToBottom(bodyRows(true));
     };
 
@@ -437,9 +441,13 @@ void App::applyQuick(int id) {
             notice("Not ready", "Connect to a flight controller first.");
             return;
         }
-        editor_.setText(cmd);
-        const std::string text = editor_.commit();
-        session_.send(text);
+        if (!session_.send(cmd)) {
+            pushLocal("busy - wait for the current command to finish", LineKind::Warn);
+            return;
+        }
+        // It belongs in the history, but the input line may hold something the
+        // user typed before opening the menu.
+        editor_.pushHistory(cmd);
         term_.scrollToBottom(bodyRows(true));
     };
 
@@ -754,8 +762,18 @@ void App::tick(uint64_t now) {
         session_.clearFinishedJob();
     }
 
-    if (session_.linkLost() && screen_ == Screen::Terminal && !modal_) {
-        refreshPorts();
+    // Act on an unplug once. Unlatched, this re-enumerated /dev, /sys and
+    // /dev/serial/by-id on every frame for as long as the terminal stayed up.
+    if (session_.linkLost()) {
+        if (!linkLossHandled_) {
+            linkLossHandled_ = true;
+            refreshPorts();
+            status_ = "link lost - Esc for the menu to reconnect";
+            statusUntil_ = now + 6000;
+            dirty_ = true;
+        }
+    } else {
+        linkLossHandled_ = false;
     }
     if (!status_.empty() && now > statusUntil_) {
         status_.clear();

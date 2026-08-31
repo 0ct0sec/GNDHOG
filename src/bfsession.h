@@ -94,7 +94,7 @@ private:
 
     uint64_t lastByteMs_ = 0;
     uint64_t commandSentMs_ = 0;
-    size_t linesAtSend_ = 0;
+    uint64_t linesAtSend_ = 0;
     uint64_t connectStartMs_ = 0;
     int cliAttempts_ = 0;
     bool linkLost_ = false;

@@ -41,6 +41,10 @@ public:
     void clear();
 
     size_t lineCount() const { return lines_.size(); }
+    // Lines ever pushed. Never reset by trimming or clear(), because a command
+    // boundary has to count arrivals and lines_.size() stops growing once the
+    // scrollback is full.
+    uint64_t linesEver() const { return linesEver_; }
     const TermLine& line(size_t i) const { return lines_[i]; }
     // Text of the line currently being assembled (no newline seen yet).
     const std::string& partial() const { return partial_; }
@@ -70,6 +74,7 @@ private:
     void appendRowsFor(int lineIndex);
 
     std::vector<TermLine> lines_;
+    uint64_t linesEver_ = 0;
     std::vector<DisplayRow> rows_;
     std::string partial_;
     LineKind partialKind_ = LineKind::Fc;
@@ -107,6 +112,8 @@ public:
 
     // Returns the finished line and pushes it onto the history.
     std::string commit();
+    // Records a line in the history without disturbing what is being typed.
+    void pushHistory(const std::string& line);
     bool historyPrev();
     bool historyNext();
     const std::vector<std::string>& history() const { return history_; }

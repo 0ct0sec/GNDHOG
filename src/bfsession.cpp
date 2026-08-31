@@ -108,12 +108,12 @@ bool Session::atPrompt() const {
 
 bool Session::commandComplete(uint64_t now) const {
     if (!atPrompt()) return false;
-    if (term_.lineCount() <= linesAtSend_) return false;
+    if (term_.linesEver() <= linesAtSend_) return false;
     return idleMs(now) >= kPromptQuietMs;
 }
 
 void Session::beginCommand(const std::string& line, uint64_t now) {
-    linesAtSend_ = term_.lineCount();
+    linesAtSend_ = term_.linesEver();
     commandSentMs_ = now;
     state_ = SessionState::Busy;
     port_.write(line + "\n");
@@ -169,7 +169,7 @@ void Session::finishJob(bool ok, const std::string& message) {
     job_.finished = true;
     job_.ok = ok;
     job_.message = message;
-    job_.errorCount = restoreErrors_;
+    job_.errorCount = (job_.kind == JobKind::Restore) ? restoreErrors_ : 0;
 }
 
 void Session::clearFinishedJob() {
@@ -286,10 +286,15 @@ void Session::poll(uint64_t now) {
             }
             break;
         }
-        const uint64_t elapsed = now - commandSentMs_;
+        // Stuck means nothing has arrived for a while, not merely that the
+        // command is taking its time: a `dump all` down the Grove UART at 9600
+        // baud runs for half a minute and is perfectly healthy the whole way.
+        // The min() also covers a command sent after a long idle spell, where
+        // the last byte is already older than the limit.
         const uint64_t limit =
             (job_.kind == JobKind::Restore) ? kRestoreLineTimeoutMs : kCommandTimeoutMs;
-        if (elapsed > limit) {
+        const uint64_t stalled = std::min(now - commandSentMs_, idleMs(now));
+        if (stalled > limit) {
             if (job_.kind == JobKind::Restore && !job_.finished) {
                 // A line that never came back is recorded and the run continues;
                 // stopping halfway would leave a more confusing config behind.
