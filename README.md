@@ -257,6 +257,5 @@ connect → backup → restore path can be exercised with no hardware attached.
 | `src/ui.cpp` | all screen rendering |
 | `src/brand.h` | project identity, author and About copy |
 | `assets/` | supplied mascot source and launcher icon |
-| `tools/pack-mascot.ps1` | deterministic icon / embedded bitmap export |
 | `tools/build-info.sh` | build commit identity, refreshed by Make |
 | `src/simfc.cpp` | the fake flight controller |

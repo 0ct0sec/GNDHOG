@@ -522,11 +522,11 @@ int runSelfTest() {
             for (int x = 0; x < kMascotSize; ++x) {
                 const int bit = y * kMascotSize + x;
                 const Color want = kMascotBits[bit / 8] & (0x80u >> (bit % 8))
-                                       ? rgb(255, 255, 255) : theme::black;
+                                       ? theme::bg : theme::accent;
                 identical &= s.row(18 + y)[4 + x] == want;
             }
         }
-        check(identical, "About renders every mascot pixel without text overlap");
+        check(identical, "About renders orange ink and transparent white without overlap");
         key.key = Key::Escape;
         key.repeat = true;
         app.handleKey(key);
@@ -544,10 +544,22 @@ int runSelfTest() {
         check(app.screen_ == Screen::Menu, "About returns to its menu entry screen");
         Canvas clipped(16, 16);
         Surface small = clipped.surface();
+        fill(small, theme::echo);  // Deliberately not the About background.
         drawMascot(small, -100, -100);
         drawMascot(small, 20, 20);
         drawMascot(small, -200, -200);
-        check(small.valid(), "mascot safely clips beyond the surface");
+        bool transparentAndClipped = true;
+        for (int y = 0; y < 16; ++y) {
+            for (int x = 0; x < 16; ++x) {
+                Color want = theme::echo;
+                if (x < 12 && y < 12) {
+                    const int bit = (y + 100) * kMascotSize + x + 100;
+                    if (!(kMascotBits[bit / 8] & (0x80u >> (bit % 8)))) want = theme::accent;
+                }
+                transparentAndClipped &= small.row(y)[x] == want;
+            }
+        }
+        check(transparentAndClipped, "mascot clips and preserves an arbitrary background");
     }
     testSession();
     testFullScrollback();
