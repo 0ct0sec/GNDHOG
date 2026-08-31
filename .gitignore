@@ -1,0 +1,30 @@
+# build trees (host and cross)
+build/
+build-arm64/
+*.o
+*.d
+*.a
+bfcli
+
+# render / inspection artifacts
+preview/
+*.ppm
+contact.png
+check.png
+
+# runtime data -- backups, history and config belong in XDG dirs, not here
+config.ini
+history.txt
+backups/
+*_backup.txt
+BTFL_cli_*.txt
+
+# editor and OS noise
+.vscode/
+.idea/
+.cache/
+compile_commands.json
+*.swp
+*~
+.DS_Store
+Thumbs.db

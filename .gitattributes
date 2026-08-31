@@ -1,0 +1,14 @@
+# This tree is checked out on Windows and deployed to ARM64 Debian. A shell
+# script that arrives with CRLF fails on the device with a shebang error that
+# blames the wrong thing, so normalise everything to LF and never let
+# core.autocrlf convert it back.
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.cpp     text eol=lf
+*.h       text eol=lf
+Makefile  text eol=lf
+*.md      text eol=lf
+
+*.ppm binary
+*.png binary
