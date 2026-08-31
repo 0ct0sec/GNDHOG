@@ -268,7 +268,7 @@ void Config::load(const Storage& s) {
 
 bool Config::save(const Storage& s, std::string& error) const {
     std::string blob =
-        "# bfcli configuration\n"
+        "# GNDHOG ZERO configuration (legacy bfcli data directory)\n"
         "# sym.<scan> overrides the character produced by the Sym layer for one\n"
         "# physical key; find a key's scan code in the app under Menu > Keymap.\n"
         "# Example:  sym.0x28 = _\n\n";

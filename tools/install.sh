@@ -1,17 +1,19 @@
 #!/bin/sh
-# Install bfcli on an M5Stack Cardputer Zero.
+# Install GNDHOG ZERO on an M5Stack Cardputer Zero (legacy bfcli paths).
 #
 # Staged and reversible: the previous binary is kept as bfcli.prev, and
-# --uninstall puts everything back. Nothing outside /opt/bfcli and the
-# APPLaunch entry is touched -- no services, no boot partition, no device tree.
+# --uninstall removes this install but leaves user backups alone. Nothing
+# outside /opt/bfcli and the APPLaunch entry/icon is touched -- no services,
+# no boot partition, no device tree.
 #
-# Usage:  sudo ./install.sh [--from DIR] [--user NAME] [--add-groups] [--uninstall]
+# Usage: sudo ./install.sh [--from DIR] [--user NAME] [--add-groups] [--uninstall]
 
 set -eu
 
 PREFIX=/opt/bfcli
 LAUNCH_DIR=/usr/share/APPLaunch
 DESKTOP="$LAUNCH_DIR/applications/bfcli.desktop"
+ICON="$LAUNCH_DIR/share/images/gndhog-zero_100.png"
 SRC_DIR=""
 TARGET_USER="${SUDO_USER:-${USER:-root}}"
 ADD_GROUPS=0
@@ -37,6 +39,7 @@ fi
 
 if [ "$UNINSTALL" -eq 1 ]; then
     rm -f "$DESKTOP"
+    rm -f "$ICON"
     rm -rf "$PREFIX"
     echo "Removed $PREFIX and $DESKTOP."
     echo "Backups under ~/.local/share/bfcli were left alone."
@@ -47,6 +50,12 @@ fi
 
 if [ -z "$SRC_DIR" ]; then
     SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+fi
+
+SOURCE_ICON="$SRC_DIR/assets/gndhog-zero_100.png"
+if [ ! -f "$SOURCE_ICON" ]; then
+    echo "Missing GNDHOG ZERO mascot: $SOURCE_ICON" >&2
+    exit 1
 fi
 
 BINARY=""
@@ -71,8 +80,8 @@ fi
 # The binary must actually be runnable here before anything is replaced.
 if [ "$ARCH" = "aarch64" ]; then
     if ! "$BINARY" --selftest >/dev/null 2>&1; then
-        echo "warning: $BINARY --selftest did not pass on this machine." >&2
-        echo "         Installing anyway; run it by hand to see why." >&2
+        echo "Refusing installation: $BINARY --selftest failed." >&2
+        exit 1
     fi
 fi
 
@@ -100,16 +109,22 @@ WRAPPER
 chmod 0755 "$PREFIX/run-bfcli"
 
 if [ -d "$LAUNCH_DIR/applications" ]; then
-    cat > "$DESKTOP" <<'ENTRY'
+    mkdir -p "$LAUNCH_DIR/share/images"
+    cp "$SOURCE_ICON" "$ICON.new"
+    chmod 0644 "$ICON.new"
+    mv -f "$ICON.new" "$ICON"
+    cat > "$DESKTOP.new" <<'ENTRY'
 [Desktop Entry]
 Type=Application
-Name=Betaflight CLI
+Name=GNDHOG ZERO
 Comment=Betaflight CLI over USB for tinywhoops
 Exec=/opt/bfcli/run-bfcli
+Icon=share/images/gndhog-zero_100.png
 Terminal=false
 Categories=Utility;
 ENTRY
-    chmod 0644 "$DESKTOP"
+    chmod 0644 "$DESKTOP.new"
+    mv -f "$DESKTOP.new" "$DESKTOP"
     echo "Launcher entry: $DESKTOP"
 else
     echo "note: $LAUNCH_DIR/applications not found; skipped the launcher entry."
@@ -138,7 +153,7 @@ if [ -n "$NEEDED" ]; then
         echo "  Added$NEEDED. Log out and back in for this to take effect."
     else
         echo
-        echo "  bfcli needs: video (framebuffer), input (keyboard), dialout (serial)."
+        echo "  GNDHOG ZERO needs: video (framebuffer), input (keyboard), dialout (serial)."
         echo "  Add them with:  sudo usermod -aG$(echo "$NEEDED" | tr ' ' ',') $TARGET_USER"
         echo "  or re-run this script with --add-groups."
     fi

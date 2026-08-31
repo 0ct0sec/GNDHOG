@@ -31,6 +31,7 @@ enum class Screen {
     Files,
     Keymap,
     Help,
+    About,
 };
 
 struct MenuItem {
@@ -60,6 +61,7 @@ public:
         bool stdinKeys = false;        // read stdin instead of evdev
         bool simulate = false;         // talk to the built-in fake FC
         bool autoConnect = true;
+        bool showAbout = false;        // --about: start offline on the credits
         int frameLimit = 0;            // stop after N frames (preview/testing)
         std::string previewDir;        // dump each screen as PPM and exit
     };
@@ -67,6 +69,7 @@ public:
     int run(const Options& opt);
 
 private:
+    friend int runSelfTest();
     // ---- lifecycle
     bool setup(const Options& opt, std::string& error);
     void teardown();
@@ -81,6 +84,7 @@ private:
     void onFilesKey(const KeyEvent& e);
     void onKeymapKey(const KeyEvent& e);
     void onHelpKey(const KeyEvent& e);
+    void onAboutKey(const KeyEvent& e);
     bool handleModalKey(const KeyEvent& e);
 
     // ---- screens
@@ -92,6 +96,7 @@ private:
     void drawFiles(Surface& s);
     void drawKeymap(Surface& s);
     void drawHelp(Surface& s);
+    void drawAbout(Surface& s);
     void drawModal(Surface& s);
     void drawList(Surface& s, const std::vector<MenuItem>& items, ListState& st,
                   int visibleRows);

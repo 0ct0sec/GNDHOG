@@ -1,4 +1,8 @@
-# bfcli — Betaflight CLI for the M5Stack Cardputer Zero
+# GNDHOG ZERO — Betaflight CLI for the M5Stack Cardputer Zero
+
+![GNDHOG ZERO mascot](assets/gndhog-zero_100.png)
+
+By **0ct0**. Props off. Shell on.
 
 A field terminal for your tinywhoops. Plug a flight controller into the
 Cardputer Zero's USB-A port, and get the full Betaflight CLI on the built-in
@@ -9,7 +13,7 @@ straight into `/dev/fb0` and reads the TCA8418 keyboard through evdev.
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ BFCLI  ttyACM0 AIR65 C                        ready │
+│ GNDHOG ZERO  ttyACM0 AIR65 C                  ready │
 │ # Betaflight / STM32G47X (G473) 2026.6.0-alpha      │
 │ Voltage: 4.12V (1S battery - OK)                    │
 │ Arming disable flags: RXLOSS CLI                    │
@@ -32,6 +36,13 @@ straight into `/dev/fb0` and reads the TCA8418 keyboard through evdev.
   with a progress bar and a count of anything the FC rejected.
 - **A solved keyboard.** Betaflight parameters are all `snake_case`, and the
   46-key Cardputer keyboard has no obvious underscore. See below.
+- **About** — mascot, author, source commit, and a short incident report from
+  the lawn. Open **Menu → About GNDHOG ZERO**, or press **A** on the port picker.
+  Enter/Escape returns to the screen you came from; no FC connection is needed.
+
+The executable, install paths, and data directory deliberately keep their
+original `bfcli` names. Existing launcher references, backups, command history,
+`config.ini`, and `BFCLI_DATA_DIR` keep working through the rename.
 
 ## The keyboard problem, and the fix
 
@@ -93,7 +104,7 @@ Hold `Fn` and tap a number for shortcuts: **1** help, **2** status,
 
 Set the **Host/Slave switch to HOST** and plug the FC into the **USB-A** port.
 It enumerates as a USB CDC-ACM device (`/dev/ttyACM0`, usually `0483:5740`) and
-bfcli connects to it automatically.
+GNDHOG ZERO connects to it automatically.
 
 A spare FC UART wired to the Grove connector works too — pick the port and baud
 on the connect screen. Grove signal pins are **3.3 V**; the 5 V pin being 5 V
@@ -107,7 +118,7 @@ the FC will not be visible.
 ```sh
 make arm64      # cross build (needs g++-aarch64-linux-gnu)
 make            # host build, for the simulator and self-tests
-make test       # 161 self-checks, including an end-to-end run against a fake FC
+make test       # self-checks, including an end-to-end run against a fake FC
 ```
 
 `make arm64` links libstdc++ and libgcc statically, so the binary depends only
@@ -120,6 +131,12 @@ On the device itself, build with `-j1`: the ARM side of the memory split is
 make -j1
 ```
 
+Every build refreshes its Git identity: About and `--version` show the short
+source commit, with `-dirty` for tracked edits or untracked source. An unchanged
+build does not rewrite the generated header. Builds outside a Git checkout
+report `unknown` rather than inventing a revision. The mascot is embedded in
+the executable; building it needs no image library or artwork download.
+
 ## Install
 
 ```sh
@@ -128,11 +145,15 @@ sudo ./tools/install.sh --add-groups
 
 This puts the binary in `/opt/bfcli/bin/bfcli`, a wrapper at
 `/opt/bfcli/run-bfcli`, and an APPLaunch entry at
-`/usr/share/APPLaunch/applications/bfcli.desktop`. The previous binary is kept
-as `bfcli.prev`, and `--uninstall` reverses everything. No service is installed,
+`/usr/share/APPLaunch/applications/bfcli.desktop`, displayed as **GNDHOG ZERO**.
+Its supplied mascot is installed at
+`/usr/share/APPLaunch/share/images/gndhog-zero_100.png`. The previous binary is
+kept as `bfcli.prev`. `--uninstall` removes the current install, desktop entry,
+and icon; it does not restore an older version or delete user backups.
+On ARM64, a failed self-test aborts installation. No service is installed,
 nothing on the boot partition is touched, and the vendor image is left alone.
 
-bfcli needs the **video** (framebuffer), **input** (keyboard) and **dialout**
+GNDHOG ZERO needs the **video** (framebuffer), **input** (keyboard) and **dialout**
 (serial) groups. The installer reports which are missing.
 
 Check what it can see before launching:
@@ -172,14 +193,22 @@ confirmation says so in red. **Nothing is kept until you run `save`.**
 The reference hardware document asks for capability claims to be separated by
 evidence level, so:
 
-**Verified on a dev host (x86-64 Linux, this build).** 161 self-checks pass,
+**Verified on a dev host (x86-64 Linux) and ARM64 under QEMU.** 187 self-checks pass,
 including the full session state machine driven against a simulated Betaflight
 FC over a real pty: CLI entry, prompt detection across a streaming `diff` (the
 case where comment lines momentarily look like a bare prompt), a complete
 `diff all` capture, and a 40-line restore. Keyboard decoding is tested against
 the exact v5 matrix. Rendering is verified by inspecting `--preview` output.
+The same suite passes under AddressSanitizer/UndefinedBehaviorSanitizer.
+Seven isolated Git scenarios check clean/dirty/unknown build identity and
+rebuilding after a commit without editing source.
 
-**Implemented against documented Linux interfaces, not yet run on the device.**
+**Verified on the bench Cardputer Zero.** The ARM64 build passes all 187 checks
+natively. A bounded `--about` run opens the real framebuffer and evdev input,
+exits cleanly, and leaves the captured 320×170 About frame in `/dev/fb0`.
+No FC serial port is opened for this check. APPLaunch is restored afterward.
+
+**Implemented against documented Linux interfaces.**
 Framebuffer geometry and pixel format are read via `FBIOGET_VSCREENINFO` /
 `FBIOGET_FSCREENINFO` rather than assumed, with a conversion path if the
 bitfields are not plain 5/6/5. The keyboard is found by evdev name (`tca8418c`),
@@ -187,16 +216,16 @@ never by event number, and the name is re-checked after opening. Serial ports
 are ranked by USB identity from sysfs. Backlight `max_brightness` is read, and
 a write is confirmed by reading back.
 
-**Not established.** Nothing here has been run against real hardware or a real
-flight controller by me. Specifically untested: actual panel output and
-readability at this font size, the real TCA8418 event stream, whether the ten
+**Not established.** These checks do not use a real flight controller.
+Specifically untested: physical panel readability at this font size,
+actual key presses through the TCA8418 event stream, whether the ten
 inferred Sym characters match your unit, USB-A enumeration of a specific FC,
 and end-to-end restore timing over a real CDC-ACM link. The key-test screen and
 `config.ini` overrides exist precisely because the Sym mapping is the part most
 likely to need correcting on first contact.
 
 **Deliberately not attempted.** No monitor-mode Wi-Fi, no CSI, no camera, no
-IMU, no GPIO or I²C poking. bfcli uses the framebuffer, evdev, a serial port,
+IMU, no GPIO or I²C poking. GNDHOG ZERO uses the framebuffer, evdev, a serial port,
 and one sysfs backlight — nothing else.
 
 ## Development
@@ -206,6 +235,8 @@ and one sysfs backlight — nothing else.
 ./build/bfcli --preview out/     # one PPM per screen, for layout inspection
 ./build/bfcli --selftest         # the check suite
 ./build/bfcli --list-ports       # what the machine can see
+./build/bfcli --about            # credits on the panel, no FC connection
+./build/bfcli --version          # author and source commit; no hardware access
 ./build/bfcli --help
 ```
 
@@ -224,4 +255,8 @@ connect → backup → restore path can be exercised with no hardware attached.
 | `src/display.cpp` | framebuffer and backlight |
 | `src/serialport.cpp` | port discovery and termios |
 | `src/ui.cpp` | all screen rendering |
+| `src/brand.h` | project identity, author and About copy |
+| `assets/` | supplied mascot source and launcher icon |
+| `tools/pack-mascot.ps1` | deterministic icon / embedded bitmap export |
+| `tools/build-info.sh` | build commit identity, refreshed by Make |
 | `src/simfc.cpp` | the fake flight controller |

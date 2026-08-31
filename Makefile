@@ -1,4 +1,4 @@
-# BetaflightCLI for M5Stack Cardputer Zero (Raspberry Pi CM0 / ARM64 Debian)
+# GNDHOG ZERO for M5Stack Cardputer Zero (Raspberry Pi CM0 / ARM64 Debian)
 #
 #   make            host build (x86-64 dev/test, offscreen + sim FC)
 #   make arm64      cross build for the Cardputer Zero
@@ -14,6 +14,7 @@ STRIP    ?= true
 
 CXXFLAGS := -std=c++17 -Wall -Wextra -Wno-unused-parameter $(OPT) \
             -ffunction-sections -fdata-sections
+CPPFLAGS += -I$(BUILD)
 LDFLAGS  ?= -Wl,--gc-sections
 LDLIBS   :=
 
@@ -21,7 +22,7 @@ SRCS := $(sort $(wildcard $(SRCDIR)/*.cpp))
 OBJS := $(patsubst $(SRCDIR)/%.cpp,$(BUILD)/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)
 
-.PHONY: all arm64 test clean install-local
+.PHONY: all arm64 test clean install-local FORCE
 
 all: $(BUILD)/$(NAME)
 
@@ -29,9 +30,14 @@ $(BUILD)/$(NAME): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-$(BUILD)/%.o: $(SRCDIR)/%.cpp
+$(BUILD)/%.o: $(SRCDIR)/%.cpp $(BUILD)/build_info.h
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -MMD -MP -c -o $@ $<
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c -o $@ $<
+
+# Recheck Git even when no .cpp changed (e.g. the commit after a test build).
+# The script only updates the header when the identity actually changes.
+$(BUILD)/build_info.h: FORCE
+	@sh tools/build-info.sh $@
 
 # Cross build for the Cardputer Zero. libstdc++/libgcc are linked statically so
 # the binary does not depend on the exact GCC runtime of the vendor image.
@@ -41,6 +47,7 @@ arm64:
 
 test: $(BUILD)/$(NAME)
 	$(BUILD)/$(NAME) --selftest
+	@TZ=UTC sh tools/test-build-info.sh
 
 clean:
 	rm -rf build build-arm64

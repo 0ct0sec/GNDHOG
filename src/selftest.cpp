@@ -1,4 +1,6 @@
 #include "app.h"
+#include "brand.h"
+#include "mascot.h"
 #include "bfcommands.h"
 #include "bfsession.h"
 #include "font6x8.h"
@@ -489,7 +491,7 @@ void testFullScrollback() {
 } // namespace
 
 int runSelfTest() {
-    std::printf("bfcli self-test\n\n");
+    std::printf("%s self-test (commit %s)\n\n", kAppName, kBuildCommit);
     testKeys();
     testTerminal();
     testEditor();
@@ -497,6 +499,56 @@ int runSelfTest() {
     testRiskAndParsing();
     testStorage();
     testGraphics();
+    section("brand and About");
+    checkEq(kAppName, "GNDHOG ZERO", "final project name");
+    checkEq(kAuthor, "0ct0", "author credit");
+    check(!std::string(kBuildCommit).empty(), "build identity is present");
+    check(128 + textWidth(std::string("commit: ") + kBuildCommit) <= kScreenW,
+          "build identity fits beside the mascot, including dirty suffix");
+    check(4 + textWidth(kAboutJoke) <= kScreenW, "complete FPV joke fits on screen");
+    {
+        App app;
+        app.display_.setHeadlessSize(kScreenW, kScreenH);
+        KeyEvent key;
+        key.key = Key::Char;
+        key.ch = 'a';
+        app.handleKey(key);
+        check(app.screen_ == Screen::About, "A opens About without a flight controller");
+        check(!app.session_.connected(), "About does not connect a flight controller");
+        app.render();
+        Surface s = app.display_.surface();
+        bool identical = true;
+        for (int y = 0; y < kMascotSize; ++y) {
+            for (int x = 0; x < kMascotSize; ++x) {
+                const int bit = y * kMascotSize + x;
+                const Color want = kMascotBits[bit / 8] & (0x80u >> (bit % 8))
+                                       ? rgb(255, 255, 255) : theme::black;
+                identical &= s.row(18 + y)[4 + x] == want;
+            }
+        }
+        check(identical, "About renders every mascot pixel without text overlap");
+        key.key = Key::Escape;
+        key.repeat = true;
+        app.handleKey(key);
+        check(app.screen_ == Screen::About, "held Escape cannot dismiss About");
+        key.repeat = false;
+        app.handleKey(key);
+        check(app.screen_ == Screen::Ports, "About returns to its offline entry screen");
+        app.screen_ = Screen::Menu;
+        // Exercise the menu return route without opening hardware or changing
+        // saved settings. Menu selection itself is covered in the UI preview.
+        app.returnScreen_ = Screen::Menu;
+        app.setScreen(Screen::About);
+        key.key = Key::Enter;
+        app.handleKey(key);
+        check(app.screen_ == Screen::Menu, "About returns to its menu entry screen");
+        Canvas clipped(16, 16);
+        Surface small = clipped.surface();
+        drawMascot(small, -100, -100);
+        drawMascot(small, 20, 20);
+        drawMascot(small, -200, -200);
+        check(small.valid(), "mascot safely clips beyond the surface");
+    }
     testSession();
     testFullScrollback();
     std::printf("\n%d checks, %d failures\n", gChecks, gFailures);

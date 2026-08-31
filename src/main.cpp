@@ -1,4 +1,5 @@
 #include "app.h"
+#include "brand.h"
 #include "serialport.h"
 
 #include <cstdio>
@@ -13,7 +14,7 @@ namespace {
 
 void usage() {
     std::printf(
-        "bfcli - Betaflight CLI for the M5Stack Cardputer Zero\n"
+        "GNDHOG ZERO - Betaflight CLI for the M5Stack Cardputer Zero\n"
         "\n"
         "Usage: bfcli [options]\n"
         "\n"
@@ -28,6 +29,8 @@ void usage() {
         "  --preview DIR     write one PPM per screen to DIR and exit\n"
         "  --list-ports      print the detected serial ports and exit\n"
         "  --selftest        run the built-in checks and exit\n"
+        "  --about           open the About screen without connecting an FC\n"
+        "  --version         print the author and source commit, then exit\n"
         "  --help            this text\n"
         "\n"
         "Data (backups, history, config) lives under $BFCLI_DATA_DIR, or\n"
@@ -57,12 +60,18 @@ int main(int argc, char** argv) {
         const std::string a = argv[i];
         auto next = [&](const char* what) -> std::string {
             if (i + 1 >= argc) {
-                std::fprintf(stderr, "bfcli: %s needs a value\n", what);
+                std::fprintf(stderr, "%s: %s needs a value\n", bf::kAppName, what);
                 std::exit(2);
             }
             return argv[++i];
         };
         if (a == "--help" || a == "-h") { usage(); return 0; }
+        else if (a == "--version") {
+            std::printf("%s | author %s | commit %s\n", bf::kAppName,
+                        bf::kAuthor, bf::kBuildCommit);
+            return 0;
+        }
+        else if (a == "--about") opt.showAbout = true;
         else if (a == "--selftest") return bf::runSelfTest();
         else if (a == "--list-ports") return listPorts();
         else if (a == "--port") opt.portOverride = next("--port");
@@ -78,7 +87,8 @@ int main(int argc, char** argv) {
             opt.headless = true;
             opt.autoConnect = false;
         } else {
-            std::fprintf(stderr, "bfcli: unknown option %s (try --help)\n", a.c_str());
+            std::fprintf(stderr, "%s: unknown option %s (try --help)\n",
+                         bf::kAppName, a.c_str());
             return 2;
         }
     }

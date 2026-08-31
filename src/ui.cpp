@@ -1,4 +1,6 @@
 #include "app.h"
+#include "brand.h"
+#include "mascot.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -54,7 +56,7 @@ std::vector<std::string> wrapText(const std::string& text, int cols) {
 }
 
 const char* const kHelpText[] = {
-    "BFCLI - Betaflight CLI for Cardputer Zero",
+    "GNDHOG ZERO - Betaflight CLI for Cardputer Zero",
     "",
     "TYPING SYMBOLS",
     "  Betaflight parameters are snake_case, so the two",
@@ -109,11 +111,10 @@ constexpr int kHelpLines = static_cast<int>(sizeof(kHelpText) / sizeof(kHelpText
 } // namespace
 
 void App::drawTopBar(Surface& s) {
-    const int cols = columns();
     fillRect(s, 0, 0, s.w, kTopH, theme::panel);
     hLine(s, 0, kTopH, s.w, theme::rule);
 
-    drawText(s, 2, 1, "BFCLI", theme::accent);
+    drawText(s, 2, 1, kAppName, theme::accent);
 
     std::string mid;
     switch (screen_) {
@@ -123,6 +124,7 @@ void App::drawTopBar(Surface& s) {
     case Screen::Files:  mid = "backups"; break;
     case Screen::Keymap: mid = "keymap"; break;
     case Screen::Help:   mid = "help"; break;
+    case Screen::About:  mid = "about"; break;
     case Screen::Terminal:
         if (!session_.connected()) {
             mid = "offline";
@@ -133,8 +135,6 @@ void App::drawTopBar(Surface& s) {
         }
         break;
     }
-    drawTextClipped(s, 2 + 6 * kGlyphW, 1, mid, cols - 8 - 9, theme::text);
-
     // Right-hand state chip.
     const std::string st = stateText(session_.state());
     Color chip = theme::textDim;
@@ -142,6 +142,8 @@ void App::drawTopBar(Surface& s) {
     else if (session_.state() == SessionState::Busy) chip = theme::warn;
     else if (session_.state() == SessionState::Failed) chip = theme::err;
     const int x = s.w - textWidth(st) - 2;
+    const int midX = 2 + textWidth(kAppName) + kGlyphW;
+    drawTextClipped(s, midX, 1, mid, (x - kGlyphW - midX) / kGlyphW, theme::text);
     drawText(s, x, 1, st, chip);
 }
 
@@ -204,7 +206,7 @@ void App::drawPorts(Surface& s) {
                       static_cast<int>(ports_.size()));
     }
 
-    std::string hint = "Enter connect   R rescan   F backups   H help   Esc quit";
+    std::string hint = "Enter link  R scan  F files  H help  A about  Esc quit";
     if (!ports_.empty()) {
         const PortInfo& p = ports_[static_cast<size_t>(portList_.sel)];
         std::string detail = p.detail();
@@ -213,7 +215,7 @@ void App::drawPorts(Surface& s) {
                       std::string("baud ") + std::to_string(kBaudChoices[baudIndex_]) +
                       " (B changes)";
         }
-        if (!detail.empty()) hint = detail;
+        if (!detail.empty()) hint = detail + "  A about";
     }
     drawHintBar(s, hint);
 }
@@ -427,6 +429,20 @@ void App::drawHelp(Surface& s) {
     drawHintBar(s, "Fn+F / Fn+X scroll   Esc back");
 }
 
+void App::drawAbout(Surface& s) {
+    drawMascot(s, 4, 18);
+    drawText(s, 128, 22, kAppName, theme::accent);
+    drawText(s, 128, 37, "Betaflight field terminal", theme::textDim);
+    drawText(s, 128, 54, std::string("author: ") + kAuthor, theme::text);
+    drawText(s, 128, 71, std::string("commit: ") + kBuildCommit, theme::ok);
+    drawText(s, 128, 91, "Cardputer Zero / ARM64", theme::textDim);
+    drawText(s, 128, 108, "props off. shell on.", theme::accent);
+    hLine(s, 4, 133, s.w - 8, theme::rule);
+    drawText(s, 4, 137, kAboutHeading, theme::accent);
+    drawText(s, 4, 149, kAboutJoke, theme::text);
+    drawHintBar(s, "Enter / Esc back");
+}
+
 void App::drawModal(Surface& s) {
     if (!modal_) return;
     const int cols = columns();
@@ -475,6 +491,7 @@ void App::render() {
     case Screen::Files:    drawFiles(s); break;
     case Screen::Keymap:   drawKeymap(s); break;
     case Screen::Help:     drawHelp(s); break;
+    case Screen::About:    drawAbout(s); break;
     }
     drawModal(s);
 }

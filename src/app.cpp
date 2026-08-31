@@ -1,4 +1,5 @@
 #include "app.h"
+#include "brand.h"
 #include "simfc.h"
 
 #include <algorithm>
@@ -18,6 +19,7 @@ enum MenuId {
     MenuFiles,
     MenuKeymap,
     MenuHelp,
+    MenuAbout,
     MenuBrightDown,
     MenuBrightUp,
     MenuDisconnect,
@@ -186,10 +188,11 @@ bool App::setup(const Options& opt, std::string& error) {
         {"Saved backups...", "view or delete", MenuFiles, true},
         {"Keymap & key test", "find a symbol key", MenuKeymap, true},
         {"Help", "keys and workflow", MenuHelp, true},
+        {"About GNDHOG ZERO", "0ct0 / build / ground crew", MenuAbout, true},
         {"Brightness -", "", MenuBrightDown, true},
         {"Brightness +", "", MenuBrightUp, true},
         {"Disconnect", "close the serial port", MenuDisconnect, true},
-        {"Exit bfcli", "return to the launcher", MenuExit, true},
+        {"Exit GNDHOG ZERO", "return to the launcher", MenuExit, true},
     };
     quick_.clear();
     for (int i = 0; i < kQuickCount; ++i) {
@@ -203,7 +206,10 @@ bool App::setup(const Options& opt, std::string& error) {
     refreshPorts();
     refreshFiles();
 
-    if (!opt_.portOverride.empty()) {
+    if (opt_.showAbout) {
+        returnScreen_ = Screen::Ports;
+        setScreen(Screen::About);
+    } else if (!opt_.portOverride.empty()) {
         std::string cerr;
         if (session_.connect(opt_.portOverride, opt_.baud, cerr)) {
             setScreen(Screen::Terminal);
@@ -503,6 +509,10 @@ void App::applyMenu(int id) {
         helpScroll_ = 0;
         setScreen(Screen::Help);
         break;
+    case MenuAbout:
+        returnScreen_ = Screen::Menu;
+        setScreen(Screen::About);
+        break;
     case MenuBrightDown: adjustBrightness(-10); break;
     case MenuBrightUp:   adjustBrightness(+10); break;
     case MenuDisconnect: doDisconnect(); break;
@@ -559,6 +569,9 @@ void App::onPortsKey(const KeyEvent& e) {
         } else if (e.ch == 'h' || e.ch == 'H' || e.ch == '?') {
             helpScroll_ = 0;
             setScreen(Screen::Help);
+        } else if (e.ch == 'a' || e.ch == 'A') {
+            returnScreen_ = Screen::Ports;
+            setScreen(Screen::About);
         } else if (e.ch == 'q' || e.ch == 'Q') {
             running_ = false;
         }
@@ -733,6 +746,13 @@ void App::handleKey(const KeyEvent& e) {
     case Screen::Files:    onFilesKey(e); break;
     case Screen::Keymap:   onKeymapKey(e); break;
     case Screen::Help:     onHelpKey(e); break;
+    case Screen::About:    onAboutKey(e); break;
+    }
+}
+
+void App::onAboutKey(const KeyEvent& e) {
+    if (!e.repeat && (e.key == Key::Escape || e.key == Key::Enter)) {
+        setScreen(returnScreen_);
     }
 }
 
@@ -784,7 +804,7 @@ void App::tick(uint64_t now) {
 int App::run(const Options& opt) {
     std::string error;
     if (!setup(opt, error)) {
-        std::fprintf(stderr, "bfcli: %s\n", error.c_str());
+        std::fprintf(stderr, "%s: %s\n", kAppName, error.c_str());
         return 1;
     }
 
@@ -796,6 +816,7 @@ int App::run(const Options& opt) {
             {Screen::Menu, "03-menu"},     {Screen::Quick, "04-quick"},
             {Screen::Files, "05-files"},   {Screen::Keymap, "06-keymap"},
             {Screen::Help, "07-help"},
+            {Screen::About, "09-about"},
         };
         status_.clear();   // show each screen's real hint bar, not a startup notice
         pushLocal("# Betaflight / STM32G47X (G473) 2026.6.0-alpha MSP API: 1.48", LineKind::Fc);
@@ -822,10 +843,10 @@ int App::run(const Options& opt) {
     }
 
     SimFc sim;
-    if (opt.simulate) {
+    if (opt.simulate && !opt.showAbout) {
         std::string simErr;
         if (!sim.start(simErr)) {
-            std::fprintf(stderr, "bfcli: simulator: %s\n", simErr.c_str());
+            std::fprintf(stderr, "%s: simulator: %s\n", kAppName, simErr.c_str());
             teardown();
             return 1;
         }
