@@ -66,5 +66,8 @@ private:
 // Baud rates offered for the Grove/EXT UART path.
 extern const int kBaudChoices[];
 extern const int kBaudChoiceCount;
+// True only when the requested rate has an exact termios mapping. Unsupported
+// values must never be silently negotiated as 115200.
+bool isSupportedBaud(int baud);
 
 } // namespace bf

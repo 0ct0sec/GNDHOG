@@ -2,8 +2,9 @@
 #include "brand.h"
 #include "serialport.h"
 
+#include <charconv>
 #include <cstdio>
-#include <cstring>
+#include <cstdlib>
 #include <string>
 
 namespace bf {
@@ -11,6 +12,29 @@ int runSelfTest();   // selftest.cpp
 }
 
 namespace {
+
+bool parsePositiveInt(const std::string& text, const char* option, int& value) {
+    int parsed = 0;
+    const char* const begin = text.data();
+    const char* const end = begin + text.size();
+    const auto result = std::from_chars(begin, end, parsed, 10);
+    if (result.ec != std::errc{} || result.ptr != end || parsed <= 0) {
+        std::fprintf(stderr,
+                     "%s: %s needs a positive decimal integer (got `%s`)\n",
+                     bf::kAppName, option, text.c_str());
+        return false;
+    }
+    value = parsed;
+    return true;
+}
+
+void printUnsupportedBaud(int baud) {
+    std::fprintf(stderr, "%s: unsupported baud rate %d (choose", bf::kAppName, baud);
+    for (int i = 0; i < bf::kBaudChoiceCount; ++i) {
+        std::fprintf(stderr, "%s%d", i == 0 ? " " : ", ", bf::kBaudChoices[i]);
+    }
+    std::fprintf(stderr, ")\n");
+}
 
 void usage() {
     std::printf(
@@ -75,13 +99,21 @@ int main(int argc, char** argv) {
         else if (a == "--selftest") return bf::runSelfTest();
         else if (a == "--list-ports") return listPorts();
         else if (a == "--port") opt.portOverride = next("--port");
-        else if (a == "--baud") opt.baud = std::atoi(next("--baud").c_str());
+        else if (a == "--baud") {
+            if (!parsePositiveInt(next("--baud"), "--baud", opt.baud)) return 2;
+            if (!bf::isSupportedBaud(opt.baud)) {
+                printUnsupportedBaud(opt.baud);
+                return 2;
+            }
+        }
         else if (a == "--fb") opt.fbDevice = next("--fb");
         else if (a == "--headless") opt.headless = true;
         else if (a == "--stdin") opt.stdinKeys = true;
         else if (a == "--sim") opt.simulate = true;
         else if (a == "--no-autoconnect") opt.autoConnect = false;
-        else if (a == "--frames") opt.frameLimit = std::atoi(next("--frames").c_str());
+        else if (a == "--frames") {
+            if (!parsePositiveInt(next("--frames"), "--frames", opt.frameLimit)) return 2;
+        }
         else if (a == "--preview") {
             opt.previewDir = next("--preview");
             opt.headless = true;

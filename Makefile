@@ -48,6 +48,7 @@ arm64:
 
 test: $(BUILD)/$(NAME)
 	$(BUILD)/$(NAME) --selftest
+	@sh tools/test-cli-options.sh $(BUILD)/$(NAME)
 	@TZ=UTC sh tools/test-build-info.sh
 
 package: arm64

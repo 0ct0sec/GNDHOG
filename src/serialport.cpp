@@ -16,7 +16,13 @@
 
 namespace bf {
 
-const int kBaudChoices[] = {115200, 57600, 38400, 19200, 9600, 230400, 250000, 460800, 921600};
+const int kBaudChoices[] = {
+    115200, 57600, 38400, 19200, 9600, 230400,
+#if defined(B250000)
+    250000,
+#endif
+    460800, 921600,
+};
 const int kBaudChoiceCount = static_cast<int>(sizeof(kBaudChoices) / sizeof(kBaudChoices[0]));
 
 namespace {
@@ -74,25 +80,36 @@ void fillUsbIdentity(PortInfo& p) {
     }
 }
 
-speed_t baudConstant(int baud) {
+bool baudConstant(int baud, speed_t& speed) {
     switch (baud) {
-    case 9600: return B9600;
-    case 19200: return B19200;
-    case 38400: return B38400;
-    case 57600: return B57600;
-    case 115200: return B115200;
-    case 230400: return B230400;
-    case 460800: return B460800;
-    case 921600: return B921600;
+    case 9600: speed = B9600; break;
+    case 19200: speed = B19200; break;
+    case 38400: speed = B38400; break;
+    case 57600: speed = B57600; break;
+    case 115200: speed = B115200; break;
+    case 230400: speed = B230400; break;
+    case 460800: speed = B460800; break;
+    case 921600: speed = B921600; break;
 #ifdef B250000
-    case 250000: return B250000;
+    case 250000: speed = B250000; break;
 #endif
-    default: return B115200;
+    default: return false;
     }
+    return true;
 }
 #endif // __linux__
 
 } // namespace
+
+bool isSupportedBaud(int baud) {
+#if defined(__linux__)
+    speed_t speed{};
+    return baudConstant(baud, speed);
+#else
+    return std::find(kBaudChoices, kBaudChoices + kBaudChoiceCount, baud) !=
+           kBaudChoices + kBaudChoiceCount;
+#endif
+}
 
 std::string PortInfo::vidPid() const {
     if (vendorId.empty() || productId.empty()) return {};
@@ -197,6 +214,11 @@ SerialPort::~SerialPort() { close(); }
 bool SerialPort::open(const std::string& device, int baud, std::string& error) {
     close();
 #if defined(__linux__)
+    speed_t speed{};
+    if (!baudConstant(baud, speed)) {
+        error = "unsupported baud rate: " + std::to_string(baud);
+        return false;
+    }
     // O_NOCTTY so a serial console never becomes our controlling terminal;
     // O_NONBLOCK so a port with no carrier cannot stall the UI thread.
     fd_ = ::open(device.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
@@ -224,11 +246,10 @@ bool SerialPort::open(const std::string& device, int baud, std::string& error) {
     tio.c_cc[VMIN] = 0;
     tio.c_cc[VTIME] = 0;
 
-    // Never negotiate 1200 baud: Betaflight treats that as "reboot to DFU".
-    const int safeBaud = (baud == 1200) ? 115200 : baud;
-    const speed_t sp = baudConstant(safeBaud);
-    ::cfsetispeed(&tio, sp);
-    ::cfsetospeed(&tio, sp);
+    // 1200 baud is intentionally absent: Betaflight can treat it as a request
+    // to reboot into DFU. Every accepted value maps to exactly what was asked.
+    ::cfsetispeed(&tio, speed);
+    ::cfsetospeed(&tio, speed);
 
     if (::tcsetattr(fd_, TCSANOW, &tio) != 0) {
         error = std::string("tcsetattr: ") + std::strerror(errno);

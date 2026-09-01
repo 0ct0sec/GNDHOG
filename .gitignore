@@ -1,6 +1,6 @@
 # build trees (host and cross)
 build/
-build-arm64/
+build-*/
 dist/
 *.o
 *.d

@@ -197,30 +197,36 @@ void Keyboard::pumpStdin(std::vector<KeyEvent>& out) {
 
 // ------------------------------------------------------------ raw tty mode
 
-RawTerminalMode::RawTerminalMode(bool enable) {
+RawTerminalMode::RawTerminalMode(bool enable, int fd) : fd_(fd) {
 #if defined(__linux__)
     static_assert(sizeof(termios) <= sizeof(saved_), "termios does not fit");
-    if (!enable || !::isatty(STDIN_FILENO)) return;
+    if (!enable || fd_ < 0 || !::isatty(fd_)) return;
     termios* saved = reinterpret_cast<termios*>(saved_);
-    if (::tcgetattr(STDIN_FILENO, saved) != 0) return;
+    if (::tcgetattr(fd_, saved) != 0) return;
+    const int flags = ::fcntl(fd_, F_GETFL, 0);
+    if (flags < 0) return;
     termios raw = *saved;
     ::cfmakeraw(&raw);
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 0;
-    if (::tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0) {
-        active_ = true;
-        const int flags = ::fcntl(STDIN_FILENO, F_GETFL, 0);
-        ::fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
+    if (::tcsetattr(fd_, TCSANOW, &raw) != 0) return;
+    if (::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) != 0) {
+        ::tcsetattr(fd_, TCSANOW, saved);
+        return;
     }
+    savedFlags_ = flags;
+    active_ = true;
 #else
     (void)enable;
+    (void)fd;
 #endif
 }
 
 RawTerminalMode::~RawTerminalMode() {
 #if defined(__linux__)
     if (!active_) return;
-    ::tcsetattr(STDIN_FILENO, TCSANOW, reinterpret_cast<termios*>(saved_));
+    ::tcsetattr(fd_, TCSANOW, reinterpret_cast<termios*>(saved_));
+    if (savedFlags_ >= 0) ::fcntl(fd_, F_SETFL, savedFlags_);
 #endif
 }
 

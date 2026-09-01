@@ -13,7 +13,14 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
+
+#if defined(__linux__)
+#include <fcntl.h>
+#include <termios.h>
+#include <unistd.h>
+#endif
 
 namespace bf {
 namespace {
@@ -124,6 +131,53 @@ void testKeys() {
     checkEq(std::string(1, usb.ch), "a", "keycode-only fallback decodes a");
     usb = fromKeycodeOnly(12, true, false, false, false);
     checkEq(std::string(1, usb.ch), "_", "keycode-only Shift+minus -> underscore");
+}
+
+void testRawTerminalMode() {
+    section("raw terminal lifecycle");
+#if defined(__linux__)
+    SimFc tty;
+    std::string error;
+    if (!tty.start(error)) {
+        check(false, "test pty starts: " + error);
+        return;
+    }
+    const int fd = ::open(tty.devicePath().c_str(), O_RDWR | O_NOCTTY);
+    if (fd < 0) {
+        check(false, "test pty slave opens");
+        return;
+    }
+
+    termios before{};
+    const int flagsBefore = ::fcntl(fd, F_GETFL, 0);
+    check(::tcgetattr(fd, &before) == 0 && flagsBefore >= 0,
+          "test pty state is readable");
+    {
+        RawTerminalMode raw(true, fd);
+        termios during{};
+        const int flagsDuring = ::fcntl(fd, F_GETFL, 0);
+        check(raw.active(), "raw mode activates on a tty");
+        check(flagsDuring >= 0 && (flagsDuring & O_NONBLOCK) != 0,
+              "raw mode makes input non-blocking");
+        check(::tcgetattr(fd, &during) == 0 &&
+                  (during.c_lflag & (ICANON | ECHO)) == 0,
+              "raw mode disables canonical input and echo");
+    }
+
+    termios after{};
+    const int flagsAfter = ::fcntl(fd, F_GETFL, 0);
+    check(flagsAfter == flagsBefore, "raw mode restores descriptor flags");
+    check(::tcgetattr(fd, &after) == 0 &&
+              before.c_iflag == after.c_iflag &&
+              before.c_oflag == after.c_oflag &&
+              before.c_cflag == after.c_cflag &&
+              before.c_lflag == after.c_lflag &&
+              std::memcmp(before.c_cc, after.c_cc, sizeof(before.c_cc)) == 0,
+          "raw mode restores terminal attributes");
+    ::close(fd);
+#else
+    check(true, "raw terminal mode is Linux-only");
+#endif
 }
 
 // ---------------------------------------------------------------- terminal
@@ -324,6 +378,13 @@ void testRiskAndParsing() {
     check(riskFor("save").risk == Risk::Writes, "save writes");
     check(riskFor("status").risk == Risk::None, "status is safe");
     checkEq(commandWord("  SET foo = 1"), "set", "command word is lowercased and trimmed");
+
+    for (int i = 0; i < kBaudChoiceCount; ++i) {
+        check(isSupportedBaud(kBaudChoices[i]),
+              "offered baud rate has an exact termios mapping");
+    }
+    check(!isSupportedBaud(1200), "1200 baud is not offered to Betaflight");
+    check(!isSupportedBaud(12345), "an arbitrary baud rate is rejected");
 
     check(isErrorLine("###ERROR IN diff: bad###"), "###ERROR detected");
     check(isErrorLine("Unknown command, try 'help'"), "unknown command detected");
@@ -564,6 +625,7 @@ void testFullScrollback() {
 int runSelfTest() {
     std::printf("%s self-test (commit %s)\n\n", kAppName, kBuildCommit);
     testKeys();
+    testRawTerminalMode();
     testTerminal();
     testEditor();
     testCompleter();

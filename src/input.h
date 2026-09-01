@@ -1,6 +1,7 @@
 #pragma once
 #include "keys.h"
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -62,12 +63,18 @@ void sleepMs(int ms);
 // Puts the terminal into raw mode for the stdin fallback, restoring it on exit.
 class RawTerminalMode {
 public:
-    explicit RawTerminalMode(bool enable);
+    explicit RawTerminalMode(bool enable, int fd = 0);
     ~RawTerminalMode();
+    RawTerminalMode(const RawTerminalMode&) = delete;
+    RawTerminalMode& operator=(const RawTerminalMode&) = delete;
+
+    bool active() const { return active_; }
 
 private:
     bool active_ = false;
-    char saved_[64] = {0};
+    int fd_ = -1;
+    int savedFlags_ = -1;
+    alignas(std::max_align_t) unsigned char saved_[64] = {0};
 };
 
 } // namespace bf
