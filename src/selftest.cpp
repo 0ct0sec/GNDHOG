@@ -442,6 +442,38 @@ void testSession() {
 
     s.disconnect();
     check(!s.connected(), "disconnect closes the port");
+
+    // The old FC left a prompt in Terminal::partial(). A new, silent port must
+    // prove its own prompt instead of inheriting that fragment and claiming it
+    // is ready.
+    SimFc silent;
+    check(silent.start(err), "start a silent reconnect target: " + err);
+    check(s.connect(silent.devicePath(), 115200, err), "open the silent reconnect target");
+    const uint64_t reconnectDeadline = nowMs() + 400;
+    while (nowMs() < reconnectDeadline) {
+        s.poll(nowMs());
+        sleepMs(4);
+    }
+    check(!s.ready(), "a reconnect cannot reuse the previous FC prompt");
+    s.disconnect();
+
+    // A write can discover a detached USB serial device before read() does.
+    // The failed flush must transition the session to link-lost immediately;
+    // otherwise it remains "connected" until an unrelated command timeout.
+    SimFc dropped;
+    check(dropped.start(err), "start a link-loss target: " + err);
+    check(s.connect(dropped.devicePath(), 115200, err), "connect to the link-loss target");
+    check(spin(dropped, s, 4000, [&] { return s.ready(); }),
+          "link-loss target reaches the CLI prompt");
+    dropped.stop();
+    check(s.send("status"), "queue a command after the peer disappears");
+    const uint64_t lossDeadline = nowMs() + 400;
+    while (nowMs() < lossDeadline && s.connected()) {
+        s.poll(nowMs());
+        sleepMs(4);
+    }
+    check(s.linkLost(), "a failed serial write reports link loss");
+    check(!s.connected(), "a failed serial write closes the dead port");
 }
 
 // A full scrollback is the normal state after a session or two, and it is the
@@ -484,6 +516,17 @@ void testFullScrollback() {
     check(ok, "capture reports success on a full scrollback");
     check(captured.find("batch end") != std::string::npos,
           "the tail of the dump is still captured");
+
+    // A restore response can push the buffer over its cap. Even when that
+    // trims old rows and makes lineCount() shrink, the rejection must still be
+    // counted rather than reported as a successful restore.
+    while (term.lineCount() < 40) term.addLine("old output", LineKind::Fc);
+    check(s.startRestore({"definitely_not_a_betaflight_command"}, "rejected restore"),
+          "rejected restore starts on a full scrollback");
+    check(spin(sim, s, 4000, [&] { return s.job().finished; }),
+          "rejected restore finishes on a full scrollback");
+    check(!s.job().ok, "restore rejection survives scrollback trimming");
+    check(s.job().errorCount == 1, "trimmed restore response counts one rejection");
 
     s.disconnect();
 }

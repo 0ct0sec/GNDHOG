@@ -39,6 +39,10 @@ public:
     void feed(const std::string& bytes);       // raw serial input
     void addLine(const std::string& text, LineKind kind);
     void clear();
+    // Discards an unfinished byte-stream fragment without touching scrollback.
+    // A different serial device must never inherit the previous device's
+    // prompt or half-decoded escape sequence.
+    void resetInputFragment();
 
     size_t lineCount() const { return lines_.size(); }
     // Lines ever pushed. Never reset by trimming or clear(), because a command

@@ -73,6 +73,7 @@ bool Session::connect(const std::string& device, int baud, std::string& error) {
         state_ = SessionState::Failed;
         return false;
     }
+    term_.resetInputFragment();
     linkLost_ = false;
     state_ = SessionState::EnteringCli;
     connectStartMs_ = nowMs();
@@ -221,7 +222,14 @@ void Session::poll(uint64_t now) {
     if (!port_.isOpen()) return;
 
     std::string err;
-    port_.flush(err);
+    if (!port_.flush(err)) {
+        linkLost_ = true;
+        term_.addLine("-- link lost (" + err + ") --", LineKind::Error);
+        port_.close();
+        state_ = SessionState::Disconnected;
+        if (job_.active()) finishJob(false, "Link lost");
+        return;
+    }
 
     std::string incoming;
     const int n = port_.read(incoming);
@@ -235,11 +243,17 @@ void Session::poll(uint64_t now) {
     }
     if (n > 0) {
         lastByteMs_ = now;
-        const size_t before = term_.lineCount();
+        const uint64_t linesBefore = term_.linesEver();
         term_.feed(incoming);
         // Cheap running harvest: every parameter name that scrolls past becomes
         // a completion candidate, so no extra query is ever needed.
-        for (size_t i = before; i < term_.lineCount(); ++i) {
+        // Locate new lines by their monotonic arrival count. lineCount() can
+        // shrink in the same feed when a full scrollback trims old rows.
+        const uint64_t added = term_.linesEver() - linesBefore;
+        const size_t survivingNew = static_cast<size_t>(
+            std::min<uint64_t>(added, static_cast<uint64_t>(term_.lineCount())));
+        const size_t firstNew = term_.lineCount() - survivingNew;
+        for (size_t i = firstNew; i < term_.lineCount(); ++i) {
             const TermLine& l = term_.line(i);
             if (l.text.find('=') != std::string::npos) completer_.harvest(l.text);
             if (job_.kind == JobKind::Restore && isErrorLine(l.text)) ++restoreErrors_;

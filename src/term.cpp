@@ -14,14 +14,18 @@ void Terminal::setWidth(int cols) {
 void Terminal::clear() {
     lines_.clear();
     rows_.clear();
-    partial_.clear();
-    partialKind_ = LineKind::Fc;
-    escape_.clear();
-    inEscape_ = false;
+    resetInputFragment();
     scroll_ = 0;
     follow_ = true;
     capturing_ = false;
     captureFromLine_ = 0;
+}
+
+void Terminal::resetInputFragment() {
+    partial_.clear();
+    partialKind_ = LineKind::Fc;
+    escape_.clear();
+    inEscape_ = false;
 }
 
 void Terminal::appendRowsFor(int lineIndex) {
