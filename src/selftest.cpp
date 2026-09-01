@@ -10,14 +10,18 @@
 #include "simfc.h"
 #include "storage.h"
 #include "term.h"
+#include "thermaltrip.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 
 #if defined(__linux__)
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -40,6 +44,85 @@ void checkEq(const std::string& got, const std::string& want, const std::string&
 }
 
 void section(const char* name) { std::printf("%s\n", name); }
+
+#if defined(__linux__)
+bool fixtureDir(const std::string& path) {
+    return ::mkdir(path.c_str(), 0700) == 0 || errno == EEXIST;
+}
+
+bool fixtureFile(const std::string& path, const std::string& content) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << content;
+    return out.good();
+}
+
+std::string fixtureRead(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    std::string content;
+    std::getline(in, content, '\0');
+    return content;
+}
+
+struct ThermalFixture {
+    ThermalTripPaths paths;
+    std::string root;
+    std::string device = "/dev/ttyACM0";
+    std::string muxPath;
+    std::string railPath;
+    bool ok = false;
+};
+
+ThermalFixture makeThermalFixture(const std::string& branch, bool muxUsb = true,
+                                  bool railOn = true) {
+    static int serial = 0;
+    ThermalFixture f;
+    f.root = "/tmp/bfcli-thermal-selftest-" + std::to_string(::getpid()) + "-" +
+             std::to_string(++serial);
+    f.paths.ttyClass = f.root + "/class/tty";
+    f.paths.ledClass = f.root + "/class/leds";
+    const std::string hub = f.root + "/devices/platform/usb/1-1";
+    const std::string fc = hub + "/1-1." + branch;
+    const std::string iface = fc + "/1-1." + branch + ":1.0";
+    const std::string tty = iface + "/tty/ttyACM0";
+    const std::string ttyClass = f.paths.ttyClass + "/ttyACM0";
+    const std::string muxDir = f.paths.ledClass + "/ext_usb_gpio_fun";
+    const std::string railDir = f.paths.ledClass + "/ext_5v_out";
+    f.muxPath = muxDir + "/brightness";
+    f.railPath = railDir + "/brightness";
+
+    const std::string dirs[] = {
+        f.root,
+        f.root + "/class",
+        f.paths.ttyClass,
+        ttyClass,
+        f.paths.ledClass,
+        muxDir,
+        railDir,
+        f.root + "/devices",
+        f.root + "/devices/platform",
+        f.root + "/devices/platform/usb",
+        hub,
+        fc,
+        iface,
+        iface + "/tty",
+        tty,
+    };
+    for (const std::string& dir : dirs) {
+        if (!fixtureDir(dir)) return f;
+    }
+    if (!fixtureFile(hub + "/idVendor", "05e3\n") ||
+        !fixtureFile(hub + "/idProduct", "0610\n") ||
+        !fixtureFile(fc + "/idVendor", "0483\n") ||
+        !fixtureFile(fc + "/idProduct", "5740\n") ||
+        !fixtureFile(f.muxPath, muxUsb ? "1" : "0") ||
+        !fixtureFile(f.railPath, railOn ? "1" : "0")) {
+        return f;
+    }
+    if (::symlink(tty.c_str(), (ttyClass + "/device").c_str()) != 0) return f;
+    f.ok = true;
+    return f;
+}
+#endif
 
 // ---------------------------------------------------------------- keyboard
 
@@ -506,6 +589,67 @@ void testDiagnostics() {
           "duplicate blocker tokens do not inflate field-check counts or findings");
 }
 
+// ------------------------------------------------------------ thermal trip
+
+void testThermalTrip() {
+    section("thermal trip");
+#if defined(__linux__)
+    ThermalFixture ext = makeThermalFixture("4");
+    check(ext.ok, "synthetic EXT USB4 sysfs fixture is created");
+    if (ext.ok) {
+        ThermalTrip trip(ext.paths);
+        const ThermalTripProbe& probe = trip.inspect(ext.device);
+        check(probe.usbDeviceFound && probe.extUsb4 && probe.usbMuxSelected &&
+                  probe.ext5vOn && probe.ext5vWritable && probe.eligible,
+              "verified GL852G branch 4 plus mux and EXT5V readback qualifies");
+        checkEq(probe.usbIdentity, "0483:5740", "trip binds the FC USB identity");
+        std::string error;
+        check(trip.arm(error), "verified EXT USB4 route arms: " + error);
+        check(trip.cutPower(error), "armed trip cuts the synthetic EXT rail: " + error);
+        check(trip.latched() && !trip.armed(), "successful cutoff latches and consumes its arm");
+        checkEq(fixtureRead(ext.railPath), "0", "cutoff readback is physically represented as off");
+        check(!trip.cutPower(error), "a latched trip cannot write the rail a second time");
+        checkEq(fixtureRead(ext.railPath), "0", "there is no automatic re-enable path");
+    }
+
+    ThermalFixture usbA = makeThermalFixture("2");
+    check(usbA.ok, "synthetic USB-A branch fixture is created");
+    if (usbA.ok) {
+        ThermalTrip trip(usbA.paths);
+        const ThermalTripProbe& probe = trip.inspect(usbA.device);
+        std::string error;
+        check(probe.usbDeviceFound && !probe.extUsb4 && !probe.eligible,
+              "a normal USB-A hub branch remains monitor-only");
+        check(!trip.arm(error), "USB-A cannot arm the EXT rail cutoff");
+        checkEq(fixtureRead(usbA.railPath), "1", "rejecting USB-A does not touch EXT power");
+    }
+
+    ThermalFixture gpioMode = makeThermalFixture("4", false, true);
+    check(gpioMode.ok, "synthetic EXT GPIO-mode fixture is created");
+    if (gpioMode.ok) {
+        ThermalTrip trip(gpioMode.paths);
+        const ThermalTripProbe& probe = trip.inspect(gpioMode.device);
+        check(probe.extUsb4 && !probe.usbMuxSelected && !probe.eligible,
+              "branch 4 cannot qualify while EXT pins report GPIO mode");
+    }
+
+    ThermalFixture changed = makeThermalFixture("4");
+    check(changed.ok, "synthetic route-change fixture is created");
+    if (changed.ok) {
+        ThermalTrip trip(changed.paths);
+        trip.inspect(changed.device);
+        std::string error;
+        check(trip.arm(error), "route-change fixture initially arms: " + error);
+        check(fixtureFile(changed.muxPath, "0"), "test can move EXT selector away from USB");
+        check(!trip.cutPower(error), "trip refuses a route that changed after arming");
+        check(!trip.armed() && !trip.latched(), "failed revalidation consumes the stale arm");
+        checkEq(fixtureRead(changed.railPath), "1", "failed revalidation leaves the rail untouched");
+    }
+#else
+    check(true, "thermal trip is Linux-only");
+#endif
+}
+
 // ----------------------------------------------------------------- storage
 
 void testStorage() {
@@ -791,7 +935,34 @@ int runSelfTest() {
     testCompleter();
     testRiskAndParsing();
     testDiagnostics();
+    testThermalTrip();
     testStorage();
+#if defined(__linux__)
+    {
+        ThermalFixture action = makeThermalFixture("4");
+        check(action.ok, "app-level thermal trip fixture is created");
+        if (action.ok) {
+            App app;
+            app.display_.setHeadlessSize(kScreenW, kScreenH);
+            std::string error;
+            check(app.storage_.init(error), "app-level trip incident storage initializes: " + error);
+            app.thermalTrip_ = ThermalTrip(action.paths);
+            app.thermalTrip_.inspect(action.device);
+            check(app.thermalTrip_.arm(error), "app-level thermal trip arms: " + error);
+            app.performThermalTrip(82);
+            check(app.thermalTrip_.latched() && !app.session_.connected(),
+                  "critical action cuts power and closes serial");
+            check(app.modal_ && app.modalTitle_ == "THERMAL TRIP - EXT 5V OFF" &&
+                      app.modalBody_.find("Why: stop USB-fed bench heating") != std::string::npos &&
+                      app.modalBody_.find("Battery can still power") != std::string::npos &&
+                      app.modalBody_.find("Incident:") != std::string::npos,
+                  "trip notice tells the operator what happened, why, and what remains powered");
+            checkEq(fixtureRead(action.railPath), "0", "app-level trip leaves EXT 5V off");
+            app.render();
+            check(app.display_.surface().valid(), "thermal-trip incident notice renders offscreen");
+        }
+    }
+#endif
     testGraphics();
     section("brand and About");
     checkEq(kAppName, "GNDHOG ZERO", "final project name");

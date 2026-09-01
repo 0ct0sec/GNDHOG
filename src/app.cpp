@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <sstream>
 #include <poll.h>
 #include <unistd.h>
 
@@ -225,11 +226,7 @@ bool App::setup(const Options& opt, std::string& error) {
     } else if (!opt_.portOverride.empty()) {
         std::string cerr;
         if (session_.connect(opt_.portOverride, opt_.baud, cerr)) {
-            nextTemperatureCheckMs_ = nowMs();
-            temperatureMonitorStarted_ = false;
-            temperatureAlarmLevel_ = 0;
-            temperatureWarningPending_ = false;
-            temperatureWarningC_ = 0;
+            beginConnectionSafety(opt_.portOverride);
             setScreen(Screen::Terminal);
         } else {
             pushLocal("connect failed: " + cerr, LineKind::Error);
@@ -266,6 +263,25 @@ void App::refreshFiles() {
     dirty_ = true;
 }
 
+void App::beginConnectionSafety(const std::string& device) {
+    nextTemperatureCheckMs_ = nowMs();
+    temperatureMonitorStarted_ = false;
+    temperatureAlarmLevel_ = 0;
+    temperatureWarningPending_ = false;
+    temperatureWarningC_ = 0;
+    lastTemperatureSequence_ = session_.coreTemperatureSequence();
+    thermalTripAttempted_ = false;
+
+    const ThermalTripProbe& probe = thermalTrip_.inspect(device);
+    thermalTripPromptPending_ = probe.eligible;
+    if (probe.eligible) {
+        pushLocal("-- verified EXT USB4 and switched EXT 5V; thermal trip can be armed --",
+                  LineKind::Good);
+    } else if (probe.usbDeviceFound) {
+        pushLocal("-- temperature watch only: " + probe.reason + " --", LineKind::Warn);
+    }
+}
+
 void App::connectSelected() {
     if (ports_.empty()) return;
     const PortInfo& p = ports_[static_cast<size_t>(portList_.sel)];
@@ -286,12 +302,98 @@ void App::connectSelected() {
         notice("Could not open port", err);
         return;
     }
-    nextTemperatureCheckMs_ = nowMs();
-    temperatureMonitorStarted_ = false;
-    temperatureAlarmLevel_ = 0;
+    beginConnectionSafety(p.device);
+    setScreen(Screen::Terminal);
+}
+
+void App::performThermalTrip(int temperatureC) {
+    thermalTripAttempted_ = true;
     temperatureWarningPending_ = false;
     temperatureWarningC_ = 0;
+    nextTemperatureCheckMs_ = 0;
+
+    const ThermalTripProbe before = thermalTrip_.probe();
+    const bool pitWasActive = session_.vtxBenchGuardActive();
+    const std::string stamp = timestampCompact();
+    const std::string name = "GNDHOG_thermal_trip_" + stamp + ".txt";
+    const std::string path = storage_.diagnosticDir() + "/" + name;
+
+    auto incidentBody = [&](const std::string& result) {
+        std::ostringstream out;
+        out << "GNDHOG ZERO THERMAL TRIP INCIDENT\n"
+            << "recorded: " << stamp << "\n"
+            << "trigger: fresh Betaflight FC MCU core sample >= 80 C\n"
+            << "sample: " << temperatureC << " C\n"
+            << "serial device: " << before.device << "\n"
+            << "USB identity: " << before.usbIdentity << "\n"
+            << "USB node: " << before.usbNode << "\n"
+            << "route: internal GL852G branch 4 / EXT USB4\n"
+            << "selector readback: USB\n"
+            << "EXT 5V before trip: on\n"
+            << "result: " << result << "\n"
+            << "serial action: close without VTX restore\n"
+            << "warning: battery power is separate and may keep the stack energized\n"
+            << "warning: no automatic rail re-enable is performed\n";
+        if (pitWasActive) {
+            out << "VTX guard: pit mode was active; emergency power cutoff took priority\n";
+        }
+        return out.str();
+    };
+
+    std::string recordError;
+    const bool preRecorded = storage_.writeAtomic(path, incidentBody("cut requested"), recordError);
+
+    std::string cutError;
+    const bool cut = thermalTrip_.cutPower(cutError);
+    std::string finalRecordError;
+    const std::string result = cut ? "EXT 5V cut and read back off"
+                                   : "POWER CUT FAILED: " + cutError;
+    const bool finalRecorded = storage_.writeAtomic(path, incidentBody(result), finalRecordError);
+
+    diagnosticRunning_ = false;
+    session_.disconnect();
     setScreen(Screen::Terminal);
+    status_ = cut ? "thermal trip latched - EXT 5V is off"
+                  : "POWER CUT FAILED - unplug FC now";
+    statusUntil_ = nowMs() + 12000;
+
+    std::string recordNote;
+    if (finalRecorded) {
+        recordNote = "\n\nIncident: " + name;
+        pushLocal("-- thermal incident: " + path + " --", LineKind::Local);
+    } else if (preRecorded) {
+        recordNote = "\n\nIncident (pre-cut record): " + name;
+        pushLocal("-- thermal incident final update failed: " + finalRecordError + " --",
+                  LineKind::Warn);
+    } else {
+        const std::string& why = finalRecordError.empty() ? recordError : finalRecordError;
+        recordNote = "\n\nIncident write failed: " + why;
+    }
+
+    if (cut) {
+        pushLocal("-- THERMAL TRIP: EXT 5V cut, read back OFF, serial closed --",
+                  LineKind::Error);
+        notice("THERMAL TRIP - EXT 5V OFF",
+               "FC MCU " + std::to_string(temperatureC) +
+                   "C: GNDHOG cut verified EXT USB4 5 V, read it OFF, and closed serial.\n"
+                   "Why: stop USB-fed bench heating.\n"
+                   "Battery can still power the stack. Unplug FC and battery now.\n"
+                   "Rail stays off. Do not exit or reboot before unplugging; launcher may "
+                   "restore it." +
+                   recordNote);
+        if (pitWasActive) {
+            pushLocal("-- VTX restore skipped; thermal cutoff took priority --", LineKind::Warn);
+        }
+    } else {
+        pushLocal("-- POWER CUT FAILED: " + cutError + " --", LineKind::Error);
+        notice("POWER CUT FAILED - UNPLUG NOW",
+               "FC MCU " + std::to_string(temperatureC) +
+                   "C: GNDHOG could not verify EXT 5 V OFF.\n"
+                   "Cut error: " + cutError +
+                   "\nSerial closed, but power stays on. UNPLUG FC USB AND BATTERY NOW." +
+                   recordNote);
+    }
+    dirty_ = true;
 }
 
 void App::finishDisconnect(bool exitAfter) {
@@ -303,6 +405,9 @@ void App::finishDisconnect(bool exitAfter) {
     temperatureAlarmLevel_ = 0;
     temperatureWarningPending_ = false;
     temperatureWarningC_ = 0;
+    thermalTrip_.reset();
+    thermalTripPromptPending_ = false;
+    thermalTripAttempted_ = false;
     refreshPorts();
     if (exitAfter) running_ = false;
     else setScreen(Screen::Ports);
@@ -966,8 +1071,37 @@ void App::tick(uint64_t now) {
                 [this]() { session_.skipVtxBenchGuard(); });
     }
 
+    if (thermalTripPromptPending_ && session_.ready() && !modal_) {
+        thermalTripPromptPending_ = false;
+        confirm("Arm EXT thermal trip?",
+                "Verified: this FC is on EXT USB4 with switched EXT 5 V.\n"
+                "Arm a one-shot 80C trip? It records an incident, cuts and verifies EXT 5 V "
+                "off, then closes serial without another prompt.\n"
+                "Battery power is separate. There is no automatic re-enable.",
+                "Arm trip",
+                [this]() {
+                    std::string error;
+                    if (!thermalTrip_.arm(error)) {
+                        pushLocal("-- thermal trip not armed: " + error + " --", LineKind::Error);
+                        notice("Thermal trip unavailable",
+                               error + "\n\nTemperature watch remains warning-only. Unplug USB and "
+                                       "battery manually if the stack gets hot.");
+                        return;
+                    }
+                    pushLocal("-- EXT USB4 thermal trip ARMED at 80C --", LineKind::Good);
+                    status_ = "EXT USB4 thermal trip armed at 80C";
+                    statusUntil_ = nowMs() + 6000;
+                },
+                [this]() {
+                    thermalTrip_.decline();
+                    pushLocal("-- EXT cutoff declined; temperature watch is warning-only --",
+                              LineKind::Warn);
+                });
+    }
+
     if (nextTemperatureCheckMs_ != 0 && now >= nextTemperatureCheckMs_ &&
-        session_.ready() && !session_.job().active()) {
+        session_.ready() && !session_.job().active() && !modal_ &&
+        !thermalTripPromptPending_) {
         nextTemperatureCheckMs_ = now + kTemperatureCheckIntervalMs;
         if (!temperatureMonitorStarted_) {
             temperatureMonitorStarted_ = true;
@@ -1017,15 +1151,21 @@ void App::tick(uint64_t now) {
             temperatureAlarmLevel_ = 0;
         }
         dirty_ = true;
+        if (temperatureC >= 80 && thermalTrip_.armed() && !thermalTripAttempted_) {
+            performThermalTrip(temperatureC);
+            return;
+        }
     }
 
     if (temperatureWarningPending_ && !modal_) {
         temperatureWarningPending_ = false;
         const int temperatureC = temperatureWarningC_;
         temperatureWarningC_ = 0;
-        notice(temperatureC >= 80 ? "CRITICAL FC TEMPERATURE" : "FC temperature warning",
+        const bool critical = temperatureC >= 80;
+        notice(critical ? "CRITICAL FC TEMPERATURE" : "FC temperature warning",
                "FC MCU core is " + std::to_string(temperatureC) +
-                   "C. Betaflight's default alarm is 70C.\n\n"
+                   "C. Betaflight's default alarm is 70C.\n\n" +
+                   (critical ? "Automatic cutoff is not armed for this connection. " : "") +
                    "This is not a VTX temperature sensor. Stop bench work, unplug FC USB and "
                    "battery power, and let the stack cool. Closing the serial link does not "
                    "remove USB power.");
@@ -1172,11 +1312,7 @@ int App::run(const Options& opt) {
         std::string cerr;
         pushLocal("simulated flight controller on " + sim.devicePath(), LineKind::Local);
         session_.connect(sim.devicePath(), 115200, cerr);
-        nextTemperatureCheckMs_ = nowMs();
-        temperatureMonitorStarted_ = false;
-        temperatureAlarmLevel_ = 0;
-        temperatureWarningPending_ = false;
-        temperatureWarningC_ = 0;
+        beginConnectionSafety(sim.devicePath());
         setScreen(Screen::Terminal);
     }
 

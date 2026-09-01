@@ -8,6 +8,7 @@
 #include "serialport.h"
 #include "storage.h"
 #include "term.h"
+#include "thermaltrip.h"
 
 #include <functional>
 #include <string>
@@ -109,6 +110,8 @@ private:
     // ---- actions
     void refreshPorts();
     void connectSelected();
+    void beginConnectionSafety(const std::string& device);
+    void performThermalTrip(int temperatureC);
     void requestDisconnect(bool exitAfter = false);
     void finishDisconnect(bool exitAfter = false);
     void submitLine();
@@ -148,6 +151,7 @@ private:
     Completer completer_;
     LineEditor editor_;
     Session session_{term_, completer_};
+    ThermalTrip thermalTrip_;
 
     Screen screen_ = Screen::Ports;
     Screen returnScreen_ = Screen::Terminal;
@@ -200,6 +204,8 @@ private:
     bool temperatureWarningPending_ = false;
     int temperatureWarningC_ = 0;
     uint64_t lastTemperatureSequence_ = 0;
+    bool thermalTripPromptPending_ = false;
+    bool thermalTripAttempted_ = false;
     bool disconnectAfterVtxRestore_ = false;
     bool exitAfterVtxRestore_ = false;
 };

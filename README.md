@@ -183,10 +183,26 @@ hardware it is useful nearby heat evidence, not a measurement of the
 transmitter die. A target that does not report core temperature is sampled
 once, marked unavailable, and not polled repeatedly.
 
-Closing the serial link does **not** remove the USB 5 V supply. If the stack is
-hot, unplug the FC's USB lead and any battery supply. Software-controlled USB
-port power is only safe after the exact external hub port and real VBUS cutoff
-have been verified on the hardware; GNDHOG does not guess either one.
+The normal USB-A connection remains warning-only: closing its serial device does
+**not** remove USB 5 V, and Cardputer Zero does not expose that connector's VBUS
+as a switchable launcher rail. If the stack is hot, unplug the FC's USB lead and
+any battery supply.
+
+A one-shot **EXT thermal trip** is offered only for a deliberately commissioned
+EXT USB adapter. GNDHOG must prove all of these facts from current kernel
+readback before the arm prompt appears: the selected FC belongs to the internal
+`05e3:0610` hub's USB4 branch, the EXT selector reports USB rather than GPIO,
+the switched `ext_5v_out` rail is on, and this process can write it. GNDHOG does
+not reroute the EXT pins or energize the rail to manufacture eligibility.
+
+If the operator arms that trip, a fresh 80 C-or-higher MCU sample first writes
+an incident under `~/.local/share/bfcli/diagnostics`, then requests EXT 5 V off,
+verifies an off readback, and closes serial. The notice states what happened and
+why. A failed write/readback instead says **POWER CUT FAILED — UNPLUG NOW**.
+Neither result pretends that an attached battery was removed. The cutoff is
+latched with no automatic re-enable; physically disconnect the FC and battery
+before exiting or rebooting because APPLaunch can restore its saved EXT rail
+state when it starts again.
 
 ## Field check
 
