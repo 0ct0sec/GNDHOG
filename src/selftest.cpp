@@ -517,6 +517,19 @@ int runSelfTest() {
         check(!app.session_.connected(), "About does not connect a flight controller");
         app.render();
         Surface s = app.display_.surface();
+        bool frameless = true;
+        for (int y = 0; y < kMascotSize; ++y) {
+            for (int x = 0; x < kMascotSize; ++x) {
+                const bool outerEdge = x < 5 || x >= kMascotSize - 5 ||
+                                       y < 5 || y >= kMascotSize - 5;
+                const bool corner = (x < 14 || x >= kMascotSize - 14) &&
+                                    (y < 14 || y >= kMascotSize - 14);
+                if (!outerEdge && !corner) continue;
+                const int bit = y * kMascotSize + x;
+                frameless &= (kMascotBits[bit / 8] & (0x80u >> (bit % 8))) != 0;
+            }
+        }
+        check(frameless, "mascot has no surrounding badge frame");
         bool identical = true;
         for (int y = 0; y < kMascotSize; ++y) {
             for (int x = 0; x < kMascotSize; ++x) {
