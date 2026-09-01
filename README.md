@@ -80,8 +80,9 @@ loop at 30 fps runs the whole suspiciously small department.
   This administrative conflict has been settled below.
 - **Fighter-HUD sound cues.** Short synthesized chirps mark navigation,
   selections, FC link state, completed work, and alarms. GNDHOG targets the
-  built-in `ES8388Audio`/`ES8389Audio` ALSA card by name instead of Linux's
-  HDMI default, and falls back to silence if that exact device is absent.
+  built-in `ES8388Audio`/`ES8389Audio` card through its named PipeWire/Pulse
+  sink instead of Linux's HDMI default, and falls back to an exact-card ALSA
+  route when the session server is absent.
 - **Offline About screen.** Open **Menu → About GNDHOG ZERO**, or press **A**
   on the port picker, for the mascot, author, source commit, and abbreviated
   crash report. Enter or Escape returns to the previous screen. No FC is
@@ -164,12 +165,14 @@ bounded startup cue at 70% and exits with a failure if discovery, mixer setup,
 PCM output, or drain does not complete.
 
 On Cardputer Zero, HDMI is commonly ALSA card 0 and the built-in speaker codec
-is card 1. GNDHOG therefore opens `hw:ES8389Audio,0` (or the earlier
-`ES8388Audio` identity) explicitly. The output worker never stalls the UI, caps
-the codec playback controls at their 0 dB point, bounds synthesized PCM, and
-collapses repeated navigation chirps. Critical temperature and link-loss cues
-clear less important queued sounds so the warning is not waiting behind a
-thumb-operated sonata.
+is card 1. GNDHOG therefore targets the vendor session sink
+`alsa_output.platform-sound.stereo-fallback` while PipeWire is running. Outside
+that session it opens `default:CARD=ES8389Audio` (or the earlier `ES8388Audio`
+identity) explicitly. Neither path uses generic default audio. The output
+worker never stalls the UI, caps the codec playback controls at their 0 dB
+point, bounds synthesized PCM, and collapses repeated navigation chirps.
+Critical temperature and link-loss cues clear less important queued sounds so
+the warning is not waiting behind a thumb-operated sonata.
 
 If the menu reports a silent fallback, check `cat /proc/asound/cards` for the
 exact codec, confirm the launcher user belongs to `audio`, and inspect

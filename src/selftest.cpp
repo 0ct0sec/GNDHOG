@@ -175,8 +175,10 @@ void testAudio() {
           "audio discovery fixture describes HDMI and ES8389 playback");
     const AudioDeviceInfo exact = discoverCardputerZeroAudio(proc, dev);
     check(exact.cardPresent && exact.playbackPresent && exact.cardNumber == 1 &&
-              exact.cardId == "ES8389Audio" && exact.pcmName == "hw:ES8389Audio,0",
-          "audio discovery selects the exact ES8389 card instead of HDMI card 0");
+              exact.cardId == "ES8389Audio" &&
+              exact.pcmName == "default:CARD=ES8389Audio" &&
+              exact.pulseSinkName == "alsa_output.platform-sound.stereo-fallback",
+          "audio discovery selects exact ES8389 session and ALSA routes instead of HDMI");
     check(exact.mixerElements.size() == 2 && exact.mixerElements[0] == "DACL" &&
                exact.mixerElements[1] == "DACR",
           "ES8389 playback requires both DAC mixer channels");
@@ -191,7 +193,7 @@ void testAudio() {
     const AudioDeviceInfo fallback = discoverCardputerZeroAudio(proc, dev);
     check(fallback.cardPresent && fallback.playbackPresent && fallback.cardNumber == 2 &&
               fallback.playbackDevice == 1 && fallback.pcmName == "hw:ES8389Audio,1",
-          "audio discovery skips an unusable exact card and malformed PCM node");
+          "audio discovery keeps an explicit route for a nonzero codec PCM");
     check(fixtureFile(proc + "/cards",
                       " 0 [vc4hdmi        ]: vc4-hdmi - vc4-hdmi\n") &&
               !discoverCardputerZeroAudio(proc, dev).cardPresent,

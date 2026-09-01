@@ -1,4 +1,5 @@
 #include "audio.h"
+#include "brand.h"
 
 #include <algorithm>
 #include <atomic>
@@ -133,14 +134,23 @@ AudioDeviceInfo discoverCardputerZeroAudio(const std::string& procAsoundRoot,
         candidate.cardId = id;
         candidate.cardName = name;
         candidate.mixerName = "hw:" + id;
+        // Stable vendor PipeWire/Pulse node for the platform-sound codec. It
+        // is named explicitly so session mixing can never drift to HDMI.
+        candidate.pulseSinkName = "alsa_output.platform-sound.stereo-fallback";
         candidate.mixerElements = isEs8389(id, name)
                                       ? std::vector<std::string>{"DACL", "DACR"}
                                       : std::vector<std::string>{"Headphone"};
         candidate.playbackDevice = firstPlaybackDevice(devSndRoot, number);
         candidate.playbackPresent = candidate.playbackDevice >= 0;
         if (candidate.playbackPresent) {
-            candidate.pcmName = candidate.mixerName + "," +
-                                std::to_string(candidate.playbackDevice);
+            // The vendor PipeWire session owns the codec's direct hw PCM even
+            // while no application is making sound. ALSA's card-qualified
+            // default is the exact-codec shared route on Cardputer Zero; the
+            // unqualified `default` may point at HDMI or fail outright.
+            candidate.pcmName = candidate.playbackDevice == 0
+                                    ? "default:CARD=" + id
+                                    : candidate.mixerName + "," +
+                                          std::to_string(candidate.playbackDevice);
             return candidate;
         }
         if (!fallback.cardPresent) fallback = std::move(candidate);
@@ -201,8 +211,84 @@ struct Audio::Impl {
     std::thread worker;
     mutable std::mutex errorMutex;
     std::string error;
+    bool pulseReady = false;
 
 #if defined(__linux__)
+    struct PulseApi {
+        struct Simple;
+        struct SampleSpec {
+            int format;
+            std::uint32_t rate;
+            std::uint8_t channels;
+        };
+
+        void* simpleLibrary = nullptr;
+        void* pulseLibrary = nullptr;
+        bool ready = false;
+        Simple* (*simpleNew)(const char*, const char*, int, const char*, const char*,
+                             const SampleSpec*, const void*, const void*, int*) = nullptr;
+        int (*simpleWrite)(Simple*, const void*, std::size_t, int*) = nullptr;
+        int (*simpleDrain)(Simple*, int*) = nullptr;
+        int (*simpleFlush)(Simple*, int*) = nullptr;
+        void (*simpleFree)(Simple*) = nullptr;
+        const char* (*errorText)(int) = nullptr;
+
+        template <typename Function>
+        bool symbol(void* library, Function& target, const char* name) {
+            target = reinterpret_cast<Function>(dlsym(library, name));
+            return target != nullptr;
+        }
+
+        bool load() {
+            if (ready) return true;
+            if (simpleLibrary != nullptr) dlclose(simpleLibrary);
+            if (pulseLibrary != nullptr) dlclose(pulseLibrary);
+            simpleLibrary = dlopen("libpulse-simple.so.0", RTLD_NOW | RTLD_LOCAL);
+            pulseLibrary = dlopen("libpulse.so.0", RTLD_NOW | RTLD_LOCAL);
+            ready = simpleLibrary != nullptr && pulseLibrary != nullptr &&
+                    symbol(simpleLibrary, simpleNew, "pa_simple_new") &&
+                    symbol(simpleLibrary, simpleWrite, "pa_simple_write") &&
+                    symbol(simpleLibrary, simpleDrain, "pa_simple_drain") &&
+                    symbol(simpleLibrary, simpleFlush, "pa_simple_flush") &&
+                    symbol(simpleLibrary, simpleFree, "pa_simple_free") &&
+                    symbol(pulseLibrary, errorText, "pa_strerror");
+            if (!ready) {
+                if (simpleLibrary != nullptr) dlclose(simpleLibrary);
+                if (pulseLibrary != nullptr) dlclose(pulseLibrary);
+                simpleLibrary = nullptr;
+                pulseLibrary = nullptr;
+            }
+            return ready;
+        }
+
+        std::string describe(int code) const {
+            const char* text = errorText == nullptr ? nullptr : errorText(code);
+            return text == nullptr ? std::to_string(code) : std::string(text);
+        }
+
+        Simple* open(const std::string& sink, const char* streamName, int& error) const {
+            constexpr int kPlayback = 1;  // PA_STREAM_PLAYBACK
+            constexpr int kS16Le = 3;     // PA_SAMPLE_S16LE
+            const SampleSpec spec{kS16Le, kSampleRate,
+                                  static_cast<std::uint8_t>(kChannels)};
+            return simpleNew(nullptr, kAppName, kPlayback, sink.c_str(), streamName,
+                             &spec, nullptr, nullptr, &error);
+        }
+
+        bool probe(const std::string& sink) const {
+            int error = 0;
+            Simple* stream = open(sink, "HUD route probe", error);
+            if (stream == nullptr) return false;
+            simpleFree(stream);
+            return true;
+        }
+
+        ~PulseApi() {
+            if (simpleLibrary != nullptr) dlclose(simpleLibrary);
+            if (pulseLibrary != nullptr) dlclose(pulseLibrary);
+        }
+    } pulse;
+
     struct AlsaApi {
         struct Pcm;
         struct Mixer;
@@ -353,12 +439,26 @@ struct Audio::Impl {
         return true;
     }
 
-    void playOne(HudCue cue) {
-        if (!isAvailable.load() || !isEnabled.load() || stopping.load()) return;
-        const int percent = volumePercent.load();
-        if (percent <= 0 || !applyMixerVolume(percent)) return;
-        if (!isAvailable.load() || !isEnabled.load() || stopping.load()) return;
-        const std::vector<std::int16_t> pcm = synthesizeHudCue(cue);
+    void playOnePulse(const std::vector<std::int16_t>& pcm) {
+        int error = 0;
+        PulseApi::Simple* stream = pulse.open(device.pulseSinkName, "HUD cue", error);
+        if (stream == nullptr) {
+            fail("cannot open exact PipeWire/Pulse sink " + device.pulseSinkName +
+                 ": " + pulse.describe(error));
+            return;
+        }
+        const std::size_t bytes = pcm.size() * sizeof(std::int16_t);
+        if (pulse.simpleWrite(stream, pcm.data(), bytes, &error) < 0) {
+            fail(device.cardId + " session playback failed: " + pulse.describe(error));
+        } else if (stopping.load() || !isEnabled.load()) {
+            pulse.simpleFlush(stream, &error);
+        } else if (pulse.simpleDrain(stream, &error) < 0) {
+            fail(device.cardId + " session drain failed: " + pulse.describe(error));
+        }
+        pulse.simpleFree(stream);
+    }
+
+    void playOneAlsa(const std::vector<std::int16_t>& pcm) {
         AlsaApi::Pcm* handle = nullptr;
         int code = alsa.pcmOpen(&handle, device.pcmName.c_str(), kPcmPlayback, kPcmNonblock);
         if (code < 0 || handle == nullptr) {
@@ -425,6 +525,16 @@ struct Audio::Impl {
         }
         alsa.pcmClose(handle);
     }
+
+    void playOne(HudCue cue) {
+        if (!isAvailable.load() || !isEnabled.load() || stopping.load()) return;
+        const int percent = volumePercent.load();
+        if (percent <= 0 || !applyMixerVolume(percent)) return;
+        if (!isAvailable.load() || !isEnabled.load() || stopping.load()) return;
+        const std::vector<std::int16_t> pcm = synthesizeHudCue(cue);
+        if (pulseReady) playOnePulse(pcm);
+        else playOneAlsa(pcm);
+    }
 #endif
 
     void run() {
@@ -460,6 +570,7 @@ bool Audio::start(const std::string& procAsoundRoot, const std::string& devSndRo
     impl_->device = discoverCardputerZeroAudio(procAsoundRoot, devSndRoot);
     impl_->backend = "silent";
     impl_->stopping.store(false);
+    impl_->pulseReady = false;
 #if defined(__linux__)
     if (!impl_->device.cardPresent || !impl_->device.playbackPresent) {
         impl_->setError("Cardputer Zero ES8388/ES8389 playback was not found");
@@ -472,9 +583,12 @@ bool Audio::start(const std::string& procAsoundRoot, const std::string& devSndRo
         impl_->setError("libasound.so.2 is unavailable");
         return false;
     }
-    impl_->backend = isEs8389(impl_->device.cardId, impl_->device.cardName)
-                         ? "alsa-es8389"
-                         : "alsa-es8388";
+    impl_->pulseReady = impl_->pulse.load() &&
+                        impl_->pulse.probe(impl_->device.pulseSinkName);
+    const std::string codec = isEs8389(impl_->device.cardId, impl_->device.cardName)
+                                  ? "es8389"
+                                  : "es8388";
+    impl_->backend = (impl_->pulseReady ? "pulse-" : "alsa-") + codec;
     impl_->isAvailable.store(true);
     impl_->worker = std::thread([this] { impl_->run(); });
     return true;

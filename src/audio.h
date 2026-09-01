@@ -31,6 +31,7 @@ struct AudioDeviceInfo {
     std::string cardName;
     std::string pcmName;
     std::string mixerName;
+    std::string pulseSinkName;
     std::vector<std::string> mixerElements;
 };
 
