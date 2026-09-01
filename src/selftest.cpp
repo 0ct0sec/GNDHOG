@@ -410,10 +410,10 @@ void testDiagnostics() {
         "MCU G473 Clock=168MHz, Vref=3.30V, Core temp=41degC\n"
         "STACK: 2048b (0x20020000) / 740b\n"
         "CONFIG: CONFIGURED (4012b / 32768b)\n"
-        "DEVICES DETECTED: SPI=2, I2C=1 (0 errors)\n"
-        "GYRO: (1) ICM42688P enabled locked dma\n"
+        "DEVICES DETECTED: GYRO: (1) ICM42688P enabled locked dma "
+        "ACC: ICM42688P BARO: DPS310 I2C=1 (0 errors)\n"
         "GPS: NOT ENABLED\n"
-        "CPU:37%, cycle time: 125, GYRO rate: 8000, RX rate: 250, System rate: 10\n"
+        "Cpu:37%, Cycle Time: 125, gyro RATE: 8000, rx Rate: 250, System rate: 10\n"
         "Voltage: 16.42V (4S battery - OK)\n"
         "Arming disable flags: CLI MSP\n";
     const std::string modernTasks =
@@ -431,6 +431,21 @@ void testDiagnostics() {
     check(report.findings.size() >= 6, "health report covers arming, gyro, RX, battery, bus, runtime, and firmware");
     check(report.coreTemperatureAvailable && report.coreTemperatureC == 41,
           "status exposes the FC MCU core temperature without calling it VTX temperature");
+    bool inlineGyro = false;
+    bool tolerantRuntime = false;
+    for (const DiagnosticFinding& finding : report.findings) {
+        if (finding.title == "Gyro" && finding.level == DiagnosticLevel::Pass &&
+            finding.detail.find("ICM42688P") != std::string::npos &&
+            finding.detail.find("ACC:") == std::string::npos) {
+            inlineGyro = true;
+        }
+        if (finding.title == "Runtime" && finding.detail.find("125us loop") != std::string::npos &&
+            finding.detail.find("8000Hz gyro") != std::string::npos) {
+            tolerantRuntime = true;
+        }
+    }
+    check(inlineGyro, "current inline device inventory yields a bounded gyro finding");
+    check(tolerantRuntime, "runtime labels are parsed without depending on capitalization");
     int parsedTemperature = 0;
     check(parseCoreTemperatureC("MCU H743, Core Temp: 70.4 degC", parsedTemperature) &&
               parsedTemperature == 70,
@@ -471,9 +486,24 @@ void testDiagnostics() {
         report, modernStatus, "Unknown command, try 'help'\n", "");
     check(saved.find("not an airworthiness verdict") != std::string::npos,
           "saved report states its evidence boundary");
+    check(saved.find("# Queries: status=ok, tasks=unavailable, version=unavailable") !=
+              std::string::npos,
+          "saved report identifies exactly which query evidence is unavailable");
     check(saved.find("# --- status (raw) ---") != std::string::npos &&
               saved.find("Arming disable flags: CLI MSP") != std::string::npos,
           "saved report preserves the raw FC evidence");
+
+    const std::string duplicateFlags =
+        "Gyros detected: gyro 1 locked\n"
+        "Voltage: 0.00V (0S battery - NOT PRESENT)\n"
+        "Arming disable flags: RXLOSS RXLOSS CLI MSP\n";
+    report = buildDiagnosticReport(duplicateFlags, modernTasks, modernVersion);
+    int rxLossFindings = 0;
+    for (const DiagnosticFinding& finding : report.findings) {
+        if (finding.title == "ARM RXLOSS") ++rxLossFindings;
+    }
+    check(report.actionableBlockerCount() == 1 && rxLossFindings == 1,
+          "duplicate blocker tokens do not inflate field-check counts or findings");
 }
 
 // ----------------------------------------------------------------- storage

@@ -40,13 +40,15 @@ bool commandFailed(const std::string& text) {
 }
 
 bool numberAfter(const std::string& text, const std::string& marker, double& value) {
-    const size_t found = text.find(marker);
+    const std::string foldedText = upper(text);
+    const std::string foldedMarker = upper(marker);
+    const size_t found = foldedText.find(foldedMarker);
     if (found == std::string::npos) return false;
     const char* p = text.c_str() + found + marker.size();
     while (*p && std::isspace(static_cast<unsigned char>(*p))) ++p;
     char* end = nullptr;
     const double parsed = std::strtod(p, &end);
-    if (end == p) return false;
+    if (end == p || !std::isfinite(parsed)) return false;
     value = parsed;
     return true;
 }
@@ -59,10 +61,37 @@ std::string compactNumber(double value, int decimals = 0) {
 
 std::vector<std::string> words(const std::string& text) {
     std::vector<std::string> out;
+    std::set<std::string> seen;
     std::istringstream in(text);
     std::string word;
-    while (in >> word) out.push_back(upper(word));
+    while (in >> word) {
+        word = upper(word);
+        if (seen.insert(word).second) out.push_back(word);
+    }
     return out;
+}
+
+std::string valueAfterLabel(const std::string& text, const std::string& label,
+                            const std::vector<std::string>& followingLabels) {
+    const std::string folded = upper(text);
+    const size_t labelAt = folded.find(upper(label));
+    if (labelAt == std::string::npos) return {};
+
+    const size_t valueAt = labelAt + label.size();
+    size_t valueEnd = text.size();
+    for (const std::string& following : followingLabels) {
+        const size_t found = folded.find(upper(following), valueAt);
+        if (found != std::string::npos) valueEnd = std::min(valueEnd, found);
+    }
+    std::string value = trim(text.substr(valueAt, valueEnd - valueAt));
+    while (!value.empty() && (value.back() == ',' || value.back() == ';')) value.pop_back();
+    return trim(value);
+}
+
+bool gyroDetailIsPresent(const std::string& detail) {
+    const std::string folded = upper(detail);
+    return !detail.empty() && folded != "NONE" &&
+           folded.find("NOT DETECTED") == std::string::npos;
 }
 
 bool hasFlag(const std::vector<std::string>& flags, const std::string& wanted) {
@@ -176,23 +205,20 @@ StatusEvidence parseStatus(const std::string& text, DiagnosticReport& report) {
         } else if (startsWith(u, "GYROS DETECTED:")) {
             e.gyroSeen = true;
             e.gyroDetail = trim(t.substr(t.find(':') + 1));
-            const std::string detailUpper = upper(e.gyroDetail);
-            e.gyroPresent = detailUpper.find("NONE") == std::string::npos &&
-                            detailUpper.find("NOT DETECTED") == std::string::npos &&
-                            !e.gyroDetail.empty();
-        } else if (startsWith(u, "GYRO:")) {
+            e.gyroPresent = gyroDetailIsPresent(e.gyroDetail);
+        } else if (!e.gyroSeen && u.find("GYRO:") != std::string::npos) {
+            // Current Betaflight can put the gyro inventory on the shared
+            // `DEVICES DETECTED:` line before ACC/BARO/MAG fields.
+            e.gyroDetail = valueAfterLabel(
+                t, "GYRO:", {"ACC:", "BARO:", "MAG:", "RANGEFINDER:", "OSD:"});
             e.gyroSeen = true;
-            e.gyroDetail = trim(t.substr(t.find(':') + 1));
-            const std::string detailUpper = upper(e.gyroDetail);
-            e.gyroPresent = detailUpper.find("NONE") == std::string::npos &&
-                            detailUpper.find("NOT DETECTED") == std::string::npos &&
-                            !e.gyroDetail.empty();
+            e.gyroPresent = gyroDetailIsPresent(e.gyroDetail);
         } else if (!e.gyroSeen && u.find("GYRO=") != std::string::npos) {
             const size_t start = u.find("GYRO=") + 5;
             const size_t end = t.find(',', start);
             e.gyroDetail = trim(t.substr(start, end == std::string::npos ? end : end - start));
             e.gyroSeen = true;
-            e.gyroPresent = !e.gyroDetail.empty() && upper(e.gyroDetail) != "NONE";
+            e.gyroPresent = gyroDetailIsPresent(e.gyroDetail);
         }
 
         if (startsWith(u, "VOLTAGE:")) {
@@ -479,8 +505,11 @@ std::string formatDiagnosticReport(const DiagnosticReport& report,
     std::ostringstream out;
     out << "# GNDHOG ZERO FIELD CHECK\n"
         << "# Summary: " << summary << "\n"
-        << "# Evidence: CLI status, tasks, and version; no configuration writes\n"
-        << "# Note: Betaflight tasks resets transient max-time statistics after printing.\n"
+        << "# Queries: status=" << (report.statusAvailable ? "ok" : "unavailable")
+        << ", tasks=" << (report.tasksAvailable ? "ok" : "unavailable")
+        << ", version=" << (report.versionAvailable ? "ok" : "unavailable") << "\n"
+        << "# Evidence: captured CLI responses follow; no configuration writes\n"
+        << "# Note: Betaflight's tasks command resets transient max-time statistics after printing.\n"
         << "# This is not an airworthiness verdict. Inspect the craft props-off.\n"
         << "#\n";
     for (const DiagnosticFinding& finding : report.findings) {

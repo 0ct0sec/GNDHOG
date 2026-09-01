@@ -430,26 +430,38 @@ void App::drawDiagnostics(Surface& s) {
     hLine(s, 0, kBodyY + summaryH - 1, s.w, theme::rule);
 
     std::string summary;
+    std::string summaryCount;
     Color summaryColor = theme::accent;
     if (diagnosticRunning_) {
         summary = "FIELD CHECK RUNNING";
     } else if (!diagnosticReport_.complete()) {
         summary = "INCOMPLETE";
         summaryColor = theme::warn;
+        const int missing = (diagnosticReport_.statusAvailable ? 0 : 1) +
+                            (diagnosticReport_.tasksAvailable ? 0 : 1) +
+                            (diagnosticReport_.versionAvailable ? 0 : 1);
+        summaryCount = std::to_string(missing) + " MISSING";
     } else if (diagnosticReport_.actionableBlockerCount() > 0) {
         summary = "ARM BLOCKED";
         summaryColor = theme::err;
+        summaryCount = std::to_string(diagnosticReport_.actionableBlockerCount()) + " BLOCK";
     } else if (diagnosticReport_.failureCount() > 0) {
         summary = "FAULT REPORTED";
         summaryColor = theme::err;
+        summaryCount = std::to_string(diagnosticReport_.failureCount()) + " FAIL";
     } else if (diagnosticReport_.warningCount() > 0) {
         summary = "CHECK FINDINGS";
         summaryColor = theme::warn;
+        summaryCount = std::to_string(diagnosticReport_.warningCount()) + " REVIEW";
     } else {
         summary = "NO ACTIVE FAULTS";
         summaryColor = theme::ok;
     }
     drawText(s, 4, kBodyY + 2, summary, summaryColor);
+    if (!summaryCount.empty()) {
+        drawText(s, s.w - textWidth(summaryCount) - 4, kBodyY + 2,
+                 summaryCount, summaryColor);
+    }
 
     if (diagnosticRunning_) {
         const int shownStep = std::min(3, diagnosticStep_ + 1);
@@ -465,14 +477,25 @@ void App::drawDiagnostics(Surface& s) {
         return;
     }
 
-    const std::string sub = !diagnosticError_.empty()
-                                ? diagnosticError_
-                                : "CLI snapshot only - inspect the craft props-off";
-    drawTextClipped(s, 4, kBodyY + 13, sub, cols - 2,
-                    diagnosticError_.empty() ? theme::textDim : theme::warn);
-
     const int count = static_cast<int>(diagnosticReport_.findings.size());
     diagnosticList_.clamp(count, rows);
+    std::string sub = !diagnosticError_.empty()
+                          ? diagnosticError_
+                          : "CLI snapshot only - inspect the craft props-off";
+    Color subColor = diagnosticError_.empty() ? theme::textDim : theme::warn;
+    if (diagnosticError_.empty() && count > 0) {
+        const DiagnosticFinding& selected =
+            diagnosticReport_.findings[static_cast<size_t>(diagnosticList_.sel)];
+        const std::string rowText = selected.title + "  " + selected.detail;
+        if (static_cast<int>(rowText.size()) > cols - 5) {
+            // The row stays compact; selecting it exposes more of the detail
+            // in the wider summary line instead of silently clipping it.
+            sub = selected.detail;
+            subColor = colorFor(selected.level);
+        }
+    }
+    drawTextClipped(s, 4, kBodyY + 13, sub, cols - 2, subColor);
+
     for (int i = 0; i < rows; ++i) {
         const int index = diagnosticList_.top + i;
         if (index >= count) break;
