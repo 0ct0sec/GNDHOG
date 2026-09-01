@@ -3,6 +3,7 @@
 #   make            host build (x86-64 dev/test, offscreen + sim FC)
 #   make arm64      cross build for the Cardputer Zero
 #   make test       run the built-in self tests
+#   make package    build and validate the Cardputer Zero AppStore .deb
 #   make -j1        on-device native build (respect the 256M ARM split)
 
 NAME     := bfcli
@@ -22,7 +23,7 @@ SRCS := $(sort $(wildcard $(SRCDIR)/*.cpp))
 OBJS := $(patsubst $(SRCDIR)/%.cpp,$(BUILD)/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)
 
-.PHONY: all arm64 test clean install-local FORCE
+.PHONY: all arm64 test package store-check clean install-local FORCE
 
 all: $(BUILD)/$(NAME)
 
@@ -48,6 +49,12 @@ arm64:
 test: $(BUILD)/$(NAME)
 	$(BUILD)/$(NAME) --selftest
 	@TZ=UTC sh tools/test-build-info.sh
+
+package: arm64
+	@sh tools/package.sh
+
+store-check:
+	@python3 tools/validate-app-store.py
 
 clean:
 	rm -rf build build-arm64

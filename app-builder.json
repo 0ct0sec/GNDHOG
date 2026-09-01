@@ -1,0 +1,37 @@
+{
+  "app_name": "GNDHOG ZERO",
+  "package_name": "bfcli",
+  "version": "0.1.0",
+  "bin_name": "bfcli",
+  "description": "Betaflight CLI terminal for M5Stack Cardputer Zero",
+  "store": {
+    "summary": "Betaflight CLI, backups, and restores on Cardputer Zero.",
+    "description": "A native Betaflight field terminal for the M5Stack Cardputer Zero. Connect a flight controller over USB or UART to run CLI commands, keep command history, inspect the keyboard map, and create or restore Configurator-shaped backups. Risky motor and erase commands require confirmation. GNDHOG ZERO runs locally without a network connection or background service.",
+    "categories": [
+      "Development",
+      "Hardware & IoT"
+    ],
+    "screenshots": [
+      "store/screenshots/terminal.png",
+      "store/screenshots/keymap.png",
+      "store/screenshots/safety-confirmation.png"
+    ],
+    "icon": "store/icon.png",
+    "license": "MIT",
+    "source_repo": "https://github.com/0ct0sec/GNDHOG",
+    "author": {
+      "github": "0ct0sec",
+      "display_name": "0ct0"
+    },
+    "share_code": "GNDH",
+    "permissions": {
+      "camera": false,
+      "microphone": false,
+      "imu": false,
+      "network": false,
+      "additional_hardware": true,
+      "background_service": false,
+      "external_display": false
+    }
+  }
+}

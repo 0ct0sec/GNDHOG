@@ -1,6 +1,7 @@
 # build trees (host and cross)
 build/
 build-arm64/
+dist/
 *.o
 *.d
 *.a
@@ -24,6 +25,8 @@ BTFL_cli_*.txt
 .idea/
 .cache/
 compile_commands.json
+__pycache__/
+*.pyc
 *.swp
 *~
 .DS_Store

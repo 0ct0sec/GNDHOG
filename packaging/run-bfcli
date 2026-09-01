@@ -1,0 +1,4 @@
+#!/bin/sh
+# APPLaunch entry point. Escape unwinds GNDHOG ZERO and exits, returning the
+# framebuffer and keyboard to the launcher.
+exec /opt/bfcli/bin/bfcli "$@"

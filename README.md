@@ -137,6 +137,7 @@ conversation.
 make arm64      # cross-build; requires g++-aarch64-linux-gnu
 make            # host build for simulator and self-checks
 make test       # checks, including a complete session against a fake FC
+make package    # ARM64 AppStore .deb plus manifest/package validation
 ```
 
 `make arm64` links libstdc++ and libgcc statically. The resulting binary needs
@@ -157,6 +158,43 @@ Git checkout, the identity is `unknown`; the binary does not forge papers.
 
 The mascot is compiled into the executable. Builds do not need an image
 library or an artwork download.
+
+## Cardputer Zero AppStore package
+
+The repository carries the current Cardputer Zero store contract in
+`app-builder.json`: the package identity, listing copy, 320×170 screenshots,
+square icon, categories, author, license, share code, and all seven permission
+declarations. Build the upload artifact in WSL or another Debian-based ARM64
+cross-build environment:
+
+```sh
+make package
+# dist/bfcli_0.1.0_arm64.deb
+```
+
+The package target cross-builds the binary, stages only policy-approved paths,
+creates no systemd service, and runs `tools/validate-app-store.py` against both
+the manifest and the finished Debian archive. Run the metadata check without a
+build with `make store-check`.
+
+The permission manifest says `additional_hardware: true` because GNDHOG uses
+the framebuffer, evdev keyboard, backlight, and a USB or UART serial device.
+Camera, microphone, IMU, network, background service, and external display are
+all `false`; those are claims about shipped behavior, not a wish list with
+booleans taped to it.
+
+Install a built package for a device smoke test with:
+
+```sh
+sudo apt install --no-install-recommends ./dist/bfcli_0.1.0_arm64.deb
+```
+
+For submission, use the current
+[Cardputer Zero AppBuilder](https://github.com/CardputerZero/AppBuilder) and
+run `czdev publish --deb dist/bfcli_0.1.0_arm64.deb` from this repository.
+Publishing creates a review PR; the first release also requires a short video
+of the app running on a real Cardputer Zero in that PR. A simulator screenshot
+can prove pixels. It cannot testify that a thumb pressed the key.
 
 ## Install
 
@@ -299,8 +337,17 @@ The simulator is a witness with excellent availability and no propellers.
 | `src/simfc.cpp` | simulated flight controller |
 | `src/mascot.cpp` | embedded mascot renderer |
 | `assets/` | frameless mascot source derivative and launcher icon |
+| `store/` | AppStore icon and current 320×170 UI screenshots |
+| `app-builder.json` | package identity and AppStore listing contract |
+| `packaging/` | Debian control, APPLaunch entry, wrapper, and copyright data |
 | `tools/build-info.sh` | source-commit identity refreshed by Make |
 | `tools/install.sh` | staged device installation and APPLaunch entry |
+| `tools/package.sh` | policy-compliant ARM64 Debian package builder |
+| `tools/validate-app-store.py` | local store metadata and archive policy gate |
 
 That is the whole machine: one terminal, one mascot, one serial wire, and no
 cloud account asking whether the quad is still you.
+
+## License
+
+GNDHOG ZERO is released under the [MIT License](LICENSE).

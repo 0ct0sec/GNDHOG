@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=GNDHOG ZERO
+Comment=Betaflight CLI over USB or UART
+Exec=/opt/bfcli/run-bfcli
+Icon=share/images/gndhog-zero_100.png
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=false
