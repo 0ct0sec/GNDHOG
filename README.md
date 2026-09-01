@@ -34,7 +34,7 @@ loop at 30 fps runs the whole suspiciously small department.
    package as replacement parts.
 2. Build the ARM64 binary with `make arm64`, then install it with
    `sudo ./tools/install.sh --add-groups`.
-3. Log out and back in if the installer added `video`, `input`, or `dialout`.
+3. Log out and back in if the installer added `video`, `input`, `dialout`, or `audio`.
    Linux does not renegotiate group membership because the operator looked
    sincere.
 4. Put the Cardputer Zero **Host/Slave switch in HOST**, then connect the flight
@@ -78,6 +78,10 @@ loop at 30 fps runs the whole suspiciously small department.
 - **A keyboard that can type Betaflight.** The Cardputer has 46 keys and no
   obvious underscore. Betaflight named nearly everything in `snake_case`.
   This administrative conflict has been settled below.
+- **Fighter-HUD sound cues.** Short synthesized chirps mark navigation,
+  selections, FC link state, completed work, and alarms. GNDHOG targets the
+  built-in `ES8388Audio`/`ES8389Audio` ALSA card by name instead of Linux's
+  HDMI default, and falls back to silence if that exact device is absent.
 - **Offline About screen.** Open **Menu → About GNDHOG ZERO**, or press **A**
   on the port picker, for the mascot, author, source commit, and abbreviated
   crash report. Enter or Escape returns to the previous screen. No FC is
@@ -148,6 +152,30 @@ A plain USB keyboard on the hub also works and is decoded from keycodes alone.
 Hold `Fn` and tap a number for the quick rack: **1** help, **2** field check,
 **3** version, **4** diff, **5** backup, **6** backups, **7** tasks, **8** save,
 **9** menu, **0** disconnect.
+
+## HUD sounds
+
+The startup sweep and terse avionics-style cues are generated in memory; there
+are no WAV assets to lose or decode. Open the menu to toggle **HUD sounds** or
+change **HUD volume** in 10% steps. Both settings persist in the existing
+`config.ini`; `--mute` is a launch-wide override the menu cannot undo, and it
+does not change the saved choice. `/opt/bfcli/bin/bfcli --sound-test` plays the
+bounded startup cue at 70% and exits with a failure if discovery, mixer setup,
+PCM output, or drain does not complete.
+
+On Cardputer Zero, HDMI is commonly ALSA card 0 and the built-in speaker codec
+is card 1. GNDHOG therefore opens `hw:ES8389Audio,0` (or the earlier
+`ES8388Audio` identity) explicitly. The output worker never stalls the UI, caps
+the codec playback controls at their 0 dB point, bounds synthesized PCM, and
+collapses repeated navigation chirps. Critical temperature and link-loss cues
+clear less important queued sounds so the warning is not waiting behind a
+thumb-operated sonata.
+
+If the menu reports a silent fallback, check `cat /proc/asound/cards` for the
+exact codec, confirm the launcher user belongs to `audio`, and inspect
+`/dev/snd/pcmC*D*p`. `--mute` and `sound.enabled = 0` are deliberate silence;
+an absent codec or `libasound.so.2` is reported as unavailable rather than
+quietly sending the cues to HDMI.
 
 ## Connecting a flight controller
 
@@ -322,8 +350,8 @@ restore an older binary or delete user backups. No service is installed, the
 boot partition is untouched, and the vendor image remains exactly where the
 vendor abandoned it.
 
-The runtime user needs the **video**, **input**, and **dialout** groups for the
-framebuffer, keyboard, and serial port. The installer reports missing groups
+The runtime user needs the **video**, **input**, **dialout**, and **audio** groups
+for the framebuffer, keyboard, serial port, and HUD sounds. The installer reports missing groups
 and `--add-groups` can add them. Log out and back in after a group change; Unix
 will not recognize personal growth mid-session.
 
@@ -385,6 +413,8 @@ confirmation is a guardrail. It is not a small orange force field.
 ./build/bfcli --selftest         # run the check suite
 ./build/bfcli --list-ports       # enumerate visible serial targets
 ./build/bfcli --about            # credits, no FC connection
+./build/bfcli --mute             # session-only silent launch
+./build/bfcli --sound-test       # bounded exact-card playback check
 ./build/bfcli --version          # author and source commit
 ./build/bfcli --help
 ```
@@ -407,6 +437,7 @@ flight controller. Even imaginary hardware has a job description.
 | `src/term.cpp` | scrollback, wrapping, and line editing |
 | `src/bfcommands.cpp` | command tables, completion, and risk classification |
 | `src/display.cpp` | framebuffer and backlight access |
+| `src/audio.cpp` | exact-card ALSA routing and synthesized HUD cues |
 | `src/serialport.cpp` | port discovery and termios |
 | `src/ui.cpp` | screen rendering |
 | `src/brand.h` | project identity, author, and About copy |

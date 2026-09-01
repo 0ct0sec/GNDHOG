@@ -17,7 +17,7 @@ CXXFLAGS := -std=c++17 -Wall -Wextra -Wno-unused-parameter $(OPT) \
             -ffunction-sections -fdata-sections
 CPPFLAGS += -I$(BUILD)
 LDFLAGS  ?= -Wl,--gc-sections
-LDLIBS   :=
+LDLIBS   := -ldl -pthread
 
 SRCS := $(sort $(wildcard $(SRCDIR)/*.cpp))
 OBJS := $(patsubst $(SRCDIR)/%.cpp,$(BUILD)/%.o,$(SRCS))

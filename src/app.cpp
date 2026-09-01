@@ -22,6 +22,9 @@ enum MenuId {
     MenuKeymap,
     MenuHelp,
     MenuAbout,
+    MenuSoundToggle,
+    MenuSoundDown,
+    MenuSoundUp,
     MenuBrightDown,
     MenuBrightUp,
     MenuDisconnect,
@@ -96,6 +99,7 @@ void App::pushLocal(const std::string& text, LineKind kind) {
 void App::setScreen(Screen s) {
     if (screen_ == s) return;
     screen_ = s;
+    if (screen_ == Screen::Menu) refreshSoundMenu();
     // A key held across a screen change must not act on the new screen.
     keyboard_.releaseAll();
     dirty_ = true;
@@ -114,10 +118,11 @@ void App::confirm(const std::string& title, const std::string& body,
     // Drop held keys so an autorepeat cannot answer a dialog the user has not
     // seen yet.
     keyboard_.releaseAll();
+    audio_.play(HudCue::Prompt);
     dirty_ = true;
 }
 
-void App::notice(const std::string& title, const std::string& body) {
+void App::notice(const std::string& title, const std::string& body, HudCue cue) {
     modal_ = true;
     modalIsConfirm_ = false;
     modalTitle_ = title;
@@ -126,6 +131,7 @@ void App::notice(const std::string& title, const std::string& body) {
     modalAction_ = nullptr;
     modalCancelAction_ = nullptr;
     keyboard_.releaseAll();
+    audio_.play(cue);
     dirty_ = true;
 }
 
@@ -148,6 +154,13 @@ bool App::setup(const Options& opt, std::string& error) {
         return false;
     }
     config_.load(storage_);
+
+    soundVolume_ = std::clamp(config_.getInt("sound.volume", 70), 0, 100);
+    soundEnabled_ = config_.getBool("sound.enabled", true) && !opt_.muteSound;
+    audio_.setVolume(soundVolume_);
+    audio_.setEnabled(soundEnabled_);
+    audio_.start();
+    lastAudioError_ = audio_.lastError();
 
     // Sym-layer corrections, e.g. `sym.0x28 = _`.
     for (const auto& kv : config_.all()) {
@@ -203,11 +216,15 @@ bool App::setup(const Options& opt, std::string& error) {
         {"Keymap & key test", "find a symbol key", MenuKeymap, true},
         {"Help", "keys and workflow", MenuHelp, true},
         {"About GNDHOG ZERO", "0ct0 / build / ground crew", MenuAbout, true},
+        {"HUD sounds", "fighter-HUD cues", MenuSoundToggle, true},
+        {"HUD volume -", "", MenuSoundDown, true},
+        {"HUD volume +", "", MenuSoundUp, true},
         {"Brightness -", "", MenuBrightDown, true},
         {"Brightness +", "", MenuBrightUp, true},
         {"Disconnect", "restore bench VTX state or close link", MenuDisconnect, true},
         {"Exit GNDHOG ZERO", "return to the launcher", MenuExit, true},
     };
+    refreshSoundMenu();
     quick_.clear();
     for (int i = 0; i < kQuickCount; ++i) {
         quick_.push_back(MenuItem{kQuick[i].label, kQuick[i].hint, i, true});
@@ -226,6 +243,7 @@ bool App::setup(const Options& opt, std::string& error) {
     } else if (!opt_.portOverride.empty()) {
         std::string cerr;
         if (session_.connect(opt_.portOverride, opt_.baud, cerr)) {
+            audio_.play(HudCue::LinkUp);
             beginConnectionSafety(opt_.portOverride);
             setScreen(Screen::Terminal);
         } else {
@@ -242,9 +260,12 @@ bool App::setup(const Options& opt, std::string& error) {
 void App::teardown() {
     storage_.saveHistory(editor_.history());
     config_.setInt("brightness", brightness_);
+    if (!opt_.muteSound) config_.setBool("sound.enabled", soundEnabled_);
+    config_.setInt("sound.volume", soundVolume_);
     std::string err;
     config_.save(storage_, err);
     session_.disconnect();
+    audio_.shutdown();
     keyboard_.close();
     display_.close();
 }
@@ -299,9 +320,10 @@ void App::connectSelected() {
               LineKind::Local);
     if (!session_.connect(p.device, baud, err)) {
         pushLocal("connect failed: " + err, LineKind::Error);
-        notice("Could not open port", err);
+        notice("Could not open port", err, HudCue::Error);
         return;
     }
+    audio_.play(HudCue::LinkUp);
     beginConnectionSafety(p.device);
     setScreen(Screen::Terminal);
 }
@@ -380,7 +402,8 @@ void App::performThermalTrip(int temperatureC) {
                    "Battery can still power the stack. Unplug FC and battery now.\n"
                    "Rail stays off. Do not exit or reboot before unplugging; launcher may "
                    "restore it." +
-                   recordNote);
+                   recordNote,
+               HudCue::Critical);
         if (pitWasActive) {
             pushLocal("-- VTX restore skipped; thermal cutoff took priority --", LineKind::Warn);
         }
@@ -391,7 +414,8 @@ void App::performThermalTrip(int temperatureC) {
                    "C: GNDHOG could not verify EXT 5 V OFF.\n"
                    "Cut error: " + cutError +
                    "\nSerial closed, but power stays on. UNPLUG FC USB AND BATTERY NOW." +
-                   recordNote);
+                   recordNote,
+               HudCue::Critical);
     }
     dirty_ = true;
 }
@@ -531,7 +555,8 @@ void App::runBackup(const std::string& command, const std::string& label) {
             }
             refreshFiles();
             notice("Saved", name + "\n\n" + humanBytes(text.size()) + " in " +
-                                storage_.backupDir());
+                                storage_.backupDir(),
+                   HudCue::Success);
         });
     if (!started) notice("Busy", "A command is already running.");
 }
@@ -567,6 +592,9 @@ void App::runFieldCheckStep() {
                       ? std::to_string(diagnosticReport_.actionableBlockerCount()) + " arming blocker(s)"
                       : "field check complete";
         statusUntil_ = nowMs() + 3000;
+        audio_.play(diagnosticReport_.actionableBlockerCount() > 0
+                        ? HudCue::Error
+                        : HudCue::Success);
         dirty_ = true;
         return;
     }
@@ -611,7 +639,7 @@ void App::saveFieldCheck() {
         notice("Could not save", err);
         return;
     }
-    notice("Field check saved", name + "\n\n" + storage_.diagnosticDir());
+    notice("Field check saved", name + "\n\n" + storage_.diagnosticDir(), HudCue::Success);
 }
 
 void App::viewFile(const BackupFile& f) {
@@ -732,6 +760,59 @@ void App::adjustBrightness(int delta) {
     dirty_ = true;
 }
 
+void App::refreshSoundMenu() {
+    const std::string audioError = audio_.lastError();
+    for (MenuItem& item : menu_) {
+        if (item.id == MenuSoundToggle) {
+            item.label = opt_.muteSound
+                             ? "HUD sounds: OFF (--mute)"
+                             : std::string("HUD sounds: ") + (soundEnabled_ ? "ON" : "OFF");
+            if (opt_.muteSound) {
+                item.hint = "session override; restart without --mute";
+            } else if (audio_.available() && audioError.empty()) {
+                item.hint = audio_.backendName();
+            } else {
+                item.hint = "silent fallback: " +
+                            (audioError.empty() ? "backend stopped" : audioError);
+            }
+        } else if (item.id == MenuSoundDown || item.id == MenuSoundUp) {
+            item.hint = "level " + std::to_string(soundVolume_) + "%";
+        }
+    }
+    dirty_ = true;
+}
+
+void App::toggleSound() {
+    if (opt_.muteSound) {
+        soundEnabled_ = false;
+        audio_.setEnabled(false);
+        status_ = "HUD sounds locked off by --mute for this launch";
+        statusUntil_ = nowMs() + 4000;
+        refreshSoundMenu();
+        return;
+    }
+    soundEnabled_ = !soundEnabled_;
+    audio_.setEnabled(soundEnabled_);
+    if (soundEnabled_ && !audio_.available()) audio_.start();
+    if (soundEnabled_ && audio_.available()) audio_.play(HudCue::Startup);
+    status_ = soundEnabled_ ? "HUD sounds on" : "HUD sounds muted";
+    if (soundEnabled_ && (!audio_.available() || !audio_.lastError().empty())) {
+        status_ = "HUD audio unavailable: " + audio_.lastError();
+    }
+    statusUntil_ = nowMs() + 4000;
+    refreshSoundMenu();
+}
+
+void App::adjustSoundVolume(int delta) {
+    soundVolume_ = std::clamp(soundVolume_ + delta, 0, 100);
+    audio_.setVolume(soundVolume_);
+    if (soundEnabled_) audio_.play(HudCue::Select);
+    status_ = "HUD volume " + std::to_string(soundVolume_) + "%";
+    if (!audio_.available()) status_ += " (audio unavailable)";
+    statusUntil_ = nowMs() + 2500;
+    refreshSoundMenu();
+}
+
 void App::applyMenu(int id) {
     switch (id) {
     case MenuFieldCheck:
@@ -764,6 +845,9 @@ void App::applyMenu(int id) {
         returnScreen_ = Screen::Menu;
         setScreen(Screen::About);
         break;
+    case MenuSoundToggle: toggleSound(); break;
+    case MenuSoundDown:   adjustSoundVolume(-10); break;
+    case MenuSoundUp:     adjustSoundVolume(+10); break;
     case MenuBrightDown: adjustBrightness(-10); break;
     case MenuBrightUp:   adjustBrightness(+10); break;
     case MenuDisconnect: requestDisconnect(false); break;
@@ -788,10 +872,12 @@ bool App::handleModalKey(const KeyEvent& e) {
     const bool no = (e.key == Key::Char && (e.ch == 'n' || e.ch == 'N')) ||
                     e.key == Key::Escape;
     if (yes) {
+        audio_.play(HudCue::Select);
         auto action = modalAction_;
         closeModal();
         if (action) action();
     } else if (no) {
+        audio_.play(HudCue::Back);
         auto action = modalCancelAction_;
         closeModal();
         if (action) action();
@@ -803,10 +889,10 @@ void App::onPortsKey(const KeyEvent& e) {
     const int rows = bodyRows(false);
     const int n = static_cast<int>(ports_.size());
     switch (e.key) {
-    case Key::Up:   portList_.move(-1, n, rows); dirty_ = true; break;
-    case Key::Down: portList_.move(+1, n, rows); dirty_ = true; break;
-    case Key::Enter: connectSelected(); break;
-    case Key::Escape: running_ = false; break;
+    case Key::Up:   portList_.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Down: portList_.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Enter: audio_.play(HudCue::Select); connectSelected(); break;
+    case Key::Escape: audio_.play(HudCue::Back); running_ = false; break;
     case Key::F1: helpScroll_ = 0; setScreen(Screen::Help); break;
     case Key::Char:
         if (e.ch == 'r' || e.ch == 'R') {
@@ -855,14 +941,14 @@ void App::onTerminalKey(const KeyEvent& e) {
     }
 
     switch (e.key) {
-    case Key::Enter:     submitLine(); dirty_ = true; return;
+    case Key::Enter:     audio_.play(HudCue::Command); submitLine(); dirty_ = true; return;
     case Key::Backspace: editor_.backspace(); dirty_ = true; return;
     case Key::Delete:    editor_.del(); dirty_ = true; return;
     case Key::Left:      editor_.left(e.ctrl); dirty_ = true; return;
     case Key::Right:     editor_.right(e.ctrl); dirty_ = true; return;
     case Key::Home:      editor_.home(); dirty_ = true; return;
     case Key::End:       editor_.end(); dirty_ = true; return;
-    case Key::Tab:       doComplete(); return;
+    case Key::Tab:       audio_.play(HudCue::Select); doComplete(); return;
     case Key::Up:
         // Up/Down walk the history; PageUp/PageDown scroll the output.
         editor_.historyPrev();
@@ -880,6 +966,7 @@ void App::onTerminalKey(const KeyEvent& e) {
             return;
         }
         menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
+        audio_.play(HudCue::Back);
         setScreen(Screen::Menu);
         return;
     case Key::Help:      helpScroll_ = 0; setScreen(Screen::Help); return;
@@ -918,16 +1005,25 @@ void App::onMenuKey(const KeyEvent& e) {
     const int n = static_cast<int>(items.size());
 
     switch (e.key) {
-    case Key::Up:   st.move(-1, n, rows); dirty_ = true; break;
-    case Key::Down: st.move(+1, n, rows); dirty_ = true; break;
-    case Key::PageUp:   st.move(-rows, n, rows); dirty_ = true; break;
-    case Key::PageDown: st.move(+rows, n, rows); dirty_ = true; break;
+    case Key::Up:   st.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Down: st.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageUp:   st.move(-rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageDown: st.move(+rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
     case Key::Enter:
         if (n == 0) break;
-        if (quick) applyQuick(items[static_cast<size_t>(st.sel)].id);
-        else applyMenu(items[static_cast<size_t>(st.sel)].id);
+        if (quick) {
+            audio_.play(HudCue::Select);
+            applyQuick(items[static_cast<size_t>(st.sel)].id);
+        } else {
+            const int id = items[static_cast<size_t>(st.sel)].id;
+            if (id != MenuSoundToggle && id != MenuSoundDown && id != MenuSoundUp) {
+                audio_.play(HudCue::Select);
+            }
+            applyMenu(id);
+        }
         break;
     case Key::Escape:
+        audio_.play(HudCue::Back);
         setScreen(quick ? Screen::Menu : Screen::Terminal);
         break;
     default: break;
@@ -938,14 +1034,16 @@ void App::onFilesKey(const KeyEvent& e) {
     const int rows = bodyRows(false);
     const int n = static_cast<int>(files_.size());
     switch (e.key) {
-    case Key::Up:   fileList_.move(-1, n, rows); dirty_ = true; break;
-    case Key::Down: fileList_.move(+1, n, rows); dirty_ = true; break;
-    case Key::PageUp:   fileList_.move(-rows, n, rows); dirty_ = true; break;
-    case Key::PageDown: fileList_.move(+rows, n, rows); dirty_ = true; break;
+    case Key::Up:   fileList_.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Down: fileList_.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageUp:   fileList_.move(-rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageDown: fileList_.move(+rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
     case Key::Enter:
+        audio_.play(HudCue::Select);
         if (n > 0) restoreFile(files_[static_cast<size_t>(fileList_.sel)]);
         break;
     case Key::Escape:
+        audio_.play(HudCue::Back);
         setScreen(session_.connected() ? Screen::Terminal : Screen::Ports);
         break;
     case Key::Char:
@@ -977,12 +1075,13 @@ void App::onDiagnosticsKey(const KeyEvent& e) {
     }
 
     switch (e.key) {
-    case Key::Up:       diagnosticList_.move(-1, n, rows); dirty_ = true; break;
-    case Key::Down:     diagnosticList_.move(+1, n, rows); dirty_ = true; break;
-    case Key::PageUp:   diagnosticList_.move(-rows, n, rows); dirty_ = true; break;
-    case Key::PageDown: diagnosticList_.move(+rows, n, rows); dirty_ = true; break;
+    case Key::Up:       diagnosticList_.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Down:     diagnosticList_.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageUp:   diagnosticList_.move(-rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageDown: diagnosticList_.move(+rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
     case Key::Escape:
     case Key::Enter:
+        audio_.play(HudCue::Back);
         setScreen(Screen::Terminal);
         break;
     case Key::Char:
@@ -1000,6 +1099,7 @@ void App::onDiagnosticsKey(const KeyEvent& e) {
 void App::onKeymapKey(const KeyEvent& e) {
     // Everything except Escape is swallowed so the tester can show it.
     if (e.key == Key::Escape && !e.repeat) {
+        audio_.play(HudCue::Back);
         setScreen(Screen::Terminal);
         return;
     }
@@ -1011,12 +1111,13 @@ void App::onKeymapKey(const KeyEvent& e) {
 
 void App::onHelpKey(const KeyEvent& e) {
     switch (e.key) {
-    case Key::Up:       helpScroll_ = std::max(0, helpScroll_ - 1); dirty_ = true; break;
-    case Key::Down:     ++helpScroll_; dirty_ = true; break;
-    case Key::PageUp:   helpScroll_ = std::max(0, helpScroll_ - 8); dirty_ = true; break;
-    case Key::PageDown: helpScroll_ += 8; dirty_ = true; break;
+    case Key::Up:       helpScroll_ = std::max(0, helpScroll_ - 1); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Down:     ++helpScroll_; audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageUp:   helpScroll_ = std::max(0, helpScroll_ - 8); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageDown: helpScroll_ += 8; audio_.play(HudCue::Navigate); dirty_ = true; break;
     case Key::Escape:
     case Key::Enter:
+        audio_.play(HudCue::Back);
         setScreen(session_.connected() ? Screen::Terminal : Screen::Ports);
         break;
     default: break;
@@ -1045,6 +1146,7 @@ void App::handleKey(const KeyEvent& e) {
 
 void App::onAboutKey(const KeyEvent& e) {
     if (!e.repeat && (e.key == Key::Escape || e.key == Key::Enter)) {
+        audio_.play(HudCue::Back);
         setScreen(returnScreen_);
     }
 }
@@ -1168,7 +1270,8 @@ void App::tick(uint64_t now) {
                    (critical ? "Automatic cutoff is not armed for this connection. " : "") +
                    "This is not a VTX temperature sensor. Stop bench work, unplug FC USB and "
                    "battery power, and let the stack cool. Closing the serial link does not "
-                   "remove USB power.");
+                   "remove USB power.",
+               critical ? HudCue::Critical : HudCue::Error);
     }
 
     if (disconnectAfterVtxRestore_ && !session_.connected()) {
@@ -1195,9 +1298,11 @@ void App::tick(uint64_t now) {
         // failure needs a dialog here.
         if (wasRestore || !ok) {
             if (!modal_) {
-                notice(ok ? "Restore complete" : "Finished with problems", message);
+                notice(ok ? "Restore complete" : "Finished with problems", message,
+                       ok ? HudCue::Success : HudCue::Error);
             }
         }
+        if (ok && !wasRestore) audio_.play(HudCue::Success);
         pushLocal("-- " + message + " --", ok ? LineKind::Good : LineKind::Warn);
         session_.clearFinishedJob();
     }
@@ -1207,6 +1312,7 @@ void App::tick(uint64_t now) {
     if (session_.linkLost()) {
         if (!linkLossHandled_) {
             linkLossHandled_ = true;
+            audio_.play(HudCue::LinkDown);
             refreshPorts();
             status_ = session_.vtxBenchGuardActive()
                           ? "link lost - pit mode clears only when the FC reboots"
@@ -1216,6 +1322,15 @@ void App::tick(uint64_t now) {
         }
     } else {
         linkLossHandled_ = false;
+    }
+    const std::string audioError = audio_.lastError();
+    if (audioError != lastAudioError_) {
+        lastAudioError_ = audioError;
+        refreshSoundMenu();
+        if (!audioError.empty() && soundEnabled_ && !opt_.muteSound) {
+            status_ = "HUD audio unavailable: " + audioError;
+            statusUntil_ = now + 6000;
+        }
     }
     if (!status_.empty() && now > statusUntil_) {
         status_.clear();
@@ -1301,6 +1416,8 @@ int App::run(const Options& opt) {
         return written > 0 ? 0 : 1;
     }
 
+    audio_.play(HudCue::Startup);
+
     SimFc sim;
     if (opt.simulate && !opt.showAbout) {
         std::string simErr;
@@ -1312,6 +1429,7 @@ int App::run(const Options& opt) {
         std::string cerr;
         pushLocal("simulated flight controller on " + sim.devicePath(), LineKind::Local);
         session_.connect(sim.devicePath(), 115200, cerr);
+        audio_.play(HudCue::LinkUp);
         beginConnectionSafety(sim.devicePath());
         setScreen(Screen::Terminal);
     }

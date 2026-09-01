@@ -1,4 +1,5 @@
 #include "app.h"
+#include "audio.h"
 #include "brand.h"
 #include "mascot.h"
 #include "bfcommands.h"
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -123,6 +125,79 @@ ThermalFixture makeThermalFixture(const std::string& branch, bool muxUsb = true,
     return f;
 }
 #endif
+
+void testAudio() {
+    section("audio");
+    const HudCue cues[] = {
+        HudCue::Startup, HudCue::Navigate, HudCue::Select, HudCue::Back,
+        HudCue::Prompt, HudCue::Success, HudCue::Error, HudCue::LinkUp,
+        HudCue::LinkDown, HudCue::Critical, HudCue::Command,
+    };
+    for (HudCue cue : cues) {
+        const std::vector<std::int16_t> pcm = synthesizeHudCue(cue);
+        int peak = 0;
+        for (std::int16_t sample : pcm) peak = std::max(peak, std::abs(static_cast<int>(sample)));
+        check(!pcm.empty() && pcm.size() % 2 == 0,
+              "HUD cue is non-empty interleaved stereo PCM");
+        check(peak > 100 && peak < 12000, "HUD cue has bounded non-silent sample amplitude");
+        check(pcm.size() <= 48000U * 2U, "HUD cue stays below one second");
+    }
+    check(synthesizeHudCue(HudCue::Navigate).size() < 48000U * 2U / 10U,
+          "navigation chirp stays below 100 ms");
+    int drainCalls = 0;
+    int stateReads = 0;
+    const int drained = finishNonblockingAudioDrain(
+        [&] { ++drainCalls; return -EAGAIN; },
+        [&] { return ++stateReads < 3 ? 5 : 1; },
+        [] { return true; }, [] {});
+    check(drained == 0 && drainCalls == 1 && stateReads == 3,
+          "nonblocking audio drain starts once and polls DRAINING to SETUP");
+    check(finishNonblockingAudioDrain([] { return -EAGAIN; }, [] { return 5; },
+                                      [] { return false; }, [] {}) == -ETIMEDOUT,
+          "nonblocking audio drain has a bounded timeout");
+
+#if defined(__linux__)
+    const std::string root = "/tmp/bfcli-audio-selftest-" + std::to_string(::getpid());
+    const std::string proc = root + "/proc";
+    const std::string dev = root + "/dev";
+    std::filesystem::remove_all(root);
+    check(fixtureDir(root) && fixtureDir(proc) && fixtureDir(dev),
+          "audio discovery fixture directories are created");
+    check(fixtureFile(
+              proc + "/cards",
+              " 0 [vc4hdmi        ]: vc4-hdmi - vc4-hdmi\n"
+              "                      vc4-hdmi\n"
+              " 1 [ES8389Audio    ]: cardputerzero-a - ES8389-Audio\n"
+              "                      ES8389-Audio\n") &&
+              fixtureFile(dev + "/pcmC0D0p", "") &&
+              fixtureFile(dev + "/pcmC1D0p", ""),
+          "audio discovery fixture describes HDMI and ES8389 playback");
+    const AudioDeviceInfo exact = discoverCardputerZeroAudio(proc, dev);
+    check(exact.cardPresent && exact.playbackPresent && exact.cardNumber == 1 &&
+              exact.cardId == "ES8389Audio" && exact.pcmName == "hw:ES8389Audio,0",
+          "audio discovery selects the exact ES8389 card instead of HDMI card 0");
+    check(exact.mixerElements.size() == 2 && exact.mixerElements[0] == "DACL" &&
+               exact.mixerElements[1] == "DACR",
+          "ES8389 playback requires both DAC mixer channels");
+    std::filesystem::remove(dev + "/pcmC1D0p");
+    check(fixtureFile(
+              proc + "/cards",
+              " 1 [ES8388Audio    ]: cardputerzero-a - ES8388-Audio\n"
+              " 2 [ES8389Audio    ]: cardputerzero-a - ES8389-Audio\n") &&
+              fixtureFile(dev + "/pcmC2D0junkp", "") &&
+              fixtureFile(dev + "/pcmC2D1p", ""),
+          "audio discovery fixture includes a stale codec and malformed PCM node");
+    const AudioDeviceInfo fallback = discoverCardputerZeroAudio(proc, dev);
+    check(fallback.cardPresent && fallback.playbackPresent && fallback.cardNumber == 2 &&
+              fallback.playbackDevice == 1 && fallback.pcmName == "hw:ES8389Audio,1",
+          "audio discovery skips an unusable exact card and malformed PCM node");
+    check(fixtureFile(proc + "/cards",
+                      " 0 [vc4hdmi        ]: vc4-hdmi - vc4-hdmi\n") &&
+              !discoverCardputerZeroAudio(proc, dev).cardPresent,
+          "generic HDMI audio is never promoted to the Cardputer speaker backend");
+    std::filesystem::remove_all(root);
+#endif
+}
 
 // ---------------------------------------------------------------- keyboard
 
@@ -928,6 +1003,7 @@ void testFullScrollback() {
 
 int runSelfTest() {
     std::printf("%s self-test (commit %s)\n\n", kAppName, kBuildCommit);
+    testAudio();
     testKeys();
     testRawTerminalMode();
     testTerminal();
@@ -974,6 +1050,13 @@ int runSelfTest() {
     {
         App app;
         app.display_.setHeadlessSize(kScreenW, kScreenH);
+        app.opt_.muteSound = true;
+        app.soundEnabled_ = false;
+        app.audio_.setEnabled(false);
+        app.toggleSound();
+        check(!app.soundEnabled_ && !app.audio_.enabled() &&
+                  app.status_.find("locked off by --mute") != std::string::npos,
+              "--mute remains a launch-wide override when the menu toggle is pressed");
         KeyEvent key;
         key.key = Key::Char;
         key.ch = 'a';

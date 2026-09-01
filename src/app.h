@@ -1,4 +1,5 @@
 #pragma once
+#include "audio.h"
 #include "bfcommands.h"
 #include "bfsession.h"
 #include "diagnostics.h"
@@ -64,6 +65,7 @@ public:
         bool stdinKeys = false;        // read stdin instead of evdev
         bool simulate = false;         // talk to the built-in fake FC
         bool autoConnect = true;
+        bool muteSound = false;        // --mute: session-only audio override
         bool showAbout = false;        // --about: start offline on the credits
         int frameLimit = 0;            // stop after N frames (preview/testing)
         std::string previewDir;        // dump each screen as PPM and exit
@@ -127,13 +129,17 @@ private:
     void applyQuick(int id);
     void applyMenu(int id);
     void adjustBrightness(int delta);
+    void adjustSoundVolume(int delta);
+    void toggleSound();
+    void refreshSoundMenu();
     void pushLocal(const std::string& text, LineKind kind = LineKind::Local);
 
     // ---- modal helpers
     void confirm(const std::string& title, const std::string& body,
                  const std::string& yesLabel, std::function<void()> onYes,
                  std::function<void()> onNo = nullptr);
-    void notice(const std::string& title, const std::string& body);
+    void notice(const std::string& title, const std::string& body,
+                HudCue cue = HudCue::Error);
     void closeModal();
     void setScreen(Screen s);
 
@@ -145,6 +151,7 @@ private:
     Display display_;
     Backlight backlight_;
     Keyboard keyboard_;
+    Audio audio_;
     Storage storage_;
     Config config_;
     Terminal term_;
@@ -172,6 +179,9 @@ private:
     int helpScroll_ = 0;
     int baudIndex_ = 0;
     int brightness_ = 100;
+    int soundVolume_ = 70;
+    bool soundEnabled_ = true;
+    std::string lastAudioError_;
 
     // Read-only status/tasks/version capture and its evidence-bounded summary.
     DiagnosticReport diagnosticReport_;

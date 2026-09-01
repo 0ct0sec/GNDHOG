@@ -48,6 +48,8 @@ void usage() {
         "  --headless        render offscreen only, no framebuffer\n"
         "  --stdin           read keys from stdin instead of evdev\n"
         "  --sim             talk to a built-in simulated flight controller\n"
+        "  --mute            disable HUD sounds for this launch\n"
+        "  --sound-test      play one bounded HUD startup cue and exit\n"
         "  --no-autoconnect  always show the port picker at startup\n"
         "  --frames N        exit after N rendered frames\n"
         "  --preview DIR     write one PPM per screen to DIR and exit\n"
@@ -79,6 +81,7 @@ int listPorts() {
 
 int main(int argc, char** argv) {
     bf::App::Options opt;
+    bool soundTest = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -110,6 +113,8 @@ int main(int argc, char** argv) {
         else if (a == "--headless") opt.headless = true;
         else if (a == "--stdin") opt.stdinKeys = true;
         else if (a == "--sim") opt.simulate = true;
+        else if (a == "--mute") opt.muteSound = true;
+        else if (a == "--sound-test") soundTest = true;
         else if (a == "--no-autoconnect") opt.autoConnect = false;
         else if (a == "--frames") {
             if (!parsePositiveInt(next("--frames"), "--frames", opt.frameLimit)) return 2;
@@ -123,6 +128,29 @@ int main(int argc, char** argv) {
                          bf::kAppName, a.c_str());
             return 2;
         }
+    }
+
+    if (soundTest) {
+        bf::Audio audio;
+        audio.setEnabled(true);
+        audio.setVolume(70);
+        if (!audio.start()) {
+            std::fprintf(stderr, "%s: HUD audio unavailable: %s\n",
+                         bf::kAppName, audio.lastError().c_str());
+            return 1;
+        }
+        audio.play(bf::HudCue::Startup);
+        const bool finished = audio.waitIdle(3000);
+        const std::string error = audio.lastError();
+        const std::string backend = audio.backendName();
+        audio.shutdown();
+        if (!finished || !error.empty()) {
+            std::fprintf(stderr, "%s: HUD sound test failed: %s\n", bf::kAppName,
+                         !error.empty() ? error.c_str() : "playback deadline expired");
+            return 1;
+        }
+        std::printf("HUD sound test passed: %s, volume 70%%\n", backend.c_str());
+        return 0;
     }
 
     bf::App app;

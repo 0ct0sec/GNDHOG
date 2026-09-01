@@ -35,4 +35,8 @@ expect_invalid '--frames needs a positive decimal integer' --frames forever
     >"$tmp/out" 2>"$tmp/err"
 checks=$((checks + 1))
 
+"$bin" --headless --no-autoconnect --mute --frames 1 \
+    >"$tmp/out" 2>"$tmp/err"
+checks=$((checks + 1))
+
 echo "cli-options: $checks scenarios passed"

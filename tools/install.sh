@@ -136,7 +136,7 @@ fi
 echo
 echo "Access check for user '$TARGET_USER':"
 NEEDED=""
-for grp in video input dialout; do
+for grp in video input dialout audio; do
     if getent group "$grp" >/dev/null 2>&1; then
         if id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$grp"; then
             echo "  $grp     ok"
@@ -153,7 +153,7 @@ if [ -n "$NEEDED" ]; then
         echo "  Added$NEEDED. Log out and back in for this to take effect."
     else
         echo
-        echo "  GNDHOG ZERO needs: video (framebuffer), input (keyboard), dialout (serial)."
+        echo "  GNDHOG ZERO needs: video (framebuffer), input (keyboard), dialout (serial), audio (HUD sounds)."
         echo "  Add them with:  sudo usermod -aG$(echo "$NEEDED" | tr ' ' ',') $TARGET_USER"
         echo "  or re-run this script with --add-groups."
     fi
