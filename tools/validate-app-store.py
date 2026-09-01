@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import stat
 import struct
@@ -370,7 +371,14 @@ def validate_package(errors: list[str], manifest: dict, package_path: Path) -> N
             fail(errors, "desktop Icon does not point at the packaged mascot")
 
     expected_payloads = {
-        "opt/bfcli/bin/bfcli": (ROOT / "build-arm64/bfcli", 0o755),
+        # package.sh accepts an alternate cross-build artifact for CI/release
+        # staging; compare against that exact input instead of an unrelated
+        # default build that may not exist.
+        "opt/bfcli/bin/bfcli": (
+            Path(os.environ.get("GNDHOG_ARM64_BINARY") or
+                 ROOT / "build-arm64/bfcli").resolve(),
+            0o755,
+        ),
         "opt/bfcli/run-bfcli": (ROOT / "packaging/run-bfcli", 0o755),
         desktop_path: (ROOT / "packaging/bfcli.desktop", 0o644),
         "usr/share/APPLaunch/share/images/gndhog-zero_100.png": (

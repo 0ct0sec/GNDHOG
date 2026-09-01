@@ -272,7 +272,7 @@ confirmation is a guardrail. It is not a small orange force field.
 Capability claims are separated here because a compiled branch, a simulated
 flight controller, and a live wire are three different witnesses.
 
-**Verified on x86-64 Linux and ARM64 under QEMU.** The 205 self-checks cover the
+**Verified on x86-64 Linux and ARM64 under QEMU.** The 208 self-checks cover the
 session state machine against a simulated Betaflight FC over a real pty: CLI
 entry, prompt detection through a streaming `diff`, complete `diff all`
 capture, a 40-line restore, reconnect/link-loss handling, and response
