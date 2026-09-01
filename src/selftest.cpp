@@ -588,29 +588,35 @@ int runSelfTest() {
         check(!app.session_.connected(), "About does not connect a flight controller");
         app.render();
         Surface s = app.display_.surface();
-        bool frameless = true;
+        bool transparentExterior = true;
+        bool disjointMasks = true;
         for (int y = 0; y < kMascotSize; ++y) {
             for (int x = 0; x < kMascotSize; ++x) {
-                const bool outerEdge = x < 5 || x >= kMascotSize - 5 ||
-                                       y < 5 || y >= kMascotSize - 5;
-                const bool corner = (x < 14 || x >= kMascotSize - 14) &&
-                                    (y < 14 || y >= kMascotSize - 14);
-                if (!outerEdge && !corner) continue;
                 const int bit = y * kMascotSize + x;
-                frameless &= (kMascotBits[bit / 8] & (0x80u >> (bit % 8))) != 0;
+                const uint8_t mask = static_cast<uint8_t>(0x80u >> (bit % 8));
+                const bool black = (kMascotBlackBits[bit / 8] & mask) != 0;
+                const bool white = (kMascotWhiteBits[bit / 8] & mask) != 0;
+                disjointMasks &= !(black && white);
+                if (x < 5 || x >= kMascotSize - 5 ||
+                    y < 5 || y >= kMascotSize - 5) {
+                    transparentExterior &= !black && !white;
+                }
             }
         }
-        check(frameless, "mascot has no surrounding badge frame");
+        check(disjointMasks, "mascot black and white masks do not overlap");
+        check(transparentExterior, "mascot exterior is transparent beyond the badge perimeter");
         bool identical = true;
         for (int y = 0; y < kMascotSize; ++y) {
             for (int x = 0; x < kMascotSize; ++x) {
                 const int bit = y * kMascotSize + x;
-                const Color want = kMascotBits[bit / 8] & (0x80u >> (bit % 8))
-                                       ? theme::bg : theme::accent;
+                const uint8_t mask = static_cast<uint8_t>(0x80u >> (bit % 8));
+                Color want = theme::bg;
+                if (kMascotBlackBits[bit / 8] & mask) want = theme::black;
+                else if (kMascotWhiteBits[bit / 8] & mask) want = rgb(0xff, 0xff, 0xff);
                 identical &= s.row(18 + y)[4 + x] == want;
             }
         }
-        check(identical, "About renders orange ink and transparent white without overlap");
+        check(identical, "About preserves black, white, and transparent mascot pixels");
         const std::string footerAction = "Esc back";
         app.drawHintBar(s, std::string(200, 'x'), footerAction);
         const int actionX = kScreenW - textWidth(footerAction) - 8;
@@ -644,7 +650,9 @@ int runSelfTest() {
                 Color want = theme::echo;
                 if (x < 12 && y < 12) {
                     const int bit = (y + 100) * kMascotSize + x + 100;
-                    if (!(kMascotBits[bit / 8] & (0x80u >> (bit % 8)))) want = theme::accent;
+                    const uint8_t mask = static_cast<uint8_t>(0x80u >> (bit % 8));
+                    if (kMascotBlackBits[bit / 8] & mask) want = theme::black;
+                    else if (kMascotWhiteBits[bit / 8] & mask) want = rgb(0xff, 0xff, 0xff);
                 }
                 transparentAndClipped &= small.row(y)[x] == want;
             }

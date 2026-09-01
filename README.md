@@ -336,7 +336,7 @@ The simulator is a witness with excellent availability and no propellers.
 | `src/brand.h` | project identity, author, and About copy |
 | `src/simfc.cpp` | simulated flight controller |
 | `src/mascot.cpp` | embedded mascot renderer |
-| `assets/` | frameless mascot source derivative and launcher icon |
+| `assets/` | approved black/white/transparent mascot masters for each native size |
 | `store/` | AppStore icon and current 320×170 UI screenshots |
 | `app-builder.json` | package identity and AppStore listing contract |
 | `packaging/` | Debian control, APPLaunch entry, wrapper, and copyright data |
