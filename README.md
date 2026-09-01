@@ -234,18 +234,20 @@ confirmation is a guardrail. It is not a small orange force field.
 Capability claims are separated here because a compiled branch, a simulated
 flight controller, and a live wire are three different witnesses.
 
-**Verified on x86-64 Linux and ARM64 under QEMU.** The 187 self-checks cover the
+**Verified on x86-64 Linux and ARM64 under QEMU.** The 205 self-checks cover the
 session state machine against a simulated Betaflight FC over a real pty: CLI
 entry, prompt detection through a streaming `diff`, complete `diff all`
-capture, and a 40-line restore. Keyboard decoding is checked against the v5
-matrix. Preview output covers the screen layouts. The suite also passes under
-AddressSanitizer and UndefinedBehaviorSanitizer. Seven isolated Git scenarios
-cover clean, dirty, unknown, and post-commit build identities.
+capture, a 40-line restore, reconnect/link-loss handling, and response
+accounting across scrollback trims. Keyboard decoding is checked against the
+v5 matrix. Preview output covers the screen layouts. The suite also passes
+under AddressSanitizer and UndefinedBehaviorSanitizer. Seven isolated Git
+scenarios cover clean, dirty, unknown, and post-commit build identities.
 
-**Verified on the bench Cardputer Zero.** The ARM64 binary passes all 187
-checks natively. A bounded `--about` run opens the real framebuffer and evdev
-input, renders the inspected 320×170 About screen, and exits cleanly before
-APPLaunch is restored. That check opens no FC serial port.
+**Verified on the bench Cardputer Zero at published commit `d98c3be`.** That
+ARM64 binary passed all 187 checks natively. A bounded `--about` run opened the
+real framebuffer and evdev input, rendered the inspected 320×170 About screen,
+and exited cleanly before APPLaunch was restored. That check opened no FC
+serial port; later commits are not claimed as device-tested here.
 
 **Implemented against documented Linux interfaces.** Framebuffer geometry and
 pixel bitfields come from `FBIOGET_VSCREENINFO` and
@@ -296,7 +298,7 @@ The simulator is a witness with excellent availability and no propellers.
 | `src/brand.h` | project identity, author, and About copy |
 | `src/simfc.cpp` | simulated flight controller |
 | `src/mascot.cpp` | embedded mascot renderer |
-| `assets/` | supplied mascot source and launcher icon |
+| `assets/` | frameless mascot source derivative and launcher icon |
 | `tools/build-info.sh` | source-commit identity refreshed by Make |
 | `tools/install.sh` | staged device installation and APPLaunch entry |
 

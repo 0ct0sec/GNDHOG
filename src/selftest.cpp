@@ -206,6 +206,27 @@ void testTerminal() {
     t.addLine("one more, which trims the oldest quarter", LineKind::Fc);
     checkEq(t.rowText(static_cast<size_t>(t.scroll())), atTop,
             "the viewport keeps its place across a trim");
+
+    // A redraw cannot use lineCount() as its arrival signal: adding exactly
+    // one trim batch leaves the bounded count unchanged despite fresh output.
+    t.clear();
+    while (t.lineCount() < 40) t.addLine("old", LineKind::Fc);
+    const size_t boundedCount = t.lineCount();
+    const uint64_t beforeBatch = t.linesEver();
+    for (int i = 0; i < 11; ++i) t.addLine("replacement", LineKind::Fc);
+    check(t.lineCount() == boundedCount, "a trim batch can leave lineCount unchanged");
+    check(t.linesEver() == beforeBatch + 11, "the arrival counter exposes replacement lines");
+
+    // Session bookkeeping consumes the completed batch, not only the tail
+    // still resident in scrollback. Every rejected line must remain visible to
+    // restore accounting even when one read is larger than the display buffer.
+    std::string rejectedBurst;
+    for (int i = 0; i < 60; ++i) rejectedBurst += "Invalid value\r\n";
+    const std::vector<TermLine> completed = t.feed(rejectedBurst);
+    int rejected = 0;
+    for (const TermLine& line : completed) rejected += isErrorLine(line.text) ? 1 : 0;
+    check(completed.size() == 60, "feed reports completed lines evicted by trimming");
+    check(rejected == 60, "every evicted rejection remains available to the session");
 }
 
 void testEditor() {

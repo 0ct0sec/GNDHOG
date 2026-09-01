@@ -36,7 +36,9 @@ public:
     int width() const { return cols_; }
     void setMaxLines(size_t n) { maxLines_ = n; }
 
-    void feed(const std::string& bytes);       // raw serial input
+    // Decodes raw serial input and returns every completed line from this
+    // batch, including lines immediately evicted by scrollback trimming.
+    std::vector<TermLine> feed(const std::string& bytes);
     void addLine(const std::string& text, LineKind kind);
     void clear();
     // Discards an unfinished byte-stream fragment without touching scrollback.

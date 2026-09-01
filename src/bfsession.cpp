@@ -243,18 +243,12 @@ void Session::poll(uint64_t now) {
     }
     if (n > 0) {
         lastByteMs_ = now;
-        const uint64_t linesBefore = term_.linesEver();
-        term_.feed(incoming);
+        const std::vector<TermLine> completed = term_.feed(incoming);
         // Cheap running harvest: every parameter name that scrolls past becomes
         // a completion candidate, so no extra query is ever needed.
-        // Locate new lines by their monotonic arrival count. lineCount() can
-        // shrink in the same feed when a full scrollback trims old rows.
-        const uint64_t added = term_.linesEver() - linesBefore;
-        const size_t survivingNew = static_cast<size_t>(
-            std::min<uint64_t>(added, static_cast<uint64_t>(term_.lineCount())));
-        const size_t firstNew = term_.lineCount() - survivingNew;
-        for (size_t i = firstNew; i < term_.lineCount(); ++i) {
-            const TermLine& l = term_.line(i);
+        // Inspect the batch itself rather than the bounded display buffer: a
+        // large read can evict an early response line before feed() returns.
+        for (const TermLine& l : completed) {
             if (l.text.find('=') != std::string::npos) completer_.harvest(l.text);
             if (job_.kind == JobKind::Restore && isErrorLine(l.text)) ++restoreErrors_;
             if (firmware_.empty() && l.text.find("Betaflight /") != std::string::npos) {

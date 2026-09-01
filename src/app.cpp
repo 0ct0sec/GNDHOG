@@ -759,9 +759,9 @@ void App::onAboutKey(const KeyEvent& e) {
 // --------------------------------------------------------------- main loop
 
 void App::tick(uint64_t now) {
-    const size_t linesBefore = term_.lineCount();
+    const uint64_t arrivalsBefore = term_.linesEver();
     session_.poll(now);
-    if (term_.lineCount() != linesBefore || session_.busy()) {
+    if (term_.linesEver() != arrivalsBefore || session_.busy()) {
         if (term_.following()) term_.scrollToBottom(bodyRows(true));
         dirty_ = true;
     }

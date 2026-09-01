@@ -83,7 +83,8 @@ void Terminal::addLine(const std::string& text, LineKind kind) {
     pushLine(text, kind);
 }
 
-void Terminal::feed(const std::string& bytes) {
+std::vector<TermLine> Terminal::feed(const std::string& bytes) {
+    std::vector<TermLine> completed;
     for (const char raw : bytes) {
         const unsigned char c = static_cast<unsigned char>(raw);
 
@@ -114,6 +115,7 @@ void Terminal::feed(const std::string& bytes) {
             // which is how the CLI redraws its prompt.
             break;
         case '\n':
+            completed.push_back(TermLine{partial_, partialKind_});
             pushLine(partial_, partialKind_);
             partial_.clear();
             partialKind_ = LineKind::Fc;
@@ -132,6 +134,7 @@ void Terminal::feed(const std::string& bytes) {
             break;
         }
     }
+    return completed;
 }
 
 std::string Terminal::rowText(size_t r) const {
