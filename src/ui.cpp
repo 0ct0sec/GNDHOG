@@ -11,9 +11,13 @@ namespace {
 std::string stateText(SessionState s) {
     switch (s) {
     case SessionState::Disconnected: return "offline";
+    case SessionState::ProbingMsp:   return "checking VTX";
+    case SessionState::AwaitingVtxChoice: return "VTX choice";
+    case SessionState::ApplyingVtxGuard:  return "setting pit";
     case SessionState::EnteringCli:  return "opening CLI";
     case SessionState::Ready:        return "ready";
     case SessionState::Busy:         return "busy";
+    case SessionState::Rebooting:    return "rebooting";
     case SessionState::Failed:       return "failed";
     }
     return "?";
@@ -112,7 +116,8 @@ const char* const kHelpText[] = {
     "FIELD CHECK",
     "  Reads status, tasks, and version without changing",
     "  FC configuration. It separates CLI/MSP blockers",
-    "  from current arming faults and keeps the raw output.",
+    "  from current arming faults, checks MCU temperature,",
+    "  and keeps the raw output.",
     "  It is a snapshot, not an airworthiness verdict.",
     "",
     "BACKUP AND RESTORE",
@@ -124,9 +129,10 @@ const char* const kHelpText[] = {
     "",
     "SAFETY",
     "  A command that can spin a motor or wipe settings",
-    "  asks first. Disconnecting only closes the port -",
-    "  `exit` is not sent, because on Betaflight that",
-    "  reboots the flight controller.",
+    "  asks first. A ready VTX can enter verified pit mode",
+    "  before CLI. Disconnect can reboot the FC to restore",
+    "  its saved flight state; cancel leaves pit mode active",
+    "  until the FC is rebooted or power-cycled.",
     "",
     "CONNECTION",
     "  Set the Host/Slave switch to HOST and plug the FC",
@@ -172,7 +178,10 @@ void App::drawTopBar(Surface& s) {
     const std::string st = stateText(session_.state());
     Color chip = theme::textDim;
     if (session_.state() == SessionState::Ready) chip = theme::ok;
-    else if (session_.state() == SessionState::Busy) chip = theme::warn;
+    else if (session_.state() == SessionState::Busy ||
+             session_.state() == SessionState::AwaitingVtxChoice ||
+             session_.state() == SessionState::ApplyingVtxGuard ||
+             session_.state() == SessionState::Rebooting) chip = theme::warn;
     else if (session_.state() == SessionState::Failed) chip = theme::err;
     const int chipW = textWidth(st) + 8;
     const int chipX = s.w - chipW;

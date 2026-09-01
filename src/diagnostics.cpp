@@ -152,6 +152,8 @@ struct StatusEvidence {
     std::string configState;
     bool gpsSeen = false;
     std::string gpsDetail;
+    bool coreTemperatureSeen = false;
+    int coreTemperatureC = 0;
 };
 
 StatusEvidence parseStatus(const std::string& text, DiagnosticReport& report) {
@@ -161,6 +163,13 @@ StatusEvidence parseStatus(const std::string& text, DiagnosticReport& report) {
     while (std::getline(in, line)) {
         const std::string t = trim(line);
         const std::string u = upper(t);
+        int temperatureC = 0;
+        if (parseCoreTemperatureC(t, temperatureC)) {
+            e.coreTemperatureSeen = true;
+            e.coreTemperatureC = temperatureC;
+            report.coreTemperatureAvailable = true;
+            report.coreTemperatureC = temperatureC;
+        }
         if (startsWith(u, "ARMING DISABLE FLAGS:")) {
             e.armingSeen = true;
             report.armingFlags = words(trim(t.substr(t.find(':') + 1)));
@@ -289,6 +298,25 @@ std::string firstVersionLine(const std::string& text) {
 
 } // namespace
 
+bool parseCoreTemperatureC(const std::string& text, int& temperatureC) {
+    std::istringstream in(text);
+    std::string line;
+    while (std::getline(in, line)) {
+        const std::string u = upper(line);
+        const size_t label = u.find("CORE TEMP");
+        if (label == std::string::npos) continue;
+        const size_t separator = line.find_first_of("=:", label + 9);
+        if (separator == std::string::npos) continue;
+        const char* start = line.c_str() + separator + 1;
+        char* end = nullptr;
+        const double value = std::strtod(start, &end);
+        if (end == start || !std::isfinite(value) || value < -100.0 || value > 250.0) continue;
+        temperatureC = static_cast<int>(std::lround(value));
+        return true;
+    }
+    return false;
+}
+
 int DiagnosticReport::failureCount() const {
     return static_cast<int>(std::count_if(findings.begin(), findings.end(),
         [](const DiagnosticFinding& f) { return f.level == DiagnosticLevel::Failure; }));
@@ -376,6 +404,21 @@ DiagnosticReport buildDiagnosticReport(const std::string& statusText,
             "I2C", status.i2cErrors == 0
                        ? "0 errors since boot"
                        : std::to_string(status.i2cErrors) + " cumulative errors since boot");
+    }
+
+    if (status.coreTemperatureSeen) {
+        DiagnosticLevel level = DiagnosticLevel::Pass;
+        std::string detail = std::to_string(status.coreTemperatureC) + "C MCU core";
+        if (status.coreTemperatureC >= 80) {
+            level = DiagnosticLevel::Failure;
+            detail += "; critical heat - disconnect power and cool the stack";
+        } else if (status.coreTemperatureC >= kDefaultCoreTemperatureAlarmC) {
+            level = DiagnosticLevel::Warning;
+            detail += "; at/above Betaflight's 70C default alarm";
+        } else {
+            detail += "; below Betaflight's 70C default alarm";
+        }
+        add(report, level, "Core temp", detail);
     }
 
     if (status.configSeen && status.configState != "CONFIGURED") {

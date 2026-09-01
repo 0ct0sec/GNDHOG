@@ -1,4 +1,5 @@
 #include "bfsession.h"
+#include "diagnostics.h"
 #include "input.h"
 
 #include <algorithm>
@@ -16,6 +17,11 @@ constexpr uint64_t kCommandTimeoutMs = 15000;
 constexpr uint64_t kRestoreLineTimeoutMs = 3000;
 constexpr uint64_t kCliBannerTimeoutMs = 2500;
 constexpr int kCliMaxAttempts = 3;
+constexpr uint8_t kMspVtxConfig = 88;
+constexpr uint8_t kMspSetVtxConfig = 89;
+constexpr uint64_t kMspReplyTimeoutMs = 900;
+constexpr uint64_t kVtxApplySettleMs = 700;
+constexpr uint64_t kRebootDrainMs = 400;
 
 std::string trim(const std::string& s) {
     size_t a = 0, b = s.size();
@@ -25,6 +31,18 @@ std::string trim(const std::string& s) {
 }
 
 } // namespace
+
+std::string VtxStatus::deviceLabel() const {
+    switch (deviceType) {
+    case 1: return "RTC6705";
+    case 3: return "SmartAudio";
+    case 4: return "Tramp";
+    case 5: return "MSP VTX";
+    case 0: return "unsupported";
+    case 0xFF: return "unknown";
+    default: return "VTX type " + std::to_string(deviceType);
+    }
+}
 
 bool isErrorLine(const std::string& line) {
     const std::string t = trim(line);
@@ -75,15 +93,18 @@ bool Session::connect(const std::string& device, int baud, std::string& error) {
     }
     term_.resetInputFragment();
     linkLost_ = false;
-    state_ = SessionState::EnteringCli;
+    state_ = SessionState::ProbingMsp;
     connectStartMs_ = nowMs();
     lastByteMs_ = connectStartMs_;
-    cliAttempts_ = 1;
-    // '#' is how Betaflight leaves MSP mode and enters the CLI. If it is
-    // already in the CLI the same byte is just a comment, so this is safe to
-    // send either way. One newline, never CRLF: Betaflight ends a line on
-    // either character and prints a prompt for each, so CRLF gives two.
-    port_.write("#\n");
+    mspInput_.clear();
+    mspAction_ = MspAction::ProbeVtx;
+    mspDeadlineMs_ = connectStartMs_ + kMspReplyTimeoutMs;
+    vtxOriginal_ = VtxStatus{};
+    vtxBenchMode_ = VtxBenchMode::None;
+    vtxGuardNote_.clear();
+    coreTemperatureAvailable_ = false;
+    coreTemperatureC_ = 0;
+    queueMsp(kMspVtxConfig);
     return true;
 }
 
@@ -100,6 +121,125 @@ void Session::disconnect() {
     firmware_.clear();
     board_.clear();
     craft_.clear();
+    mspInput_.clear();
+    mspAction_ = MspAction::None;
+    vtxOriginal_ = VtxStatus{};
+    vtxBenchMode_ = VtxBenchMode::None;
+}
+
+void Session::beginCli(uint64_t now) {
+    if (!port_.isOpen()) return;
+    mspInput_.clear();
+    mspAction_ = MspAction::None;
+    state_ = SessionState::EnteringCli;
+    connectStartMs_ = now;
+    lastByteMs_ = now;
+    cliAttempts_ = 1;
+    // '#' is how Betaflight leaves MSP mode and enters the CLI. If it is
+    // already in the CLI the same byte is just a comment, so this is safe to
+    // send either way. One newline, never CRLF: Betaflight ends a line on
+    // either character and prints a prompt for each, so CRLF gives two.
+    port_.write("#\n");
+}
+
+void Session::queueMsp(uint8_t command, const std::vector<uint8_t>& payload) {
+    std::string frame;
+    frame.reserve(payload.size() + 6);
+    frame += "$M<";
+    const uint8_t size = static_cast<uint8_t>(payload.size());
+    frame.push_back(static_cast<char>(size));
+    frame.push_back(static_cast<char>(command));
+    uint8_t checksum = size ^ command;
+    for (uint8_t byte : payload) {
+        frame.push_back(static_cast<char>(byte));
+        checksum ^= byte;
+    }
+    frame.push_back(static_cast<char>(checksum));
+    port_.write(frame);
+}
+
+bool Session::parseVtxStatus(const std::vector<uint8_t>& payload, VtxStatus& status) const {
+    if (payload.size() < 9) return false;
+    status = VtxStatus{};
+    status.valid = true;
+    status.deviceType = payload[0];
+    status.band = payload[1];
+    status.channel = payload[2];
+    status.power = payload[3];
+    status.pitMode = payload[4] != 0;
+    status.frequency = static_cast<uint16_t>(payload[5]) |
+                       (static_cast<uint16_t>(payload[6]) << 8);
+    status.deviceReady = payload[7] != 0;
+    status.lowPowerDisarm = payload[8];
+    if (payload.size() >= 15) {
+        status.tableAvailable = payload[11] != 0;
+        status.powerLevels = payload[14];
+    }
+    return true;
+}
+
+std::vector<uint8_t> Session::vtxSetPayload(uint8_t power, bool pitMode) const {
+    uint16_t encoded = vtxOriginal_.frequency;
+    if (vtxOriginal_.band > 0 && vtxOriginal_.channel > 0 &&
+        vtxOriginal_.band <= 8 && vtxOriginal_.channel <= 8) {
+        encoded = static_cast<uint16_t>((vtxOriginal_.band - 1) * 8 +
+                                        (vtxOriginal_.channel - 1));
+    }
+    return {
+        static_cast<uint8_t>(encoded & 0xFF),
+        static_cast<uint8_t>((encoded >> 8) & 0xFF),
+        power,
+        static_cast<uint8_t>(pitMode ? 1 : 0),
+    };
+}
+
+void Session::requestVtxStatus(MspAction action, uint64_t now) {
+    mspAction_ = action;
+    mspDeadlineMs_ = now + kMspReplyTimeoutMs;
+    queueMsp(kMspVtxConfig);
+}
+
+void Session::finishVtxGuard(VtxBenchMode mode, const std::string& note, uint64_t now) {
+    vtxBenchMode_ = mode;
+    vtxGuardNote_ = note;
+    ++vtxGuardNoteSequence_;
+    term_.addLine("-- " + note + " --", mode == VtxBenchMode::PitMode ? LineKind::Good : LineKind::Warn);
+    beginCli(now);
+}
+
+void Session::startPitRollback(uint64_t now) {
+    mspAction_ = MspAction::SetPitOff;
+    mspDeadlineMs_ = now + kMspReplyTimeoutMs;
+    queueMsp(kMspSetVtxConfig, vtxSetPayload(vtxOriginal_.power, false));
+}
+
+void Session::enableVtxBenchGuard() {
+    if (state_ != SessionState::AwaitingVtxChoice) return;
+    const uint64_t now = nowMs();
+    state_ = SessionState::ApplyingVtxGuard;
+    mspAction_ = MspAction::SetPit;
+    mspDeadlineMs_ = now + kMspReplyTimeoutMs;
+    // Pit mode is runtime state and does not alter the saved VTX power. Some
+    // SmartAudio versions cannot enter it after power-up; in that case we fail
+    // closed instead of modifying vtx_power behind the operator's back.
+    queueMsp(kMspSetVtxConfig, vtxSetPayload(vtxOriginal_.power, true));
+}
+
+void Session::skipVtxBenchGuard() {
+    if (state_ != SessionState::AwaitingVtxChoice) return;
+    vtxGuardNote_ = "VTX left at its current flight setting";
+    ++vtxGuardNoteSequence_;
+    term_.addLine("-- " + vtxGuardNote_ + " --", LineKind::Warn);
+    beginCli(nowMs());
+}
+
+bool Session::restoreVtxAndDisconnect() {
+    if (!vtxBenchGuardActive() || !ready()) return false;
+    term_.addLine("-- restoring saved VTX state by rebooting the FC --", LineKind::Local);
+    state_ = SessionState::Rebooting;
+    rebootStartedMs_ = nowMs();
+    port_.write("exit\n");
+    return true;
 }
 
 bool Session::atPrompt() const {
@@ -218,11 +358,146 @@ void Session::pumpRestore(uint64_t now) {
     beginCommand(restoreLines_[restoreIndex_], now);
 }
 
+void Session::processMspInput(uint64_t now) {
+    for (;;) {
+        const size_t start = mspInput_.find("$M");
+        if (start == std::string::npos) {
+            if (mspInput_.size() > 2) mspInput_.erase(0, mspInput_.size() - 2);
+            return;
+        }
+        if (start > 0) mspInput_.erase(0, start);
+        if (mspInput_.size() < 6) return;
+        const uint8_t direction = static_cast<uint8_t>(mspInput_[2]);
+        if (direction != '>' && direction != '!') {
+            mspInput_.erase(0, 1);
+            continue;
+        }
+        const uint8_t size = static_cast<uint8_t>(mspInput_[3]);
+        const size_t frameSize = static_cast<size_t>(size) + 6;
+        if (mspInput_.size() < frameSize) return;
+        const uint8_t command = static_cast<uint8_t>(mspInput_[4]);
+        uint8_t checksum = size ^ command;
+        std::vector<uint8_t> payload;
+        payload.reserve(size);
+        for (size_t i = 0; i < size; ++i) {
+            const uint8_t byte = static_cast<uint8_t>(mspInput_[5 + i]);
+            payload.push_back(byte);
+            checksum ^= byte;
+        }
+        const uint8_t received = static_cast<uint8_t>(mspInput_[frameSize - 1]);
+        mspInput_.erase(0, frameSize);
+        if (checksum != received) continue;
+        handleMspFrame(direction, command, payload, now);
+        if (state_ == SessionState::EnteringCli || state_ == SessionState::Disconnected) return;
+    }
+}
+
+void Session::handleMspFrame(uint8_t direction, uint8_t command,
+                             const std::vector<uint8_t>& payload, uint64_t now) {
+    if (direction == '!') {
+        if (mspAction_ == MspAction::SetPit) {
+            finishVtxGuard(VtxBenchMode::None,
+                           "VTX rejected the bench guard; power state was not changed", now);
+        } else if (mspAction_ == MspAction::VerifyPit) {
+            startPitRollback(now);
+        } else if (mspAction_ == MspAction::SetPitOff ||
+                   mspAction_ == MspAction::VerifyPitOff) {
+            finishVtxGuard(VtxBenchMode::Unconfirmed,
+                           "VTX state is unconfirmed; reboot restoration will be offered", now);
+        } else if (mspAction_ == MspAction::ProbeVtx) {
+            beginCli(now);
+        }
+        return;
+    }
+
+    if (mspAction_ == MspAction::ProbeVtx && command == kMspVtxConfig) {
+        VtxStatus status;
+        if (!parseVtxStatus(payload, status) || !status.deviceReady ||
+            status.deviceType == 0 || status.deviceType == 0xFF) {
+            beginCli(now);
+            return;
+        }
+        const bool encodedChannelValid = status.band > 0 && status.band <= 8 &&
+                                         status.channel > 0 && status.channel <= 8;
+        const bool directFrequencyValid = status.band == 0 &&
+                                          status.frequency >= 5000 && status.frequency <= 5999;
+        if (!encodedChannelValid && !directFrequencyValid) {
+            term_.addLine("-- VTX state cannot be preserved safely; bench guard skipped --",
+                          LineKind::Warn);
+            beginCli(now);
+            return;
+        }
+        vtxOriginal_ = status;
+        if (status.pitMode) {
+            vtxGuardNote_ = "VTX already reports pit mode";
+            ++vtxGuardNoteSequence_;
+            term_.addLine("-- " + vtxGuardNote_ + " --", LineKind::Good);
+            beginCli(now);
+            return;
+        }
+        state_ = SessionState::AwaitingVtxChoice;
+        mspAction_ = MspAction::None;
+        term_.addLine("-- VTX detected: " + status.deviceLabel() +
+                          ", power level " + std::to_string(status.power) + " --",
+                      LineKind::Local);
+        return;
+    }
+
+    if (command == kMspSetVtxConfig) {
+        if (mspAction_ == MspAction::SetPit) {
+            mspAction_ = MspAction::WaitPit;
+            mspDeadlineMs_ = now + kVtxApplySettleMs;
+        } else if (mspAction_ == MspAction::SetPitOff) {
+            mspAction_ = MspAction::WaitPitOff;
+            mspDeadlineMs_ = now + kVtxApplySettleMs;
+        }
+        return;
+    }
+
+    if (command != kMspVtxConfig) return;
+    VtxStatus status;
+    if (!parseVtxStatus(payload, status)) return;
+    if (mspAction_ == MspAction::VerifyPit) {
+        if (status.deviceReady && status.pitMode) {
+            finishVtxGuard(VtxBenchMode::PitMode,
+                           "VTX pit mode confirmed for this unsaved bench session", now);
+        } else {
+            startPitRollback(now);
+        }
+    } else if (mspAction_ == MspAction::VerifyPitOff) {
+        if (status.deviceReady && status.pitMode) {
+            finishVtxGuard(VtxBenchMode::PitMode,
+                           "VTX pit mode confirmed after a delayed response", now);
+        } else if (status.deviceReady) {
+            finishVtxGuard(VtxBenchMode::None,
+                           "VTX pit mode unsupported; unchanged state confirmed", now);
+        } else {
+            finishVtxGuard(VtxBenchMode::Unconfirmed,
+                           "VTX state became unavailable; reboot restoration will be offered", now);
+        }
+    }
+}
+
+void Session::noteCoreTemperature(const std::vector<TermLine>& lines) {
+    for (const TermLine& line : lines) {
+        int temperatureC = 0;
+        if (!parseCoreTemperatureC(line.text, temperatureC)) continue;
+        coreTemperatureAvailable_ = true;
+        coreTemperatureC_ = temperatureC;
+        ++coreTemperatureSequence_;
+    }
+}
+
 void Session::poll(uint64_t now) {
     if (!port_.isOpen()) return;
 
     std::string err;
     if (!port_.flush(err)) {
+        if (state_ == SessionState::Rebooting) {
+            term_.addLine("-- FC reboot requested; saved VTX state will reload --", LineKind::Good);
+            disconnect();
+            return;
+        }
         linkLost_ = true;
         term_.addLine("-- link lost (" + err + ") --", LineKind::Error);
         port_.close();
@@ -234,6 +509,11 @@ void Session::poll(uint64_t now) {
     std::string incoming;
     const int n = port_.read(incoming);
     if (n < 0) {
+        if (state_ == SessionState::Rebooting) {
+            term_.addLine("-- FC reboot observed; saved VTX state will reload --", LineKind::Good);
+            disconnect();
+            return;
+        }
         linkLost_ = true;
         term_.addLine("-- link lost (device disconnected) --", LineKind::Error);
         port_.close();
@@ -243,7 +523,17 @@ void Session::poll(uint64_t now) {
     }
     if (n > 0) {
         lastByteMs_ = now;
+        if (state_ == SessionState::ProbingMsp ||
+            state_ == SessionState::AwaitingVtxChoice ||
+            state_ == SessionState::ApplyingVtxGuard) {
+            mspInput_ += incoming;
+            processMspInput(now);
+            incoming.clear();
+        }
+    }
+    if (!incoming.empty()) {
         const std::vector<TermLine> completed = term_.feed(incoming);
+        noteCoreTemperature(completed);
         // Cheap running harvest: every parameter name that scrolls past becomes
         // a completion candidate, so no extra query is ever needed.
         // Inspect the batch itself rather than the bounded display buffer: a
@@ -258,6 +548,38 @@ void Session::poll(uint64_t now) {
     }
 
     switch (state_) {
+    case SessionState::ProbingMsp:
+        if (now >= mspDeadlineMs_) beginCli(now);
+        break;
+
+    case SessionState::AwaitingVtxChoice:
+        break;
+
+    case SessionState::ApplyingVtxGuard:
+        if (now < mspDeadlineMs_) break;
+        switch (mspAction_) {
+        case MspAction::SetPit:
+        case MspAction::WaitPit:
+            requestVtxStatus(MspAction::VerifyPit, now);
+            break;
+        case MspAction::VerifyPit:
+            startPitRollback(now);
+            break;
+        case MspAction::SetPitOff:
+        case MspAction::WaitPitOff:
+            requestVtxStatus(MspAction::VerifyPitOff, now);
+            break;
+        case MspAction::VerifyPitOff:
+            finishVtxGuard(VtxBenchMode::Unconfirmed,
+                           "VTX state is unconfirmed; reboot restoration will be offered", now);
+            break;
+        default:
+            finishVtxGuard(VtxBenchMode::None,
+                           "VTX bench guard stopped without confirmation", now);
+            break;
+        }
+        break;
+
     case SessionState::EnteringCli: {
         if (atPrompt() && idleMs(now) >= kPromptQuietMs) {
             state_ = SessionState::Ready;
@@ -324,6 +646,13 @@ void Session::poll(uint64_t now) {
         }
         break;
     }
+
+    case SessionState::Rebooting:
+        if (port_.pendingOut() == 0 && now - rebootStartedMs_ >= kRebootDrainMs) {
+            term_.addLine("-- FC reboot requested; saved VTX state will reload --", LineKind::Good);
+            disconnect();
+        }
+        break;
 
     case SessionState::Ready:
     case SessionState::Disconnected:

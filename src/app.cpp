@@ -94,13 +94,15 @@ void App::setScreen(Screen s) {
 }
 
 void App::confirm(const std::string& title, const std::string& body,
-                  const std::string& yesLabel, std::function<void()> onYes) {
+                  const std::string& yesLabel, std::function<void()> onYes,
+                  std::function<void()> onNo) {
     modal_ = true;
     modalIsConfirm_ = true;
     modalTitle_ = title;
     modalBody_ = body;
     modalYes_ = yesLabel;
     modalAction_ = std::move(onYes);
+    modalCancelAction_ = std::move(onNo);
     // Drop held keys so an autorepeat cannot answer a dialog the user has not
     // seen yet.
     keyboard_.releaseAll();
@@ -114,6 +116,7 @@ void App::notice(const std::string& title, const std::string& body) {
     modalBody_ = body;
     modalYes_.clear();
     modalAction_ = nullptr;
+    modalCancelAction_ = nullptr;
     keyboard_.releaseAll();
     dirty_ = true;
 }
@@ -121,6 +124,7 @@ void App::notice(const std::string& title, const std::string& body) {
 void App::closeModal() {
     modal_ = false;
     modalAction_ = nullptr;
+    modalCancelAction_ = nullptr;
     keyboard_.releaseAll();
     dirty_ = true;
 }
@@ -193,7 +197,7 @@ bool App::setup(const Options& opt, std::string& error) {
         {"About GNDHOG ZERO", "0ct0 / build / ground crew", MenuAbout, true},
         {"Brightness -", "", MenuBrightDown, true},
         {"Brightness +", "", MenuBrightUp, true},
-        {"Disconnect", "close the serial port", MenuDisconnect, true},
+        {"Disconnect", "restore bench VTX state or close link", MenuDisconnect, true},
         {"Exit GNDHOG ZERO", "return to the launcher", MenuExit, true},
     };
     quick_.clear();
@@ -214,6 +218,7 @@ bool App::setup(const Options& opt, std::string& error) {
     } else if (!opt_.portOverride.empty()) {
         std::string cerr;
         if (session_.connect(opt_.portOverride, opt_.baud, cerr)) {
+            temperatureCheckPending_ = true;
             setScreen(Screen::Terminal);
         } else {
             pushLocal("connect failed: " + cerr, LineKind::Error);
@@ -270,15 +275,54 @@ void App::connectSelected() {
         notice("Could not open port", err);
         return;
     }
+    temperatureCheckPending_ = true;
+    temperatureAlarmLatched_ = false;
     setScreen(Screen::Terminal);
 }
 
-void App::doDisconnect() {
+void App::finishDisconnect(bool exitAfter) {
     diagnosticRunning_ = false;
     session_.disconnect();
     pushLocal("-- disconnected --", LineKind::Warn);
+    temperatureCheckPending_ = false;
     refreshPorts();
-    setScreen(Screen::Ports);
+    if (exitAfter) running_ = false;
+    else setScreen(Screen::Ports);
+}
+
+void App::requestDisconnect(bool exitAfter) {
+    if (!session_.connected()) {
+        finishDisconnect(exitAfter);
+        return;
+    }
+    if (!session_.vtxBenchGuardActive()) {
+        finishDisconnect(exitAfter);
+        return;
+    }
+    if (!session_.ready()) {
+        notice("VTX guard busy",
+               "Wait for the current FC command to finish before restoring the VTX state.");
+        return;
+    }
+
+    const std::string guardState = session_.vtxBenchMode() == VtxBenchMode::PitMode
+                                       ? "Pit mode is active for bench work."
+                                       : "The VTX state could not be confirmed after the pit-mode request.";
+    confirm("Restore VTX state?",
+            guardState + " Restore the saved flight state?\n\n"
+            "Restore exits CLI, discards unsaved CLI changes, and reboots the FC. Cancel closes "
+            "the link and leaves pit mode active until the FC is rebooted or power-cycled.",
+            "Restore", [this, exitAfter]() {
+                if (!session_.restoreVtxAndDisconnect()) {
+                    notice("Could not restore", "The FC is busy. Wait for the prompt and try again.");
+                    return;
+                }
+                disconnectAfterVtxRestore_ = true;
+                exitAfterVtxRestore_ = exitAfter;
+                status_ = "restoring VTX state via FC reboot";
+                statusUntil_ = nowMs() + 5000;
+            },
+            [this, exitAfter]() { finishDisconnect(exitAfter); });
 }
 
 void App::submitLine() {
@@ -599,8 +643,8 @@ void App::applyMenu(int id) {
         break;
     case MenuBrightDown: adjustBrightness(-10); break;
     case MenuBrightUp:   adjustBrightness(+10); break;
-    case MenuDisconnect: doDisconnect(); break;
-    case MenuExit:       running_ = false; break;
+    case MenuDisconnect: requestDisconnect(false); break;
+    case MenuExit:       requestDisconnect(true); break;
     default: break;
     }
 }
@@ -625,7 +669,9 @@ bool App::handleModalKey(const KeyEvent& e) {
         closeModal();
         if (action) action();
     } else if (no) {
+        auto action = modalCancelAction_;
         closeModal();
+        if (action) action();
     }
     return true;
 }
@@ -730,7 +776,7 @@ void App::onTerminalKey(const KeyEvent& e) {
         menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
         setScreen(Screen::Menu);
         return;
-    case Key::F10: doDisconnect(); return;
+    case Key::F10: requestDisconnect(false); return;
     case Key::Char:
         editor_.insert(e.ch);
         completions_.clear();
@@ -890,6 +936,66 @@ void App::tick(uint64_t now) {
         dirty_ = true;
     }
 
+    if (session_.awaitingVtxChoice() && !modal_) {
+        const VtxStatus& vtx = session_.vtxStatus();
+        std::string power = "power level " + std::to_string(vtx.power);
+        if (vtx.powerLevels > 0) power += "/" + std::to_string(vtx.powerLevels);
+        confirm("Bench VTX guard?",
+                vtx.deviceLabel() + " reports " + power + ".\n\n"
+                "Try verified pit mode before entering CLI? This is the VTX's purpose-built "
+                "bench state; no setting is saved. Unsupported hardware is left unchanged.",
+                "Use pit", [this]() { session_.enableVtxBenchGuard(); },
+                [this]() { session_.skipVtxBenchGuard(); });
+    }
+
+    if (temperatureCheckPending_ && session_.ready() && !session_.job().active()) {
+        temperatureCheckPending_ = false;
+        pushLocal("-- safety check: reading FC core temperature --", LineKind::Local);
+        if (!session_.startCapture(
+                "status", "Reading FC temperature",
+                [this](bool ok, const std::string&) {
+                    if (!ok) {
+                        status_ = "FC temperature unavailable";
+                        statusUntil_ = nowMs() + 3000;
+                    }
+                })) {
+            status_ = "temperature check deferred - FC busy";
+            statusUntil_ = now + 3000;
+        }
+    }
+
+    if (session_.coreTemperatureSequence() != lastTemperatureSequence_) {
+        lastTemperatureSequence_ = session_.coreTemperatureSequence();
+        const int temperatureC = session_.coreTemperatureC();
+        status_ = "FC core " + std::to_string(temperatureC) + "C";
+        statusUntil_ = now + 5000;
+        if (temperatureC >= kDefaultCoreTemperatureAlarmC && !temperatureAlarmLatched_) {
+            temperatureAlarmLatched_ = true;
+            temperatureWarningPending_ = true;
+        } else if (temperatureC < kDefaultCoreTemperatureAlarmC - 5) {
+            temperatureAlarmLatched_ = false;
+        }
+        dirty_ = true;
+    }
+
+    if (temperatureWarningPending_ && !modal_) {
+        temperatureWarningPending_ = false;
+        const int temperatureC = session_.coreTemperatureC();
+        notice(temperatureC >= 80 ? "CRITICAL FC TEMPERATURE" : "FC temperature warning",
+               "FC MCU core is " + std::to_string(temperatureC) +
+                   "C. Betaflight's default alarm is 70C.\n\n"
+                   "This is not a VTX temperature sensor. Stop bench work, disconnect battery "
+                   "power, and let the stack cool before continuing.");
+    }
+
+    if (disconnectAfterVtxRestore_ && !session_.connected()) {
+        const bool exitAfter = exitAfterVtxRestore_;
+        disconnectAfterVtxRestore_ = false;
+        exitAfterVtxRestore_ = false;
+        finishDisconnect(exitAfter);
+        return;
+    }
+
     const JobStatus& job = session_.job();
     if (diagnosticRunning_ && !session_.connected()) {
         diagnosticRunning_ = false;
@@ -919,7 +1025,9 @@ void App::tick(uint64_t now) {
         if (!linkLossHandled_) {
             linkLossHandled_ = true;
             refreshPorts();
-            status_ = "link lost - Esc for the menu to reconnect";
+            status_ = session_.vtxBenchGuardActive()
+                          ? "link lost - pit mode clears only when the FC reboots"
+                          : "link lost - Esc for the menu to reconnect";
             statusUntil_ = now + 6000;
             dirty_ = true;
         }
@@ -980,6 +1088,30 @@ int App::run(const Options& opt) {
         render();
         if (display_.canvas().writePpm(opt.previewDir + "/10-confirm.ppm")) ++written;
         closeModal();
+        confirm("Bench VTX guard?",
+                "SmartAudio reports power level 3/4.\n\nTry verified pit mode before entering "
+                "CLI? This is the VTX's purpose-built bench state; no setting is saved. "
+                "Unsupported hardware is left unchanged.",
+                "Use pit", nullptr);
+        render();
+        if (display_.canvas().writePpm(opt.previewDir + "/11-vtx-guard.ppm")) ++written;
+        closeModal();
+        notice("CRITICAL FC TEMPERATURE",
+               "FC MCU core is 82C. Betaflight's default alarm is 70C.\n\n"
+               "This is not a VTX temperature sensor. Stop bench work, disconnect battery "
+               "power, and let the stack cool before continuing.");
+        render();
+        if (display_.canvas().writePpm(opt.previewDir + "/12-temperature-warning.ppm")) ++written;
+        closeModal();
+        confirm("Restore VTX state?",
+                "Pit mode is active for bench work. Restore the saved flight state?\n\n"
+                "Restore exits CLI, discards unsaved CLI changes, and reboots the FC. Cancel "
+                "closes the link and leaves pit mode active until the FC is rebooted or "
+                "power-cycled.",
+                "Restore", nullptr);
+        render();
+        if (display_.canvas().writePpm(opt.previewDir + "/13-vtx-restore.ppm")) ++written;
+        closeModal();
         std::printf("wrote %d previews to %s\n", written, opt.previewDir.c_str());
         teardown();
         return written > 0 ? 0 : 1;
@@ -996,6 +1128,7 @@ int App::run(const Options& opt) {
         std::string cerr;
         pushLocal("simulated flight controller on " + sim.devicePath(), LineKind::Local);
         session_.connect(sim.devicePath(), 115200, cerr);
+        temperatureCheckPending_ = true;
         setScreen(Screen::Terminal);
     }
 

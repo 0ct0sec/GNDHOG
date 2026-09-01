@@ -127,8 +127,14 @@ void SimFc::stop() {
     master_ = -1;
     slavePath_.clear();
     in_.clear();
+    wireIn_.clear();
     out_.clear();
     cliMode_ = false;
+    vtxPower_ = 3;
+    vtxPitMode_ = false;
+    vtxReady_ = true;
+    pitModeSupported_ = true;
+    coreTemperatureC_ = 37;
 }
 
 void SimFc::emit(const std::string& text) { out_ += text; }
@@ -143,6 +149,48 @@ void SimFc::flush() {
         return;
     }
 #endif
+}
+
+void SimFc::emitMsp(uint8_t command, const std::vector<uint8_t>& payload) {
+    std::string frame = "$M>";
+    const uint8_t size = static_cast<uint8_t>(payload.size());
+    frame.push_back(static_cast<char>(size));
+    frame.push_back(static_cast<char>(command));
+    uint8_t checksum = size ^ command;
+    for (uint8_t byte : payload) {
+        frame.push_back(static_cast<char>(byte));
+        checksum ^= byte;
+    }
+    frame.push_back(static_cast<char>(checksum));
+    emit(frame);
+}
+
+void SimFc::respondMsp(uint8_t command, const std::vector<uint8_t>& payload) {
+    if (command == 88) { // MSP_VTX_CONFIG
+        const uint16_t frequency = 5658;
+        emitMsp(command, {
+            3,                 // SmartAudio
+            5, 1,             // Raceband 1
+            vtxPower_,
+            static_cast<uint8_t>(vtxPitMode_ ? 1 : 0),
+            static_cast<uint8_t>(frequency & 0xFF),
+            static_cast<uint8_t>((frequency >> 8) & 0xFF),
+            static_cast<uint8_t>(vtxReady_ ? 1 : 0),
+            0,                 // low-power-disarm off
+            0, 0,              // pit frequency
+            1, 5, 8, 4,       // VTX table available, 4 power levels
+        });
+    } else if (command == 89 && payload.size() >= 4) { // MSP_SET_VTX_CONFIG
+        vtxPower_ = payload[2];
+        if (pitModeSupported_) vtxPitMode_ = payload[3] != 0;
+        emitMsp(command);
+    } else {
+        std::string frame = "$M!";
+        frame.push_back(0);
+        frame.push_back(static_cast<char>(command));
+        frame.push_back(static_cast<char>(command));
+        emit(frame);
+    }
 }
 
 void SimFc::respond(const std::string& raw) {
@@ -164,7 +212,8 @@ void SimFc::respond(const std::string& raw) {
         emit("# Betaflight / STM32G47X (G473) 2026.6.0-alpha May 15 2026 / 06:14:55 "
              "(e92c10887) MSP API: 1.48\r\n");
     } else if (cmd == "status") {
-        emit("MCU G473 Clock=170MHz, Vref=3.30V, Core temp=37degC\r\n"
+        emit("MCU G473 Clock=170MHz, Vref=3.30V, Core temp=" +
+             std::to_string(coreTemperatureC_) + "degC\r\n"
              "Stack size: 2048, Stack address: 0x2001c000\r\n"
              "Configuration: CONFIGURED, size: 3421, max available: 32768\r\n"
              "Gyros detected: gyro 1\r\n"
@@ -223,8 +272,34 @@ void SimFc::pump() {
     for (;;) {
         const ssize_t n = ::read(master_, buf, sizeof(buf));
         if (n <= 0) break;
-        for (ssize_t i = 0; i < n; ++i) {
-            const char c = buf[i];
+        wireIn_.append(buf, static_cast<size_t>(n));
+        for (;;) {
+            if (wireIn_.empty()) break;
+            if (wireIn_[0] == '$') {
+                if (wireIn_.size() < 3) break;
+                if (wireIn_.compare(0, 3, "$M<") == 0) {
+                    if (wireIn_.size() < 6) break;
+                    const uint8_t size = static_cast<uint8_t>(wireIn_[3]);
+                    const size_t frameSize = static_cast<size_t>(size) + 6;
+                    if (wireIn_.size() < frameSize) break;
+                    const uint8_t command = static_cast<uint8_t>(wireIn_[4]);
+                    uint8_t checksum = size ^ command;
+                    std::vector<uint8_t> payload;
+                    payload.reserve(size);
+                    for (size_t i = 0; i < size; ++i) {
+                        const uint8_t byte = static_cast<uint8_t>(wireIn_[5 + i]);
+                        payload.push_back(byte);
+                        checksum ^= byte;
+                    }
+                    const uint8_t received = static_cast<uint8_t>(wireIn_[frameSize - 1]);
+                    wireIn_.erase(0, frameSize);
+                    if (checksum == received) respondMsp(command, payload);
+                    continue;
+                }
+            }
+
+            const char c = wireIn_.front();
+            wireIn_.erase(0, 1);
             // The real CLI echoes every byte it receives.
             if (c == '\n') {
                 emit("\r\n");

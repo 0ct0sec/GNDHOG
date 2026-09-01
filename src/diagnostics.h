@@ -5,6 +5,10 @@
 
 namespace bf {
 
+// Betaflight's own default OSD warning threshold. The status command exposes
+// the MCU die temperature, not a VTX temperature sensor.
+constexpr int kDefaultCoreTemperatureAlarmC = 70;
+
 enum class DiagnosticLevel {
     Pass,
     Info,
@@ -31,12 +35,18 @@ struct DiagnosticReport {
     bool statusAvailable = false;
     bool tasksAvailable = false;
     bool versionAvailable = false;
+    bool coreTemperatureAvailable = false;
+    int coreTemperatureC = 0;
 
     int failureCount() const;
     int warningCount() const;
     int actionableBlockerCount() const;
     bool complete() const { return statusAvailable && tasksAvailable && versionAvailable; }
 };
+
+// Extracts `Core temp=41degC` (and spacing/case variants) from status output.
+// Returns false when the target does not expose an MCU temperature.
+bool parseCoreTemperatureC(const std::string& text, int& temperatureC);
 
 DiagnosticReport buildDiagnosticReport(const std::string& statusText,
                                        const std::string& tasksText,

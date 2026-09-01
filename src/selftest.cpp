@@ -429,6 +429,24 @@ void testDiagnostics() {
     check(report.failureCount() == 0 && report.warningCount() == 0,
           "healthy explicit evidence is not promoted to a fault");
     check(report.findings.size() >= 6, "health report covers arming, gyro, RX, battery, bus, runtime, and firmware");
+    check(report.coreTemperatureAvailable && report.coreTemperatureC == 41,
+          "status exposes the FC MCU core temperature without calling it VTX temperature");
+    int parsedTemperature = 0;
+    check(parseCoreTemperatureC("MCU H743, Core Temp: 70.4 degC", parsedTemperature) &&
+              parsedTemperature == 70,
+          "core-temperature parser accepts spacing, case, colon, and decimal variants");
+
+    std::string hotStatus = modernStatus;
+    const size_t temperatureAt = hotStatus.find("Core temp=41degC");
+    hotStatus.replace(temperatureAt, std::strlen("Core temp=41degC"), "Core temp=82degC");
+    DiagnosticReport hotReport = buildDiagnosticReport(hotStatus, modernTasks, modernVersion);
+    bool criticalTemperature = false;
+    for (const DiagnosticFinding& finding : hotReport.findings) {
+        if (finding.title == "Core temp" && finding.level == DiagnosticLevel::Failure) {
+            criticalTemperature = true;
+        }
+    }
+    check(criticalTemperature, "an 82C MCU reading is a critical field-check finding");
 
     const std::string legacyStatus =
         "Configuration: CONFIGURED, size: 3957, max available: 16384\n"
@@ -548,8 +566,15 @@ void testSession() {
     Session s(term, completer);
 
     check(s.connect(sim.devicePath(), 115200, err), "connect to the pty: " + err);
+    check(spin(sim, s, 2000, [&] { return s.awaitingVtxChoice(); }),
+          "MSP preflight detects a controllable VTX before entering CLI");
+    check(s.vtxStatus().deviceReady && s.vtxStatus().power == 3,
+          "VTX preflight retains ready state and configured power");
+    s.enableVtxBenchGuard();
     check(spin(sim, s, 4000, [&] { return s.ready(); }),
-          "reaches the CLI prompt after sending '#'");
+          "verified VTX pit mode continues into the CLI prompt");
+    check(s.vtxBenchGuardActive() && s.vtxBenchMode() == VtxBenchMode::PitMode,
+          "bench guard is active only after the VTX confirms pit mode");
 
     // A plain command must complete and return to the prompt.
     check(s.send("status"), "send status");
@@ -559,6 +584,9 @@ void testSession() {
         if (term.line(i).text.find("Voltage:") != std::string::npos) sawVoltage = true;
     }
     check(sawVoltage, "status output reached the terminal");
+    check(s.coreTemperatureAvailable() && s.coreTemperatureC() == 37 &&
+              s.coreTemperatureSequence() > 0,
+          "live status output updates the connection temperature monitor");
 
     // Capture: this is the case where a streaming `diff` shows comment lines
     // that momentarily look like a bare prompt.
@@ -588,8 +616,10 @@ void testSession() {
     check(s.job().ok, "restore reports success: " + s.job().message);
     check(s.job().done == static_cast<int>(lines.size()), "every line was sent");
 
-    s.disconnect();
-    check(!s.connected(), "disconnect closes the port");
+    check(s.restoreVtxAndDisconnect(), "guarded disconnect queues an FC reboot");
+    check(spin(sim, s, 2000, [&] { return !s.connected(); }),
+          "guarded disconnect drains exit and closes the port");
+    check(!s.vtxBenchGuardActive(), "reboot-backed disconnect clears guard ownership");
 
     // The old FC left a prompt in Terminal::partial(). A new, silent port must
     // prove its own prompt instead of inheriting that fragment and claiming it
@@ -611,7 +641,10 @@ void testSession() {
     SimFc dropped;
     check(dropped.start(err), "start a link-loss target: " + err);
     check(s.connect(dropped.devicePath(), 115200, err), "connect to the link-loss target");
-    check(spin(dropped, s, 4000, [&] { return s.ready(); }),
+    check(spin(dropped, s, 4000, [&] {
+        if (s.awaitingVtxChoice()) s.skipVtxBenchGuard();
+        return s.ready();
+    }),
           "link-loss target reaches the CLI prompt");
     dropped.stop();
     check(s.send("status"), "queue a command after the peer disappears");
@@ -622,6 +655,41 @@ void testSession() {
     }
     check(s.linkLost(), "a failed serial write reports link loss");
     check(!s.connected(), "a failed serial write closes the dead port");
+}
+
+void testVtxGuardFailurePaths() {
+    section("VTX guard fail-closed paths");
+    Terminal term;
+    term.setWidth(53);
+    Completer completer;
+    Session session(term, completer);
+    std::string error;
+
+    SimFc noPit;
+    check(noPit.start(error), "non-pit VTX simulator starts: " + error);
+    noPit.setPitModeSupported(false);
+    check(session.connect(noPit.devicePath(), 115200, error),
+          "connect to a VTX that cannot enter pit mode");
+    check(spin(noPit, session, 2000, [&] { return session.awaitingVtxChoice(); }),
+          "unsupported pit mode is still an operator choice, not an assumption");
+    session.enableVtxBenchGuard();
+    check(spin(noPit, session, 4000, [&] { return session.ready(); }),
+          "failed pit confirmation continues safely into CLI");
+    check(!session.vtxBenchGuardActive() &&
+              session.vtxGuardNote().find("unchanged state confirmed") != std::string::npos,
+          "unconfirmed pit mode is never labelled active");
+    session.disconnect();
+
+    SimFc offlineVtx;
+    check(offlineVtx.start(error), "offline-VTX simulator starts: " + error);
+    offlineVtx.setVtxReady(false);
+    check(session.connect(offlineVtx.devicePath(), 115200, error),
+          "connect when Betaflight reports no ready VTX");
+    check(spin(offlineVtx, session, 4000, [&] { return session.ready(); }),
+          "an unready VTX does not block CLI entry with a false prompt");
+    check(!session.awaitingVtxChoice() && !session.vtxBenchGuardActive(),
+          "an unready VTX remains untouched");
+    session.disconnect();
 }
 
 // A full scrollback is the normal state after a session or two, and it is the
@@ -643,7 +711,10 @@ void testFullScrollback() {
     Session s(term, completer);
 
     check(s.connect(sim.devicePath(), 115200, err), "connect to the pty: " + err);
-    check(spin(sim, s, 4000, [&] { return s.ready(); }), "reaches the CLI prompt");
+    check(spin(sim, s, 4000, [&] {
+        if (s.awaitingVtxChoice()) s.skipVtxBenchGuard();
+        return s.ready();
+    }), "reaches the CLI prompt");
 
     // Fill the scrollback to the cap, exactly as a long session does.
     while (term.lineCount() < 40) term.addLine("old output", LineKind::Fc);
@@ -760,6 +831,13 @@ int runSelfTest() {
         key.key = Key::Enter;
         app.handleKey(key);
         check(app.screen_ == Screen::Menu, "About returns to its menu entry screen");
+        bool cancelActionRan = false;
+        app.confirm("Choice", "Cancel callback check", "Yes", nullptr,
+                    [&]() { cancelActionRan = true; });
+        key.key = Key::Escape;
+        app.handleKey(key);
+        check(cancelActionRan && !app.modal_,
+              "a deliberate modal cancel can continue a paused connection workflow");
         Canvas clipped(16, 16);
         Surface small = clipped.surface();
         fill(small, theme::echo);  // Deliberately not the About background.
@@ -784,13 +862,65 @@ int runSelfTest() {
     {
         SimFc sim;
         std::string error;
+        check(sim.start(error), "VTX-guard simulator starts: " + error);
+        if (error.empty()) {
+            sim.setCoreTemperatureC(82);
+            App app;
+            app.display_.setHeadlessSize(kScreenW, kScreenH);
+            app.temperatureCheckPending_ = true;
+            check(app.session_.connect(sim.devicePath(), 115200, error),
+                  "VTX-guard app connects: " + error);
+            app.setScreen(Screen::Terminal);
+            const uint64_t promptDeadline = nowMs() + 3000;
+            while (nowMs() < promptDeadline && !app.modal_) {
+                sim.pump();
+                app.tick(nowMs());
+                sleepMs(4);
+            }
+            check(app.modal_ && app.modalTitle_ == "Bench VTX guard?",
+                  "a ready controllable VTX pauses connection for an operator choice");
+            KeyEvent enter;
+            enter.key = Key::Enter;
+            app.handleKey(enter);
+            const uint64_t readyDeadline = nowMs() + 5000;
+            while (nowMs() < readyDeadline && !app.session_.ready()) {
+                sim.pump();
+                app.tick(nowMs());
+                sleepMs(4);
+            }
+            check(app.session_.ready() && app.session_.vtxBenchGuardActive(),
+                  "accepted pit mode is verified before CLI becomes ready");
+            check(app.modal_ && app.modalTitle_ == "CRITICAL FC TEMPERATURE" &&
+                      app.session_.coreTemperatureC() == 82,
+                  "the automatic status capture opens a critical MCU-temperature warning");
+            app.handleKey(enter);
+            app.requestDisconnect(false);
+            check(app.modal_ && app.modalTitle_ == "Restore VTX state?",
+                  "guarded disconnect asks before restoring flight state");
+            app.handleKey(enter);
+            const uint64_t disconnectDeadline = nowMs() + 3000;
+            while (nowMs() < disconnectDeadline && app.session_.connected()) {
+                sim.pump();
+                app.tick(nowMs());
+                sleepMs(4);
+            }
+            check(!app.session_.connected() && app.screen_ == Screen::Ports,
+                  "restoration drains the reboot request and returns to the port picker");
+        }
+    }
+    {
+        SimFc sim;
+        std::string error;
         check(sim.start(error), "field-check simulator starts: " + error);
         if (error.empty()) {
             App app;
             app.display_.setHeadlessSize(kScreenW, kScreenH);
             check(app.session_.connect(sim.devicePath(), 115200, error),
                   "field-check app connects: " + error);
-            check(spin(sim, app.session_, 4000, [&] { return app.session_.ready(); }),
+            check(spin(sim, app.session_, 4000, [&] {
+                if (app.session_.awaitingVtxChoice()) app.session_.skipVtxBenchGuard();
+                return app.session_.ready();
+            }),
                   "field-check app reaches the prompt");
             app.runFieldCheck();
             const uint64_t deadline = nowMs() + 8000;
@@ -808,6 +938,7 @@ int runSelfTest() {
         }
     }
     testSession();
+    testVtxGuardFailurePaths();
     testFullScrollback();
     std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;

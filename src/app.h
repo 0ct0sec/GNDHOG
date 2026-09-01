@@ -109,7 +109,8 @@ private:
     // ---- actions
     void refreshPorts();
     void connectSelected();
-    void doDisconnect();
+    void requestDisconnect(bool exitAfter = false);
+    void finishDisconnect(bool exitAfter = false);
     void submitLine();
     void doComplete();
     void runBackup(const std::string& command, const std::string& label);
@@ -127,7 +128,8 @@ private:
 
     // ---- modal helpers
     void confirm(const std::string& title, const std::string& body,
-                 const std::string& yesLabel, std::function<void()> onYes);
+                 const std::string& yesLabel, std::function<void()> onYes,
+                 std::function<void()> onNo = nullptr);
     void notice(const std::string& title, const std::string& body);
     void closeModal();
     void setScreen(Screen s);
@@ -187,10 +189,17 @@ private:
     bool modalIsConfirm_ = false;
     std::string modalTitle_, modalBody_, modalYes_;
     std::function<void()> modalAction_;
+    std::function<void()> modalCancelAction_;
 
     std::string status_;
     uint64_t statusUntil_ = 0;
     bool linkLossHandled_ = false;
+    bool temperatureCheckPending_ = false;
+    bool temperatureAlarmLatched_ = false;
+    bool temperatureWarningPending_ = false;
+    uint64_t lastTemperatureSequence_ = 0;
+    bool disconnectAfterVtxRestore_ = false;
+    bool exitAfterVtxRestore_ = false;
 };
 
 // Renders every screen once into `dir` as PPM files, for host-side inspection.

@@ -41,7 +41,9 @@ loop at 30 fps runs the whole suspiciously small department.
    controller to **USB-A**.
 5. Launch **GNDHOG ZERO** from APPLaunch. If the port picker appears, choose the
    CDC-ACM device for the FC, usually `/dev/ttyACM0`.
-6. Press **Fn+2** for a no-config-write field check. Press **Esc** for the menu. Make
+6. If a controllable VTX is reported, accept the optional bench pit-mode guard.
+   GNDHOG verifies the state before it calls the guard active.
+7. Press **Fn+2** for a no-config-write field check. Press **Esc** for the menu. Make
    a backup before changing anything expensive, airborne, or both.
 
 ## What it does
@@ -49,9 +51,15 @@ loop at 30 fps runs the whole suspiciously small department.
 - **Full CLI terminal.** Run `status`, `get`, `set`, `diff`, `resource`,
   `vtxtable`, or whatever other instruction you intend to regret responsibly.
   Scrollback holds 3000 lines; command history survives the session.
+- **Verified bench VTX guard.** Before entering CLI mode, GNDHOG asks a
+  Betaflight-reported, ready VTX to enter pit mode and reads the state back.
+  Nothing is saved. If the VTX cannot confirm pit mode, GNDHOG requests pit-off
+  and verifies that cleanup; if even cleanup is unconfirmed, it keeps the
+  reboot-restoration prompt. It never relabels an arbitrary power index as
+  “off.” A guarded disconnect can reboot the FC so its saved flight state reloads.
 - **Field check, with receipts.** One key captures `status`, `tasks`, and
   `version`, then turns the FC's own evidence into an at-a-glance arming,
-  gyro, receiver, battery, I2C, and runtime summary. Expected `CLI`/`MSP`
+  gyro, receiver, battery, I2C, MCU-temperature, and runtime summary. Expected `CLI`/`MSP`
   blockers are separated from faults such as `RXLOSS`, `NOGYRO`, `FAILSAFE`,
   and `LOAD`. The untouched command output remains in the terminal, and an
   optional report can be saved for later. Missing core evidence is marked
@@ -155,6 +163,23 @@ In Slave/device mode the internal hub is disconnected and USB-A is offline.
 The FC cannot enumerate through a wire the hardware has removed from the
 conversation.
 
+Before sending `#` to enter the CLI, GNDHOG makes one read-only
+`MSP_VTX_CONFIG` probe. If Betaflight reports a ready VTX, the app offers pit
+mode. Acceptance sends the runtime request and queries the FC again; the guard
+is only labelled active when the FC reports pit mode back. Betaflight notes
+that some SmartAudio hardware cannot enter pit mode after power-up. Those and
+all unsupported arrangements continue to CLI without a fabricated success.
+After an unconfirmed request, GNDHOG requests pit-off and verifies the cleanup;
+if that readback also fails, disconnect continues to offer a reboot restore.
+This protects supported VTX hardware; it is not proof of RF output or a
+substitute for an antenna and airflow.
+
+Once CLI is ready, GNDHOG runs one automatic `status` capture for the FC MCU
+core temperature. A reported value at or above Betaflight's default 70 C alarm
+opens a warning; 80 C and above is treated as critical. This reading is not a
+VTX temperature sensor. On integrated AIO hardware it is useful nearby heat
+evidence, not a measurement of the transmitter die.
+
 ## Field check
 
 Press **Fn+2**, or choose **Menu → Run field check**. GNDHOG runs three CLI
@@ -178,6 +203,11 @@ rather than graded against an invented threshold, and absent fields remain
 unknown. Press **V** for the raw terminal transcript, **R** to run a fresh
 snapshot, or **S** to save a report under
 `~/.local/share/bfcli/diagnostics`.
+
+When `status` contains `Core temp=...`, the summary compares the MCU reading
+with Betaflight's 70 C default core-temperature alarm and marks 80 C or higher
+as critical. Targets that do not expose this line remain temperature-unknown;
+GNDHOG does not manufacture a sensor.
 
 This is a fast flight-line snapshot, not an airworthiness verdict. It cannot
 inspect solder joints, prop condition, motor direction, control-surface
@@ -304,15 +334,21 @@ Enter harder does not change the storage model.
   configuration (`defaults`, `flash_erase`) require confirmation. A held key
   cannot accept the dialog; modifier and repeat state are cleared when it
   opens.
-- **Disconnect closes the port. It does not send `exit`.** Betaflight treats
-  `exit` as a reboot, so it remains an explicit quick-menu command labelled
-  accordingly.
+- **Without an active VTX guard, disconnect only closes the port.** With a
+  guard active, GNDHOG asks whether to restore the saved flight state. Restore
+  sends `exit`, deliberately discarding unsaved CLI changes and rebooting the
+  FC; cancel closes the link and leaves pit mode active until the FC is
+  rebooted or power-cycled.
 - GNDHOG never selects 1200 baud. Betaflight interprets that as a request to
   reboot into DFU.
 - A board already in DFU mode is detected and reported instead of being opened
   as a CLI target.
 - Completion learns from output already received. It sends no hidden discovery
   commands to the FC.
+- Automatic safety traffic is limited to the connection-time VTX
+  capability/readback sequence and one `status` temperature capture. None of
+  it writes flash. Pit mode is requested only after operator confirmation and
+  must be reported back before success.
 
 Remove propellers before bench work that can arm or drive motors. Software
 confirmation is a guardrail. It is not a small orange force field.
@@ -331,7 +367,8 @@ confirmation is a guardrail. It is not a small orange force field.
 
 `--sim` creates a pseudo-terminal answering as a BETAFPVG473_V2 running
 Betaflight 2026.6.0-alpha, including realistic field-check evidence and a
-`diff all`. The complete connect → diagnose → backup → restore path can
+`diff all`, plus a ready SmartAudio VTX that acknowledges pit mode. The complete
+connect → guard → diagnose → backup → restore path can
 therefore be exercised without hardware.
 It does not exercise the physical keyboard, framebuffer, USB link, or an actual
 flight controller. Even imaginary hardware has a job description.
