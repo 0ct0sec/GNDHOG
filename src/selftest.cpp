@@ -391,6 +391,13 @@ void testGraphics() {
     check(s.row(0)[0] == theme::ok, "an oversized rect clips to the surface");
     check(rgb(255, 255, 255) == 0xFFFF, "white packs to 0xFFFF");
     check(rgb(0, 0, 0) == 0x0000, "black packs to 0x0000");
+
+    Canvas dimmed(2, 1);
+    Surface ds = dimmed.surface();
+    fill(ds, rgb(255, 255, 255));
+    dimSurface(ds, theme::black);
+    check(ds.px[0] == 0x8410 && ds.px[1] == 0x8410,
+          "modal dimming blends every pixel instead of dropping scanlines");
 }
 
 // ------------------------------------------------- end-to-end against a pty
@@ -604,6 +611,12 @@ int runSelfTest() {
             }
         }
         check(identical, "About renders orange ink and transparent white without overlap");
+        const std::string footerAction = "Esc back";
+        app.drawHintBar(s, std::string(200, 'x'), footerAction);
+        const int actionX = kScreenW - textWidth(footerAction) - 8;
+        check(s.row(kScreenH - kHintH + 2)[actionX + 4] == theme::accent &&
+                  s.row(kScreenH - 1)[kScreenW - 1] == theme::panelHi,
+              "footer action stays visible when contextual guidance is too long");
         key.key = Key::Escape;
         key.repeat = true;
         app.handleKey(key);

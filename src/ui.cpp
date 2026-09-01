@@ -115,6 +115,8 @@ void App::drawTopBar(Surface& s) {
     hLine(s, 0, kTopH, s.w, theme::rule);
 
     drawText(s, 2, 1, kAppName, theme::accent);
+    const int separatorX = 2 + textWidth(kAppName) + 3;
+    vLine(s, separatorX, 2, kTopH - 4, theme::rule);
 
     std::string mid;
     switch (screen_) {
@@ -141,19 +143,34 @@ void App::drawTopBar(Surface& s) {
     if (session_.state() == SessionState::Ready) chip = theme::ok;
     else if (session_.state() == SessionState::Busy) chip = theme::warn;
     else if (session_.state() == SessionState::Failed) chip = theme::err;
-    const int x = s.w - textWidth(st) - 2;
-    const int midX = 2 + textWidth(kAppName) + kGlyphW;
-    drawTextClipped(s, midX, 1, mid, (x - kGlyphW - midX) / kGlyphW, theme::text);
-    drawText(s, x, 1, st, chip);
+    const int chipW = textWidth(st) + 8;
+    const int chipX = s.w - chipW;
+    fillRect(s, chipX, 0, chipW, kTopH, theme::panelHi);
+    vLine(s, chipX, 0, kTopH, theme::rule);
+    hLine(s, chipX + 1, kTopH - 1, chipW - 1, chip);
+    const int midX = separatorX + 4;
+    drawTextClipped(s, midX, 1, mid,
+                    (chipX - kGlyphW - midX) / kGlyphW, theme::text);
+    drawText(s, chipX + 4, 1, st, chip);
 }
 
-void App::drawHintBar(Surface& s, const std::string& hints) {
+void App::drawHintBar(Surface& s, const std::string& hints,
+                      const std::string& action) {
     const int y = s.h - kHintH;
     fillRect(s, 0, y, s.w, kHintH, theme::panel);
     hLine(s, 0, y, s.w, theme::rule);
     const std::string shown = !status_.empty() ? status_ : hints;
     const Color c = !status_.empty() ? theme::accent : theme::textDim;
-    drawTextClipped(s, 2, y + 1, shown, columns() - 1, c);
+    int maxChars = columns() - 1;
+    if (!action.empty()) {
+        const int actionW = textWidth(action) + 8;
+        const int actionX = std::max(0, s.w - actionW);
+        fillRect(s, actionX, y + 1, actionW, kHintH - 1, theme::panelHi);
+        vLine(s, actionX, y + 1, kHintH - 1, theme::rule);
+        drawText(s, actionX + 4, y + 1, action, theme::accent);
+        maxChars = std::max(0, (actionX - 4) / kGlyphW);
+    }
+    drawTextClipped(s, 2, y + 1, shown, maxChars, c);
 }
 
 void App::drawList(Surface& s, const std::vector<MenuItem>& items, ListState& st,
@@ -168,7 +185,10 @@ void App::drawList(Surface& s, const std::vector<MenuItem>& items, ListState& st
         if (idx >= static_cast<int>(items.size())) break;
         const int y = kBodyY + i * kGlyphH;
         const bool selected = (idx == st.sel);
-        if (selected) fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
+        if (selected) {
+            fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
+            fillRect(s, 0, y, 2, kGlyphH, theme::accent);
+        }
         const Color fg = items[static_cast<size_t>(idx)].enabled
                              ? (selected ? theme::accent : theme::text)
                              : theme::textDim;
@@ -195,7 +215,10 @@ void App::drawPorts(Surface& s) {
             const PortInfo& p = ports_[static_cast<size_t>(idx)];
             const int y = kBodyY + i * kGlyphH;
             const bool selected = (idx == portList_.sel);
-            if (selected) fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
+            if (selected) {
+                fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
+                fillRect(s, 0, y, 2, kGlyphH, theme::accent);
+            }
             drawText(s, 2, y, selected ? ">" : " ", theme::accent);
             const Color fg = p.looksLikeFlightController()
                                  ? theme::ok
@@ -206,18 +229,18 @@ void App::drawPorts(Surface& s) {
                       static_cast<int>(ports_.size()));
     }
 
-    std::string hint = "Enter link  R scan  F files  H help  A about  Esc quit";
+    std::string hint = "R scan  F files  H help  A about";
     if (!ports_.empty()) {
         const PortInfo& p = ports_[static_cast<size_t>(portList_.sel)];
         std::string detail = p.detail();
         if (p.kind == "uart") {
             detail += (detail.empty() ? "" : "  ") +
                       std::string("baud ") + std::to_string(kBaudChoices[baudIndex_]) +
-                      " (B changes)";
+                      "  B changes";
         }
         if (!detail.empty()) hint = detail + "  A about";
     }
-    drawHintBar(s, hint);
+    drawHintBar(s, hint, ports_.empty() ? "Esc quit" : "Enter link  Esc quit");
 }
 
 void App::drawTerminal(Surface& s) {
@@ -248,7 +271,7 @@ void App::drawTerminal(Surface& s) {
         drawTextClipped(s, 2, inputY + 2, label, cols - 12, theme::accent);
         drawProgress(s, s.w - 66, inputY + 2, 64, 8,
                      job.total > 0 ? job.fraction() : 0.35f, theme::accent, theme::bg);
-        drawHintBar(s, "Esc cancels");
+        drawHintBar(s, "", "Esc cancel");
         return;
     }
 
@@ -291,10 +314,10 @@ void App::drawTerminal(Surface& s) {
 
     std::string hints;
     if (!completionNote_.empty()) hints = completionNote_ + "   ";
-    if (!session_.connected()) hints += "not connected - Esc for the menu";
+    if (!session_.connected()) hints += "not connected";
     else if (!term_.following()) hints += "scrolled back - Fn+M returns to live";
-    else hints += "Tab complete  Fn+F history  Esc menu  Fn+1 help";
-    drawHintBar(s, hints);
+    else hints += "Tab complete  Fn+F history  Fn+1 help";
+    drawHintBar(s, hints, "Esc menu");
 }
 
 void App::drawMenu(Surface& s) {
@@ -310,7 +333,7 @@ void App::drawMenu(Surface& s) {
         const std::string& h = items[static_cast<size_t>(st.sel)].hint;
         if (!h.empty()) hint = h;
     }
-    drawHintBar(s, hint);
+    drawHintBar(s, hint, "Esc back");
 }
 
 void App::drawFiles(Surface& s) {
@@ -324,7 +347,7 @@ void App::drawFiles(Surface& s) {
                  theme::textDim);
         drawText(s, 4, kBodyY + 3 * kGlyphH, "Menu > Backup config to file (or Fn+5).",
                  theme::textDim);
-        drawHintBar(s, storage_.backupDir());
+        drawHintBar(s, storage_.backupDir(), "Esc back");
         return;
     }
 
@@ -334,7 +357,10 @@ void App::drawFiles(Surface& s) {
         const BackupFile& f = files_[static_cast<size_t>(idx)];
         const int y = kBodyY + i * kGlyphH;
         const bool selected = (idx == fileList_.sel);
-        if (selected) fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
+        if (selected) {
+            fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
+            fillRect(s, 0, y, 2, kGlyphH, theme::accent);
+        }
         drawText(s, 2, y, selected ? ">" : " ", theme::accent);
         // Trim the fixed BTFL_cli_ prefix: it is on every file and wastes width.
         std::string name = f.name;
@@ -351,7 +377,7 @@ void App::drawFiles(Surface& s) {
                   static_cast<int>(files_.size()));
 
     const BackupFile& sel = files_[static_cast<size_t>(fileList_.sel)];
-    drawHintBar(s, sel.dateText() + "   Enter restore   V view   D delete   Esc back");
+    drawHintBar(s, sel.dateText() + "   Enter restore   V view   D delete", "Esc back");
 }
 
 void App::drawKeymap(Surface& s) {
@@ -410,7 +436,7 @@ void App::drawKeymap(Surface& s) {
         ++cell;
     }
 
-    drawHintBar(s, "A wrong symbol? Put e.g. sym.0x28 = _ in config.ini   Esc back");
+    drawHintBar(s, "Override: sym.0x28 = _ in config.ini", "Esc back");
 }
 
 void App::drawHelp(Surface& s) {
@@ -426,7 +452,7 @@ void App::drawHelp(Surface& s) {
         drawTextClipped(s, 2, kBodyY + i * kGlyphH, line, cols - 2, c);
     }
     drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, helpScroll_, rows, kHelpLines);
-    drawHintBar(s, "Fn+F / Fn+X scroll   Esc back");
+    drawHintBar(s, "Fn+F / Fn+X scroll", "Esc back");
 }
 
 void App::drawAbout(Surface& s) {
@@ -440,7 +466,7 @@ void App::drawAbout(Surface& s) {
     hLine(s, 4, 133, s.w - 8, theme::rule);
     drawText(s, 4, 137, kAboutHeading, theme::accent);
     drawText(s, 4, 149, kAboutJoke, theme::text);
-    drawHintBar(s, "Enter / Esc back");
+    drawHintBar(s, "Enter returns", "Esc back");
 }
 
 void App::drawModal(Surface& s) {
@@ -455,9 +481,10 @@ void App::drawModal(Surface& s) {
     const int x = 10;
     const int y = std::max(2, (s.h - h) / 2);
 
-    // Dim the screen behind the dialog so the modal state is unmistakable.
-    for (int yy = 0; yy < s.h; yy += 2) hLine(s, 0, yy, s.w, theme::bg);
+    // Lower the backdrop contrast without turning text and rules into stripes.
+    dimSurface(s, theme::bg);
 
+    fillRect(s, x + 3, y + 3, w, h, theme::black);
     fillRect(s, x, y, w, h, theme::panel);
     rect(s, x, y, w, h, modalIsConfirm_ ? theme::accent : theme::rule);
     fillRect(s, x + 1, y + 1, w - 2, kGlyphH + 2, modalIsConfirm_ ? theme::accentDim : theme::panelHi);
@@ -474,7 +501,9 @@ void App::drawModal(Surface& s) {
     const std::string prompt = modalIsConfirm_
                                    ? "Enter/Y " + modalYes_ + "     Esc/N cancel"
                                    : "Enter or Esc to close";
-    drawText(s, x + 4, y + h - kGlyphH - 3, prompt, theme::accent);
+    const int promptY = y + h - kGlyphH - 3;
+    hLine(s, x + 1, promptY - 3, w - 2, theme::rule);
+    drawText(s, x + 4, promptY, prompt, theme::accent);
 }
 
 void App::render() {

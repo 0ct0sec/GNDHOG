@@ -89,7 +89,8 @@ private:
 
     // ---- screens
     void drawTopBar(Surface& s);
-    void drawHintBar(Surface& s, const std::string& hints);
+    void drawHintBar(Surface& s, const std::string& hints,
+                     const std::string& action = {});
     void drawPorts(Surface& s);
     void drawTerminal(Surface& s);
     void drawMenu(Surface& s);

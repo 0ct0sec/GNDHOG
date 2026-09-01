@@ -60,6 +60,9 @@ private:
 
 void fill(Surface& s, Color c);
 void fillRect(Surface& s, int x, int y, int w, int h, Color c);
+// Pull every pixel halfway toward `toward`, preserving the image while lowering
+// its contrast. Used for modal backdrops where scanline erasure is too noisy.
+void dimSurface(Surface& s, Color toward);
 void hLine(Surface& s, int x, int y, int w, Color c);
 void vLine(Surface& s, int x, int y, int h, Color c);
 void rect(Surface& s, int x, int y, int w, int h, Color c);

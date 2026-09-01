@@ -49,6 +49,21 @@ void fillRect(Surface& s, int x, int y, int w, int h, Color c) {
     }
 }
 
+void dimSurface(Surface& s, Color toward) {
+    if (!s.valid()) return;
+    const unsigned tr = (toward >> 11) & 0x1F;
+    const unsigned tg = (toward >> 5) & 0x3F;
+    const unsigned tb = toward & 0x1F;
+    const size_t count = static_cast<size_t>(s.w) * s.h;
+    for (size_t i = 0; i < count; ++i) {
+        const Color c = s.px[i];
+        const unsigned r = (((c >> 11) & 0x1F) + tr + 1) / 2;
+        const unsigned g = (((c >> 5) & 0x3F) + tg + 1) / 2;
+        const unsigned b = ((c & 0x1F) + tb + 1) / 2;
+        s.px[i] = static_cast<Color>((r << 11) | (g << 5) | b);
+    }
+}
+
 void hLine(Surface& s, int x, int y, int w, Color c) { fillRect(s, x, y, w, 1, c); }
 void vLine(Surface& s, int x, int y, int h, Color c) { fillRect(s, x, y, 1, h, c); }
 
