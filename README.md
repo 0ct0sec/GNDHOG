@@ -1,6 +1,6 @@
 # GNDHOG ZERO — Betaflight CLI for the M5Stack Cardputer Zero
 
-![GNDHOG ZERO mascot](assets/gndhog-zero-source.png)
+![GNDHOG ZERO mascot](store/icon.png)
 
 By **0ct0**. Props off. Shell on. The groundhog has the USB cable and has
 declined to discuss what happened to the lawn.
