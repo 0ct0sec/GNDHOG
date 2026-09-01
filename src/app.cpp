@@ -180,6 +180,13 @@ void App::setScreen(Screen s) {
     dirty_ = true;
 }
 
+void App::openReturnableScreen(Screen s) {
+    // Rerunning an auxiliary screen (notably Field Check) must retain the
+    // original caller instead of making the screen return to itself.
+    if (screen_ != s) returnScreen_ = screen_;
+    setScreen(s);
+}
+
 void App::confirm(const std::string& title, const std::string& body,
                   const std::string& yesLabel, std::function<void()> onYes,
                   std::function<void()> onNo) {
@@ -292,8 +299,7 @@ bool App::setup(const Options& opt, std::string& error) {
     refreshFiles();
 
     if (opt_.showAbout) {
-        returnScreen_ = Screen::Ports;
-        setScreen(Screen::About);
+        openReturnableScreen(Screen::About);
     } else if (!opt_.portOverride.empty()) {
         std::string cerr;
         if (session_.connect(opt_.portOverride, opt_.baud, cerr)) {
@@ -628,7 +634,7 @@ void App::runFieldCheck() {
     diagnosticList_ = ListState{};
     diagnosticStep_ = 0;
     diagnosticRunning_ = true;
-    setScreen(Screen::Diagnostics);
+    openReturnableScreen(Screen::Diagnostics);
     pushLocal("-- field check: status / tasks / version (no config writes) --", LineKind::Local);
     runFieldCheckStep();
 }
@@ -898,21 +904,20 @@ void App::applyMenu(int id) {
     case MenuRestore:
     case MenuFiles:
         refreshFiles();
-        setScreen(Screen::Files);
+        openReturnableScreen(Screen::Files);
         break;
     case MenuQuick:
         setScreen(Screen::Quick);
         break;
     case MenuKeymap:
-        setScreen(Screen::Keymap);
+        openReturnableScreen(Screen::Keymap);
         break;
     case MenuHelp:
         helpScroll_ = 0;
-        setScreen(Screen::Help);
+        openReturnableScreen(Screen::Help);
         break;
     case MenuAbout:
-        returnScreen_ = Screen::Menu;
-        setScreen(Screen::About);
+        openReturnableScreen(Screen::About);
         break;
     case MenuSoundToggle: toggleSound(); break;
     case MenuSoundDown:   adjustSoundVolume(-10); break;
@@ -962,7 +967,7 @@ void App::onPortsKey(const KeyEvent& e) {
     case Key::Down: portList_.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
     case Key::Enter: audio_.play(HudCue::Select); connectSelected(); break;
     case Key::Escape: audio_.play(HudCue::Back); running_ = false; break;
-    case Key::F1: helpScroll_ = 0; setScreen(Screen::Help); break;
+    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); break;
     case Key::Char:
         if (e.ch == 'r' || e.ch == 'R') {
             refreshPorts();
@@ -973,13 +978,12 @@ void App::onPortsKey(const KeyEvent& e) {
             dirty_ = true;
         } else if (e.ch == 'f' || e.ch == 'F') {
             refreshFiles();
-            setScreen(Screen::Files);
+            openReturnableScreen(Screen::Files);
         } else if (e.ch == 'h' || e.ch == 'H' || e.ch == '?') {
             helpScroll_ = 0;
-            setScreen(Screen::Help);
+            openReturnableScreen(Screen::Help);
         } else if (e.ch == 'a' || e.ch == 'A') {
-            returnScreen_ = Screen::Ports;
-            setScreen(Screen::About);
+            openReturnableScreen(Screen::About);
         } else if (e.ch == 'q' || e.ch == 'Q') {
             running_ = false;
         }
@@ -1039,15 +1043,15 @@ void App::onTerminalKey(const KeyEvent& e) {
         audio_.play(HudCue::Back);
         setScreen(Screen::Menu);
         return;
-    case Key::Help:      helpScroll_ = 0; setScreen(Screen::Help); return;
+    case Key::Help:      helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
     case Key::BrightUp:  adjustBrightness(+10); return;
     case Key::BrightDown: adjustBrightness(-10); return;
-    case Key::F1: helpScroll_ = 0; setScreen(Screen::Help); return;
+    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
     case Key::F2: runFieldCheck(); return;
     case Key::F3: if (session_.ready()) session_.send("version"); return;
     case Key::F4: if (session_.ready()) session_.send("diff"); return;
     case Key::F5: runBackup("diff all", "Backup (diff all)"); return;
-    case Key::F6: refreshFiles(); setScreen(Screen::Files); return;
+    case Key::F6: refreshFiles(); openReturnableScreen(Screen::Files); return;
     case Key::F7: if (session_.ready()) session_.send("tasks"); return;
     case Key::F8:
         applyQuick(12);   // save, with its confirmation
@@ -1121,7 +1125,7 @@ void App::onFilesKey(const KeyEvent& e) {
         break;
     case Key::Escape:
         audio_.play(HudCue::Back);
-        setScreen(session_.connected() ? Screen::Terminal : Screen::Ports);
+        setScreen(returnScreen_);
         break;
     case Key::Char:
         if (n == 0) break;
@@ -1146,7 +1150,7 @@ void App::onDiagnosticsKey(const KeyEvent& e) {
             diagnosticReport_ = buildDiagnosticReport(
                 diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
             pushLocal("-- field check cancelled --", LineKind::Warn);
-            setScreen(Screen::Terminal);
+            setScreen(returnScreen_);
         }
         return;
     }
@@ -1159,7 +1163,7 @@ void App::onDiagnosticsKey(const KeyEvent& e) {
     case Key::Escape:
     case Key::Enter:
         audio_.play(HudCue::Back);
-        setScreen(Screen::Terminal);
+        setScreen(returnScreen_);
         break;
     case Key::Char:
         if (e.ch == 'r' || e.ch == 'R') runFieldCheck();
@@ -1177,7 +1181,7 @@ void App::onKeymapKey(const KeyEvent& e) {
     // Everything except Escape is swallowed so the tester can show it.
     if (e.key == Key::Escape && !e.repeat) {
         audio_.play(HudCue::Back);
-        setScreen(Screen::Terminal);
+        setScreen(returnScreen_);
         return;
     }
     const int rows = bodyRows(false) - 6;
@@ -1195,7 +1199,7 @@ void App::onHelpKey(const KeyEvent& e) {
     case Key::Escape:
     case Key::Enter:
         audio_.play(HudCue::Back);
-        setScreen(session_.connected() ? Screen::Terminal : Screen::Ports);
+        setScreen(returnScreen_);
         break;
     default: break;
     }

@@ -158,6 +158,7 @@ private:
                 HudCue cue = HudCue::Error);
     void closeModal();
     void setScreen(Screen s);
+    void openReturnableScreen(Screen s);
 
     int bodyRows(bool withInput) const;
     int columns() const;
@@ -177,6 +178,9 @@ private:
     ThermalTrip thermalTrip_;
 
     Screen screen_ = Screen::Ports;
+    // Auxiliary screens return to the exact surface that launched them. This
+    // keeps menu-owned tools inside their category while preserving terminal
+    // and port-picker shortcuts.
     Screen returnScreen_ = Screen::Terminal;
     bool running_ = true;
     bool dirty_ = true;

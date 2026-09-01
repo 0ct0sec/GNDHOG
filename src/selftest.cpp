@@ -1125,6 +1125,35 @@ int runSelfTest() {
         app.handleKey(key);
         check(app.screen_ == Screen::Terminal,
               "Escape from the main menu returns to the terminal");
+
+        app.openMenuPage(MenuPage::ControlsInfo);
+        app.screen_ = Screen::Menu;
+        app.submenuList_ = ListState{};
+        key.key = Key::Enter;
+        app.handleKey(key);
+        check(app.screen_ == Screen::Keymap,
+              "keymap opens from the controls category");
+        key.key = Key::Escape;
+        app.handleKey(key);
+        check(app.screen_ == Screen::Menu && app.menuPage_ == MenuPage::ControlsInfo,
+              "Escape returns from keymap to its controls category");
+
+        app.submenuList_.sel = 1;
+        key.key = Key::Enter;
+        app.handleKey(key);
+        check(app.screen_ == Screen::Help,
+              "help opens from the controls category");
+        key.key = Key::Escape;
+        app.handleKey(key);
+        check(app.screen_ == Screen::Menu && app.menuPage_ == MenuPage::ControlsInfo,
+              "Escape returns from help to its controls category");
+
+        app.openMenuPage(MenuPage::BackupRestore);
+        app.openReturnableScreen(Screen::Files);
+        key.key = Key::Escape;
+        app.handleKey(key);
+        check(app.screen_ == Screen::Menu && app.menuPage_ == MenuPage::BackupRestore,
+              "Escape returns from saved backups to its backup category");
     }
     section("brand and About");
     checkEq(kAppName, "GNDHOG ZERO", "final project name");
@@ -1196,8 +1225,7 @@ int runSelfTest() {
         app.screen_ = Screen::Menu;
         // Exercise the menu return route without opening hardware or changing
         // saved settings. Menu selection itself is covered in the UI preview.
-        app.returnScreen_ = Screen::Menu;
-        app.setScreen(Screen::About);
+        app.openReturnableScreen(Screen::About);
         key.key = Key::Enter;
         app.handleKey(key);
         check(app.screen_ == Screen::Menu, "About returns to its menu entry screen");
@@ -1310,6 +1338,9 @@ int runSelfTest() {
                 return app.session_.ready();
             }),
                   "field-check app reaches the prompt");
+            app.setupMenus();
+            app.openMenuPage(MenuPage::FlightController);
+            app.setScreen(Screen::Menu);
             app.runFieldCheck();
             const uint64_t deadline = nowMs() + 8000;
             while (nowMs() < deadline && app.diagnosticRunning_) {
@@ -1322,6 +1353,12 @@ int runSelfTest() {
             check(app.screen_ == Screen::Diagnostics, "field check stays on its summary screen");
             app.render();
             check(app.display_.surface().valid(), "field-check summary renders offscreen");
+            KeyEvent escape;
+            escape.key = Key::Escape;
+            app.handleKey(escape);
+            check(app.screen_ == Screen::Menu &&
+                      app.menuPage_ == MenuPage::FlightController,
+                  "field-check summary returns to its controller category");
             app.session_.disconnect();
         }
     }
