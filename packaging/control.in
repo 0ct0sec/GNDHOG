@@ -7,5 +7,6 @@ Priority: optional
 Depends: libc6 (>= 2.38)
 Homepage: https://github.com/0ct0sec/GNDHOG
 Description: Betaflight CLI terminal for M5Stack Cardputer Zero
- GNDHOG ZERO provides a native framebuffer terminal, command history,
- completion, and configuration backup and restore over USB or UART.
+ GNDHOG ZERO provides field diagnostics, a native framebuffer terminal,
+ command history, completion, and configuration backup and restore over USB
+ or UART.

@@ -25,6 +25,7 @@ public:
     bool init(std::string& error);
     const std::string& dataDir() const { return dataDir_; }
     const std::string& backupDir() const { return backupDir_; }
+    const std::string& diagnosticDir() const { return diagnosticDir_; }
     std::string configPath() const;
     std::string historyPath() const;
 
@@ -38,6 +39,8 @@ public:
 
     // Configurator-compatible name: BTFL_cli_<craft>_<stamp>_<board>_backup.txt
     std::string makeBackupName(const std::string& craft, const std::string& board) const;
+    // Field-check reports are kept away from restorable backup files.
+    std::string makeDiagnosticName(const std::string& craft, const std::string& board) const;
 
     // Free space on the backup filesystem, or 0 when it cannot be determined.
     uint64_t freeBytes() const;
@@ -48,6 +51,7 @@ public:
 private:
     std::string dataDir_;
     std::string backupDir_;
+    std::string diagnosticDir_;
 };
 
 // A tiny `key = value` config file. Unknown keys are preserved on rewrite so a

@@ -404,6 +404,60 @@ void testRiskAndParsing() {
     check(lines.back() == "batch end", "restore ends with the batch");
 }
 
+void testDiagnostics() {
+    section("field diagnostics");
+    const std::string modernStatus =
+        "MCU G473 Clock=168MHz, Vref=3.30V, Core temp=41degC\n"
+        "STACK: 2048b (0x20020000) / 740b\n"
+        "CONFIG: CONFIGURED (4012b / 32768b)\n"
+        "DEVICES DETECTED: SPI=2, I2C=1 (0 errors)\n"
+        "GYRO: (1) ICM42688P enabled locked dma\n"
+        "GPS: NOT ENABLED\n"
+        "CPU:37%, cycle time: 125, GYRO rate: 8000, RX rate: 250, System rate: 10\n"
+        "Voltage: 16.42V (4S battery - OK)\n"
+        "Arming disable flags: CLI MSP\n";
+    const std::string modernTasks =
+        "Task list rate/hz max/us avg/us maxload avgload total/ms\n"
+        "02 - (GYRO) 8000 18 12 14.4% 9.6% 1948\n"
+        "Total                                             42.5%\n";
+    const std::string modernVersion =
+        "# Betaflight / STM32G47X (G473) 2026.6.0 MSP API: 1.48\n"
+        "# board: manufacturer_id: BEFH, board_name: BETAFPVG473_V2\n";
+    DiagnosticReport report = buildDiagnosticReport(modernStatus, modernTasks, modernVersion);
+    check(report.complete(), "modern status/tasks/version form a complete report");
+    check(report.actionableBlockerCount() == 0, "CLI and MSP are expected host blockers");
+    check(report.failureCount() == 0 && report.warningCount() == 0,
+          "healthy explicit evidence is not promoted to a fault");
+    check(report.findings.size() >= 6, "health report covers arming, gyro, RX, battery, bus, runtime, and firmware");
+
+    const std::string legacyStatus =
+        "Configuration: CONFIGURED, size: 3957, max available: 16384\n"
+        "Gyros detected: none\n"
+        "System load: 96, cycle time: 125, GYRO rate: 0, RX rate: 0\n"
+        "Voltage: 13.20V (4S battery - CRITICAL)\n"
+        "I2C Errors: 7\n"
+        "Arming disable flags: NOGYRO RXLOSS THROTTLE CLI MSP ARM_SWITCH\n";
+    const std::string legacyTasks =
+        "Task list rate/hz max/us avg/us maxload avgload total/ms late run reqd/us\n"
+        "Total (excluding SERIAL)                                96.4%\n";
+    report = buildDiagnosticReport(legacyStatus, legacyTasks, modernVersion);
+    check(report.actionableBlockerCount() == 4, "four non-host arming blockers are retained");
+    check(report.failureCount() >= 4, "gyro, RX, battery, and blocker failures are explicit");
+    check(report.warningCount() >= 3, "situational blockers and cumulative I2C errors are warnings");
+
+    report = buildDiagnosticReport(modernStatus, "Unknown command, try 'help'\n", "");
+    check(!report.complete(), "missing or rejected query makes the report incomplete");
+    check(report.warningCount() >= 2, "missing scheduler and firmware evidence stays visible");
+
+    const std::string saved = formatDiagnosticReport(
+        report, modernStatus, "Unknown command, try 'help'\n", "");
+    check(saved.find("not an airworthiness verdict") != std::string::npos,
+          "saved report states its evidence boundary");
+    check(saved.find("# --- status (raw) ---") != std::string::npos &&
+              saved.find("Arming disable flags: CLI MSP") != std::string::npos,
+          "saved report preserves the raw FC evidence");
+}
+
 // ----------------------------------------------------------------- storage
 
 void testStorage() {
@@ -432,6 +486,11 @@ void testStorage() {
     check(name.find("_BETAFPVG473_V2_backup.txt") != std::string::npos,
           "backup name carries the board");
     checkEq(sanitizeForFilename("a/b:c d"), "abc_d", "filename sanitising");
+    const std::string diagnostic = s.makeDiagnosticName("AIR65 C", "BETAFPVG473_V2");
+    check(diagnostic.rfind("GNDHOG_fieldcheck_AIR65_C_", 0) == 0 &&
+              diagnostic.find("_BETAFPVG473_V2.txt") != std::string::npos,
+          "field checks get a separate non-restorable filename");
+    check(s.diagnosticDir() != s.backupDir(), "field checks stay outside the restore picker");
 }
 
 void testGraphics() {
@@ -630,6 +689,7 @@ int runSelfTest() {
     testEditor();
     testCompleter();
     testRiskAndParsing();
+    testDiagnostics();
     testStorage();
     testGraphics();
     section("brand and About");
@@ -720,6 +780,32 @@ int runSelfTest() {
             }
         }
         check(transparentAndClipped, "mascot clips and preserves an arbitrary background");
+    }
+    {
+        SimFc sim;
+        std::string error;
+        check(sim.start(error), "field-check simulator starts: " + error);
+        if (error.empty()) {
+            App app;
+            app.display_.setHeadlessSize(kScreenW, kScreenH);
+            check(app.session_.connect(sim.devicePath(), 115200, error),
+                  "field-check app connects: " + error);
+            check(spin(sim, app.session_, 4000, [&] { return app.session_.ready(); }),
+                  "field-check app reaches the prompt");
+            app.runFieldCheck();
+            const uint64_t deadline = nowMs() + 8000;
+            while (nowMs() < deadline && app.diagnosticRunning_) {
+                sim.pump();
+                app.tick(nowMs());
+                sleepMs(4);
+            }
+            check(!app.diagnosticRunning_, "field check finishes all read-only queries");
+            check(app.diagnosticReport_.complete(), "field check produces a complete report");
+            check(app.screen_ == Screen::Diagnostics, "field check stays on its summary screen");
+            app.render();
+            check(app.display_.surface().valid(), "field-check summary renders offscreen");
+            app.session_.disconnect();
+        }
     }
     testSession();
     testFullScrollback();

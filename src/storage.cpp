@@ -117,7 +117,9 @@ bool Storage::init(std::string& error) {
     const std::string xdg = envOr("XDG_DATA_HOME", home + "/.local/share");
     dataDir_ = envOr("BFCLI_DATA_DIR", xdg + "/bfcli");
     backupDir_ = dataDir_ + "/backups";
+    diagnosticDir_ = dataDir_ + "/diagnostics";
     if (!makeDirs(backupDir_, error)) return false;
+    if (!makeDirs(diagnosticDir_, error)) return false;
     return true;
 }
 
@@ -219,6 +221,16 @@ std::string Storage::makeBackupName(const std::string& craft, const std::string&
     const std::string b = sanitizeForFilename(board);
     if (!b.empty()) name += "_" + b;
     return name + "_backup.txt";
+}
+
+std::string Storage::makeDiagnosticName(const std::string& craft, const std::string& board) const {
+    std::string name = "GNDHOG_fieldcheck";
+    const std::string c = sanitizeForFilename(craft);
+    if (!c.empty()) name += "_" + c;
+    name += "_" + timestampCompact();
+    const std::string b = sanitizeForFilename(board);
+    if (!b.empty()) name += "_" + b;
+    return name + ".txt";
 }
 
 uint64_t Storage::freeBytes() const {

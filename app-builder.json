@@ -5,8 +5,8 @@
   "bin_name": "bfcli",
   "description": "Betaflight CLI terminal for M5Stack Cardputer Zero",
   "store": {
-    "summary": "Betaflight CLI, backups, and restores on Cardputer Zero.",
-    "description": "A native Betaflight field terminal for the M5Stack Cardputer Zero. Connect a flight controller over USB or UART to run CLI commands, keep command history, inspect the keyboard map, and create or restore Configurator-shaped backups. Risky motor and erase commands require confirmation. GNDHOG ZERO runs locally without a network connection or background service.",
+    "summary": "Betaflight field checks, CLI, backups, and restores on Cardputer Zero.",
+    "description": "A native Betaflight field terminal for the M5Stack Cardputer Zero. Connect a flight controller over USB or UART to summarize current arming blockers, gyro, receiver, battery, I2C, and scheduler evidence; inspect the raw CLI output; run commands; and create or restore Configurator-shaped backups. Risky motor and erase commands require confirmation. GNDHOG ZERO runs locally without a network connection or background service.",
     "categories": [
       "Development",
       "Hardware & IoT"

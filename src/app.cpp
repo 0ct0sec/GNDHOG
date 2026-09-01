@@ -12,7 +12,8 @@ namespace bf {
 namespace {
 
 enum MenuId {
-    MenuBackupDiff = 1,
+    MenuFieldCheck = 1,
+    MenuBackupDiff,
     MenuBackupDump,
     MenuRestore,
     MenuQuick,
@@ -181,6 +182,7 @@ bool App::setup(const Options& opt, std::string& error) {
     editor_.loadHistory(storage_.loadHistory());
 
     menu_ = {
+        {"Run field check", "no config writes; status, blockers, runtime", MenuFieldCheck, true},
         {"Backup config to file", "runs `diff all`", MenuBackupDiff, true},
         {"Full dump to file", "runs `dump all`", MenuBackupDump, true},
         {"Restore from backup...", "sends a saved file", MenuRestore, true},
@@ -272,6 +274,7 @@ void App::connectSelected() {
 }
 
 void App::doDisconnect() {
+    diagnosticRunning_ = false;
     session_.disconnect();
     pushLocal("-- disconnected --", LineKind::Warn);
     refreshPorts();
@@ -364,6 +367,84 @@ void App::runBackup(const std::string& command, const std::string& label) {
                                 storage_.backupDir());
         });
     if (!started) notice("Busy", "A command is already running.");
+}
+
+void App::runFieldCheck() {
+    if (!session_.ready()) {
+        notice("Not ready", "Connect to a flight controller first.");
+        return;
+    }
+    diagnosticReport_ = DiagnosticReport{};
+    diagnosticStatus_.clear();
+    diagnosticTasks_.clear();
+    diagnosticVersion_.clear();
+    diagnosticError_.clear();
+    diagnosticList_ = ListState{};
+    diagnosticStep_ = 0;
+    diagnosticRunning_ = true;
+    setScreen(Screen::Diagnostics);
+    pushLocal("-- field check: status / tasks / version (no config writes) --", LineKind::Local);
+    runFieldCheckStep();
+}
+
+void App::runFieldCheckStep() {
+    static const char* const commands[] = {"status", "tasks", "version"};
+    static const char* const labels[] = {"Reading FC status", "Reading scheduler", "Reading firmware"};
+    constexpr int commandCount = static_cast<int>(sizeof(commands) / sizeof(commands[0]));
+
+    if (diagnosticStep_ >= commandCount) {
+        diagnosticRunning_ = false;
+        diagnosticReport_ = buildDiagnosticReport(
+            diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
+        status_ = diagnosticReport_.actionableBlockerCount() > 0
+                      ? std::to_string(diagnosticReport_.actionableBlockerCount()) + " arming blocker(s)"
+                      : "field check complete";
+        statusUntil_ = nowMs() + 3000;
+        dirty_ = true;
+        return;
+    }
+
+    const int step = diagnosticStep_;
+    const bool started = session_.startCapture(
+        commands[step], labels[step], [this, step](bool ok, const std::string& text) {
+            if (step == 0) diagnosticStatus_ = text;
+            else if (step == 1) diagnosticTasks_ = text;
+            else diagnosticVersion_ = text;
+
+            if (!ok) {
+                diagnosticRunning_ = false;
+                diagnosticError_ = "capture stopped while running " +
+                                   std::string(step == 0 ? "status" : step == 1 ? "tasks" : "version");
+                diagnosticReport_ = buildDiagnosticReport(
+                    diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
+                dirty_ = true;
+                return;
+            }
+            ++diagnosticStep_;
+            runFieldCheckStep();
+        });
+    if (!started) {
+        diagnosticRunning_ = false;
+        diagnosticError_ = "FC became busy before the next read-only query";
+        diagnosticReport_ = buildDiagnosticReport(
+            diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
+        dirty_ = true;
+    }
+}
+
+void App::saveFieldCheck() {
+    if (diagnosticRunning_ || diagnosticReport_.findings.empty()) return;
+    const std::string name = storage_.makeDiagnosticName(session_.craft(), session_.board());
+    const std::string path = storage_.diagnosticDir() + "/" + name;
+    std::string body = formatDiagnosticReport(
+        diagnosticReport_, diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
+    if (!diagnosticError_.empty()) body.insert(0, "# Capture note: " + diagnosticError_ + "\n");
+    std::string err;
+    if (!storage_.writeAtomic(path, body, err)) {
+        notice("Could not save", err);
+        return;
+    }
+    notice("Field check saved", name + "\n\n" + storage_.diagnosticDir());
 }
 
 void App::viewFile(const BackupFile& f) {
@@ -486,6 +567,9 @@ void App::adjustBrightness(int delta) {
 
 void App::applyMenu(int id) {
     switch (id) {
+    case MenuFieldCheck:
+        runFieldCheck();
+        break;
     case MenuBackupDiff:
         setScreen(Screen::Terminal);
         runBackup("diff all", "Backup (diff all)");
@@ -633,7 +717,7 @@ void App::onTerminalKey(const KeyEvent& e) {
     case Key::BrightUp:  adjustBrightness(+10); return;
     case Key::BrightDown: adjustBrightness(-10); return;
     case Key::F1: helpScroll_ = 0; setScreen(Screen::Help); return;
-    case Key::F2: if (session_.ready()) session_.send("status"); return;
+    case Key::F2: runFieldCheck(); return;
     case Key::F3: if (session_.ready()) session_.send("version"); return;
     case Key::F4: if (session_.ready()) session_.send("diff"); return;
     case Key::F5: runBackup("diff all", "Backup (diff all)"); return;
@@ -705,6 +789,45 @@ void App::onFilesKey(const KeyEvent& e) {
     }
 }
 
+void App::onDiagnosticsKey(const KeyEvent& e) {
+    const int rows = std::max(1, bodyRows(false) - 4);
+    const int n = static_cast<int>(diagnosticReport_.findings.size());
+
+    if (diagnosticRunning_) {
+        if (e.key == Key::Escape && !e.repeat) {
+            session_.cancelJob();
+            session_.clearFinishedJob();
+            diagnosticRunning_ = false;
+            diagnosticError_ = "cancelled by operator";
+            diagnosticReport_ = buildDiagnosticReport(
+                diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
+            pushLocal("-- field check cancelled --", LineKind::Warn);
+            setScreen(Screen::Terminal);
+        }
+        return;
+    }
+
+    switch (e.key) {
+    case Key::Up:       diagnosticList_.move(-1, n, rows); dirty_ = true; break;
+    case Key::Down:     diagnosticList_.move(+1, n, rows); dirty_ = true; break;
+    case Key::PageUp:   diagnosticList_.move(-rows, n, rows); dirty_ = true; break;
+    case Key::PageDown: diagnosticList_.move(+rows, n, rows); dirty_ = true; break;
+    case Key::Escape:
+    case Key::Enter:
+        setScreen(Screen::Terminal);
+        break;
+    case Key::Char:
+        if (e.ch == 'r' || e.ch == 'R') runFieldCheck();
+        else if (e.ch == 's' || e.ch == 'S') saveFieldCheck();
+        else if (e.ch == 'v' || e.ch == 'V') {
+            term_.scrollToBottom(bodyRows(true));
+            setScreen(Screen::Terminal);
+        }
+        break;
+    default: break;
+    }
+}
+
 void App::onKeymapKey(const KeyEvent& e) {
     // Everything except Escape is swallowed so the tester can show it.
     if (e.key == Key::Escape && !e.repeat) {
@@ -744,6 +867,7 @@ void App::handleKey(const KeyEvent& e) {
     case Screen::Menu:
     case Screen::Quick:    onMenuKey(e); break;
     case Screen::Files:    onFilesKey(e); break;
+    case Screen::Diagnostics: onDiagnosticsKey(e); break;
     case Screen::Keymap:   onKeymapKey(e); break;
     case Screen::Help:     onHelpKey(e); break;
     case Screen::About:    onAboutKey(e); break;
@@ -767,6 +891,13 @@ void App::tick(uint64_t now) {
     }
 
     const JobStatus& job = session_.job();
+    if (diagnosticRunning_ && !session_.connected()) {
+        diagnosticRunning_ = false;
+        diagnosticError_ = "serial link lost during field check";
+        diagnosticReport_ = buildDiagnosticReport(
+            diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
+        dirty_ = true;
+    }
     if (job.finished) {
         const bool wasRestore = job.kind == JobKind::Restore;
         const std::string message = job.message;
@@ -816,6 +947,7 @@ int App::run(const Options& opt) {
             {Screen::Menu, "03-menu"},     {Screen::Quick, "04-quick"},
             {Screen::Files, "05-files"},   {Screen::Keymap, "06-keymap"},
             {Screen::Help, "07-help"},
+            {Screen::Diagnostics, "08-field-check"},
             {Screen::About, "09-about"},
         };
         status_.clear();   // show each screen's real hint bar, not a startup notice
@@ -824,6 +956,17 @@ int App::run(const Options& opt) {
         pushLocal("Arming disable flags: RXLOSS CLI", LineKind::Fc);
         pushLocal("-- CLI ready --", LineKind::Good);
         editor_.setText("set gyro_lpf1_static_hz = 0");
+        diagnosticStatus_ =
+            "GYRO: (1) ICM42688P enabled locked dma\n"
+            "DEVICES DETECTED: SPI=2, I2C=1 (0 errors)\n"
+            "CPU:37%, cycle time: 125, GYRO rate: 8000, RX rate: 0, System rate: 10\n"
+            "Voltage: 4.12V (1S battery - OK)\n"
+            "Arming disable flags: RXLOSS CLI\n";
+        diagnosticTasks_ = "Task list\nTotal                                             42.5%\n";
+        diagnosticVersion_ =
+            "# Betaflight / STM32G47X (G473) 2026.6.0-alpha MSP API: 1.48\n";
+        diagnosticReport_ = buildDiagnosticReport(
+            diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
         int written = 0;
         for (const auto& shot : kShots) {
             screen_ = shot.screen;
@@ -835,7 +978,7 @@ int App::run(const Options& opt) {
         screen_ = Screen::Terminal;
         confirm("Props off?", "Spins a motor. Props off?\n\n> motor 1 1100", "Send", nullptr);
         render();
-        if (display_.canvas().writePpm(opt.previewDir + "/08-confirm.ppm")) ++written;
+        if (display_.canvas().writePpm(opt.previewDir + "/10-confirm.ppm")) ++written;
         closeModal();
         std::printf("wrote %d previews to %s\n", written, opt.previewDir.c_str());
         teardown();

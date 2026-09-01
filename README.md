@@ -41,14 +41,22 @@ loop at 30 fps runs the whole suspiciously small department.
    controller to **USB-A**.
 5. Launch **GNDHOG ZERO** from APPLaunch. If the port picker appears, choose the
    CDC-ACM device for the FC, usually `/dev/ttyACM0`.
-6. Press **Fn+2** for `status`. Press **Esc** for the menu. Make a backup before
-   changing anything expensive, airborne, or both.
+6. Press **Fn+2** for a no-config-write field check. Press **Esc** for the menu. Make
+   a backup before changing anything expensive, airborne, or both.
 
 ## What it does
 
 - **Full CLI terminal.** Run `status`, `get`, `set`, `diff`, `resource`,
   `vtxtable`, or whatever other instruction you intend to regret responsibly.
   Scrollback holds 3000 lines; command history survives the session.
+- **Field check, with receipts.** One key captures `status`, `tasks`, and
+  `version`, then turns the FC's own evidence into an at-a-glance arming,
+  gyro, receiver, battery, I2C, and runtime summary. Expected `CLI`/`MSP`
+  blockers are separated from faults such as `RXLOSS`, `NOGYRO`, `FAILSAFE`,
+  and `LOAD`. The untouched command output remains in the terminal, and an
+  optional report can be saved for later. Missing core evidence is marked
+  “unknown”; optional unsupported devices are omitted. The groundhog does not
+  diagnose by séance.
 - **Tab completion.** Commands and `set`/`get` parameter names complete in
   place. About 140 common parameters are built in, then the index learns names
   already seen in `dump` and `diff` output. It does not interrogate the FC
@@ -129,7 +137,7 @@ A plain USB keyboard on the hub also works and is decoded from keycodes alone.
 | `Ctrl+C` / `Ctrl+L` | clear the line / screen |
 | `Esc` | menu, then back, then exit |
 
-Hold `Fn` and tap a number for the quick rack: **1** help, **2** status,
+Hold `Fn` and tap a number for the quick rack: **1** help, **2** field check,
 **3** version, **4** diff, **5** backup, **6** backups, **7** tasks, **8** save,
 **9** menu, **0** disconnect.
 
@@ -146,6 +154,36 @@ power pin does not grant the data pins diplomatic immunity from 5 V.
 In Slave/device mode the internal hub is disconnected and USB-A is offline.
 The FC cannot enumerate through a wire the hardware has removed from the
 conversation.
+
+## Field check
+
+Press **Fn+2**, or choose **Menu → Run field check**. GNDHOG runs three CLI
+queries in sequence without changing settings or writing FC flash:
+
+```text
+status     current sensors, battery, rates, and arming disable flags
+tasks      scheduler load evidence
+version    firmware, target, build, and MSP API identity
+```
+
+Betaflight's `tasks` command resets its transient maximum-execution-time
+statistics after printing them. The field check therefore does not alter
+configuration or flight behavior, but it is not literally side-effect-free.
+
+The summary prioritizes active arming blockers and gives a short next action
+for every current Betaflight flag it recognizes. `CLI` and `MSP` are expected
+while attached here and do not become fake faults. A nonzero I2C count is
+reported as cumulative since boot, scheduler percentages are shown as evidence
+rather than graded against an invented threshold, and absent fields remain
+unknown. Press **V** for the raw terminal transcript, **R** to run a fresh
+snapshot, or **S** to save a report under
+`~/.local/share/bfcli/diagnostics`.
+
+This is a fast flight-line snapshot, not an airworthiness verdict. It cannot
+inspect solder joints, prop condition, motor direction, control-surface
+movement, failsafe behavior in the air, or whether the pilot has made peace
+with the tree line. Props-off inspection and functional checks still belong to
+the operator.
 
 ## Build
 
@@ -292,8 +330,9 @@ confirmation is a guardrail. It is not a small orange force field.
 ```
 
 `--sim` creates a pseudo-terminal answering as a BETAFPVG473_V2 running
-Betaflight 2026.6.0-alpha, including a realistic `diff all`. The complete
-connect → backup → restore path can therefore be exercised without hardware.
+Betaflight 2026.6.0-alpha, including realistic field-check evidence and a
+`diff all`. The complete connect → diagnose → backup → restore path can
+therefore be exercised without hardware.
 It does not exercise the physical keyboard, framebuffer, USB link, or an actual
 flight controller. Even imaginary hardware has a job description.
 
@@ -303,6 +342,7 @@ flight controller. Even imaginary hardware has a job description.
 |------|------------------|
 | `src/keys.cpp` | v5 46-key matrix and layer decoding |
 | `src/bfsession.cpp` | CLI conversation, prompt detection, backup and restore |
+| `src/diagnostics.cpp` | version-tolerant field evidence parser and saved report formatter |
 | `src/term.cpp` | scrollback, wrapping, and line editing |
 | `src/bfcommands.cpp` | command tables, completion, and risk classification |
 | `src/display.cpp` | framebuffer and backlight access |

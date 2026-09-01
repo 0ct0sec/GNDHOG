@@ -31,6 +31,28 @@ Color colorFor(LineKind k) {
     }
 }
 
+Color colorFor(DiagnosticLevel level) {
+    switch (level) {
+    case DiagnosticLevel::Pass:    return theme::ok;
+    case DiagnosticLevel::Info:    return theme::text;
+    case DiagnosticLevel::Warning: return theme::warn;
+    case DiagnosticLevel::Failure: return theme::err;
+    case DiagnosticLevel::Unknown: return theme::textDim;
+    }
+    return theme::textDim;
+}
+
+const char* markerFor(DiagnosticLevel level) {
+    switch (level) {
+    case DiagnosticLevel::Pass:    return "OK";
+    case DiagnosticLevel::Info:    return "--";
+    case DiagnosticLevel::Warning: return "!!";
+    case DiagnosticLevel::Failure: return "XX";
+    case DiagnosticLevel::Unknown: return "??";
+    }
+    return "??";
+}
+
 // Wraps `text` (which may contain explicit newlines) to `cols` columns.
 std::vector<std::string> wrapText(const std::string& text, int cols) {
     std::vector<std::string> out;
@@ -82,10 +104,16 @@ const char* const kHelpText[] = {
     "  Fn+L / Fn+M   scroll output up / down",
     "",
     "SHORTCUTS (hold Fn, tap a number)",
-    "  Fn+1 help        Fn+2 status     Fn+3 version",
+    "  Fn+1 help        Fn+2 field check Fn+3 version",
     "  Fn+4 diff        Fn+5 backup     Fn+6 backups",
     "  Fn+7 tasks       Fn+8 save       Fn+9 menu",
     "  Fn+0 disconnect",
+    "",
+    "FIELD CHECK",
+    "  Reads status, tasks, and version without changing",
+    "  FC configuration. It separates CLI/MSP blockers",
+    "  from current arming faults and keeps the raw output.",
+    "  It is a snapshot, not an airworthiness verdict.",
     "",
     "BACKUP AND RESTORE",
     "  Backup runs `diff all` and writes a file named the",
@@ -124,6 +152,7 @@ void App::drawTopBar(Surface& s) {
     case Screen::Menu:   mid = "menu"; break;
     case Screen::Quick:  mid = "quick commands"; break;
     case Screen::Files:  mid = "backups"; break;
+    case Screen::Diagnostics: mid = "field check"; break;
     case Screen::Keymap: mid = "keymap"; break;
     case Screen::Help:   mid = "help"; break;
     case Screen::About:  mid = "about"; break;
@@ -382,6 +411,77 @@ void App::drawFiles(Surface& s) {
     drawHintBar(s, sel.dateText() + "   Enter restore   V view   D delete", "Esc back");
 }
 
+void App::drawDiagnostics(Surface& s) {
+    const int cols = columns();
+    constexpr int summaryH = 27;
+    const int listY = kBodyY + summaryH + 2;
+    const int rows = std::max(1, (s.h - kHintH - listY) / kGlyphH);
+
+    fillRect(s, 0, kBodyY, s.w, summaryH, theme::panel);
+    hLine(s, 0, kBodyY + summaryH - 1, s.w, theme::rule);
+
+    std::string summary;
+    Color summaryColor = theme::accent;
+    if (diagnosticRunning_) {
+        summary = "FIELD CHECK RUNNING";
+    } else if (!diagnosticReport_.complete()) {
+        summary = "INCOMPLETE";
+        summaryColor = theme::warn;
+    } else if (diagnosticReport_.actionableBlockerCount() > 0) {
+        summary = "ARM BLOCKED";
+        summaryColor = theme::err;
+    } else if (diagnosticReport_.failureCount() > 0) {
+        summary = "FAULT REPORTED";
+        summaryColor = theme::err;
+    } else if (diagnosticReport_.warningCount() > 0) {
+        summary = "CHECK FINDINGS";
+        summaryColor = theme::warn;
+    } else {
+        summary = "NO ACTIVE FAULTS";
+        summaryColor = theme::ok;
+    }
+    drawText(s, 4, kBodyY + 2, summary, summaryColor);
+
+    if (diagnosticRunning_) {
+        const int shownStep = std::min(3, diagnosticStep_ + 1);
+        const std::string progress = std::to_string(shownStep) + "/3";
+        drawText(s, s.w - textWidth(progress) - 4, kBodyY + 2, progress, theme::accent);
+        const std::string detail = session_.job().label.empty()
+                                       ? "waiting for flight controller"
+                                       : session_.job().label;
+        drawTextClipped(s, 4, kBodyY + 13, detail, cols - 2, theme::textDim);
+        drawProgress(s, 4, listY + 10, s.w - 8, 9,
+                     static_cast<float>(diagnosticStep_) / 3.0f, theme::accent, theme::bg);
+        drawHintBar(s, "no config writes; raw output stays in terminal", "Esc cancel");
+        return;
+    }
+
+    const std::string sub = !diagnosticError_.empty()
+                                ? diagnosticError_
+                                : "CLI snapshot only - inspect the craft props-off";
+    drawTextClipped(s, 4, kBodyY + 13, sub, cols - 2,
+                    diagnosticError_.empty() ? theme::textDim : theme::warn);
+
+    const int count = static_cast<int>(diagnosticReport_.findings.size());
+    diagnosticList_.clamp(count, rows);
+    for (int i = 0; i < rows; ++i) {
+        const int index = diagnosticList_.top + i;
+        if (index >= count) break;
+        const DiagnosticFinding& finding = diagnosticReport_.findings[static_cast<size_t>(index)];
+        const int y = listY + i * kGlyphH;
+        const bool selected = index == diagnosticList_.sel;
+        if (selected) fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
+        const Color c = colorFor(finding.level);
+        drawText(s, 2, y, markerFor(finding.level), c);
+        drawTextClipped(s, 2 + 3 * kGlyphW, y,
+                        finding.title + "  " + finding.detail, cols - 5,
+                        selected ? c : (finding.level == DiagnosticLevel::Info ? theme::textDim : c));
+    }
+    drawScrollbar(s, s.w - 2, listY, rows * kGlyphH,
+                  diagnosticList_.top, rows, count);
+    drawHintBar(s, "R rerun  S save report  V raw terminal", "Esc back");
+}
+
 void App::drawKeymap(Surface& s) {
     const int cols = columns();
     int y = kBodyY;
@@ -520,6 +620,7 @@ void App::render() {
     case Screen::Menu:
     case Screen::Quick:    drawMenu(s); break;
     case Screen::Files:    drawFiles(s); break;
+    case Screen::Diagnostics: drawDiagnostics(s); break;
     case Screen::Keymap:   drawKeymap(s); break;
     case Screen::Help:     drawHelp(s); break;
     case Screen::About:    drawAbout(s); break;

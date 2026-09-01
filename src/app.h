@@ -1,6 +1,7 @@
 #pragma once
 #include "bfcommands.h"
 #include "bfsession.h"
+#include "diagnostics.h"
 #include "display.h"
 #include "gfx.h"
 #include "input.h"
@@ -29,6 +30,7 @@ enum class Screen {
     Menu,
     Quick,
     Files,
+    Diagnostics,
     Keymap,
     Help,
     About,
@@ -82,6 +84,7 @@ private:
     void onTerminalKey(const KeyEvent& e);
     void onMenuKey(const KeyEvent& e);
     void onFilesKey(const KeyEvent& e);
+    void onDiagnosticsKey(const KeyEvent& e);
     void onKeymapKey(const KeyEvent& e);
     void onHelpKey(const KeyEvent& e);
     void onAboutKey(const KeyEvent& e);
@@ -95,6 +98,7 @@ private:
     void drawTerminal(Surface& s);
     void drawMenu(Surface& s);
     void drawFiles(Surface& s);
+    void drawDiagnostics(Surface& s);
     void drawKeymap(Surface& s);
     void drawHelp(Surface& s);
     void drawAbout(Surface& s);
@@ -109,6 +113,9 @@ private:
     void submitLine();
     void doComplete();
     void runBackup(const std::string& command, const std::string& label);
+    void runFieldCheck();
+    void runFieldCheckStep();
+    void saveFieldCheck();
     void refreshFiles();
     void viewFile(const BackupFile& f);
     void restoreFile(const BackupFile& f);
@@ -150,6 +157,7 @@ private:
     ListState portList_;
     std::vector<BackupFile> files_;
     ListState fileList_;
+    ListState diagnosticList_;
     std::vector<MenuItem> menu_;
     ListState menuList_;
     std::vector<MenuItem> quick_;
@@ -158,6 +166,13 @@ private:
     int helpScroll_ = 0;
     int baudIndex_ = 0;
     int brightness_ = 100;
+
+    // Read-only status/tasks/version capture and its evidence-bounded summary.
+    DiagnosticReport diagnosticReport_;
+    std::string diagnosticStatus_, diagnosticTasks_, diagnosticVersion_;
+    std::string diagnosticError_;
+    int diagnosticStep_ = 0;
+    bool diagnosticRunning_ = false;
 
     // Completion feedback shown under the input line.
     std::vector<std::string> completions_;
