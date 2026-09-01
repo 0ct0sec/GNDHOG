@@ -786,25 +786,6 @@ void testGraphics() {
     dimSurface(ds, theme::black);
     check(ds.px[0] == 0x8410 && ds.px[1] == 0x8410,
           "modal dimming blends every pixel instead of dropping scanlines");
-
-    Canvas scaled(12, 16);
-    Surface ss = scaled.surface();
-    fill(ss, theme::bg);
-    drawCharScaled(ss, 0, 0, 'A', theme::accent, 2);
-    bool exactTwoByTwo = true;
-    for (int sourceY = 0; sourceY < kGlyphH; ++sourceY) {
-        for (int sourceX = 0; sourceX < kGlyphW; ++sourceX) {
-            const bool set = sourceX < kGlyphCols && sourceY > 0 &&
-                             (glyph('A')[sourceX] & (1u << (sourceY - 1))) != 0;
-            const Color want = set ? theme::accent : theme::bg;
-            for (int yy = 0; yy < 2; ++yy) {
-                for (int xx = 0; xx < 2; ++xx) {
-                    exactTwoByTwo &= ss.row(sourceY * 2 + yy)[sourceX * 2 + xx] == want;
-                }
-            }
-        }
-    }
-    check(exactTwoByTwo, "2x menu glyphs are exact pixel blocks without interpolation");
 }
 
 // ------------------------------------------------- end-to-end against a pty
@@ -1076,28 +1057,40 @@ int runSelfTest() {
         };
         std::set<int> actionIds;
         bool labelsFit = true;
+        bool labelsClean = true;
         int actionCount = 0;
-        const int labelColumns = kScreenW / kMenuGlyphW - 2;
+        const int labelColumns = (kScreenW - 48) / kGlyphW;
+        for (const MenuItem& item : app.menu_) {
+            labelsClean &= item.label.size() < 3 ||
+                           item.label.compare(item.label.size() - 3, 3, "...") != 0;
+        }
+        for (const MenuItem& item : app.quick_) {
+            labelsClean &= item.label.size() < 3 ||
+                           item.label.compare(item.label.size() - 3, 3, "...") != 0;
+        }
         for (MenuPage page : pages) {
             app.openMenuPage(page);
             for (const MenuItem& item : app.currentMenuItems()) {
                 ++actionCount;
                 actionIds.insert(item.id);
                 labelsFit &= static_cast<int>(item.label.size()) <= labelColumns;
+                labelsClean &= item.label.size() < 3 ||
+                               item.label.compare(item.label.size() - 3, 3, "...") != 0;
             }
         }
         check(actionCount == 16 && actionIds.size() == 16,
               "all 16 actions have exactly one category owner");
-        check(labelsFit, "every category action fits the 2x menu grid without clipping");
-        check(app.menuRows() == 9, "2x menu typography leaves nine selectable rows");
+        check(labelsFit, "every category action fits the original 6x8 menu grid");
+        check(labelsClean, "menu labels do not use trailing dot-dot-dot affordances");
+        check(app.bodyRows(false) == 18, "menu typography restores eighteen 6x8 rows");
 
         app.openMenuPage(MenuPage::Root);
         app.screen_ = Screen::Menu;
         app.render();
         Surface menuSurface = app.display_.surface();
-        check(menuSurface.row(kBodyY + kMenuRowH - 1)[300] == theme::panelHi &&
-                  menuSurface.row(kBodyY + kMenuRowH)[300] == theme::bg,
-              "menu selection plate follows the 16px row lattice");
+        check(menuSurface.row(kBodyY + kGlyphH - 1)[300] == theme::accent &&
+                  menuSurface.row(kBodyY + kGlyphH)[300] == theme::bg,
+              "root selection plate follows the original 8px row lattice");
 
         KeyEvent key;
         key.key = Key::Enter;
@@ -1106,7 +1099,26 @@ int runSelfTest() {
                   app.menuPage_ == MenuPage::FlightController &&
                   app.currentMenuItems().size() == 2,
               "selecting a category opens its submenu");
+        app.render();
+        menuSurface = app.display_.surface();
+        check(menuSurface.row(17)[14] == theme::accent &&
+                  menuSurface.row(18)[15] == theme::bg &&
+                  menuSurface.row(39)[20] == theme::bg &&
+                  menuSurface.row(47)[20] == theme::accent,
+              "category submenu is an inverted bordered modal over the root");
+
+        key.key = Key::Down;
+        app.handleKey(key);
+        key.key = Key::Enter;
+        app.handleKey(key);
+        check(app.screen_ == Screen::Quick &&
+                  app.menuPage_ == MenuPage::FlightController,
+              "nested quick commands open from the controller modal");
         key.key = Key::Escape;
+        app.handleKey(key);
+        check(app.screen_ == Screen::Menu &&
+                  app.menuPage_ == MenuPage::FlightController,
+              "Escape returns from quick commands to its category modal");
         app.handleKey(key);
         check(app.screen_ == Screen::Menu && app.menuPage_ == MenuPage::Root,
               "Escape returns from a category to the main menu");

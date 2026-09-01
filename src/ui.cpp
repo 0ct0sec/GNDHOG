@@ -156,18 +156,8 @@ void App::drawTopBar(Surface& s) {
     std::string mid;
     switch (screen_) {
     case Screen::Ports:  mid = "select port"; break;
-    case Screen::Menu:
-        switch (menuPage_) {
-        case MenuPage::FlightController: mid = "flight controller"; break;
-        case MenuPage::BackupRestore:    mid = "backup & restore"; break;
-        case MenuPage::ControlsInfo:     mid = "controls & info"; break;
-        case MenuPage::SoundDisplay:     mid = "sound & display"; break;
-        case MenuPage::ConnectionExit:   mid = "connection & exit"; break;
-        case MenuPage::Root:
-        default:                         mid = "menu"; break;
-        }
-        break;
-    case Screen::Quick:  mid = "quick commands"; break;
+    case Screen::Menu:   mid = "menu"; break;
+    case Screen::Quick:  mid = "menu"; break;
     case Screen::Files:  mid = "backups"; break;
     case Screen::Diagnostics: mid = "field check"; break;
     case Screen::Keymap: mid = "keymap"; break;
@@ -225,33 +215,73 @@ void App::drawHintBar(Surface& s, const std::string& hints,
 }
 
 void App::drawList(Surface& s, const std::vector<MenuItem>& items, ListState& st,
-                   int visibleRows) {
-    const int cols = s.w / kMenuGlyphW;
+                   int visibleRows, bool showSelection) {
+    const int cols = columns();
     if (items.empty()) {
-        drawTextScaled(s, 4, kBodyY, "(nothing here)", theme::textDim,
-                       kMenuTextScale);
+        drawText(s, 4, kBodyY, "(nothing here)", theme::textDim);
         return;
     }
     for (int i = 0; i < visibleRows; ++i) {
         const int idx = st.top + i;
         if (idx >= static_cast<int>(items.size())) break;
-        const int y = kBodyY + i * kMenuRowH;
-        const bool selected = (idx == st.sel);
+        const int y = kBodyY + i * kGlyphH;
+        const bool selected = showSelection && (idx == st.sel);
         if (selected) {
-            fillRect(s, 0, y, s.w - 3, kMenuRowH, theme::panelHi);
-            fillRect(s, 0, y, 2, kMenuRowH, theme::accent);
+            fillRect(s, 0, y, s.w - 3, kGlyphH, theme::accent);
         }
         const Color fg = items[static_cast<size_t>(idx)].enabled
-                             ? (selected ? theme::accent : theme::text)
+                             ? (selected ? theme::bg : theme::text)
                              : theme::textDim;
-        drawTextScaled(s, 2, y, selected ? ">" : " ", theme::accent,
-                       kMenuTextScale);
-        drawTextClippedScaled(s, 2 + kMenuGlyphW, y,
-                              items[static_cast<size_t>(idx)].label,
-                              cols - 2, fg, kMenuTextScale);
+        drawTextClipped(s, 4, y, items[static_cast<size_t>(idx)].label,
+                        cols - 4, fg);
+        drawText(s, s.w - kGlyphW - 4, y, ">",
+                 selected ? theme::bg : theme::accent);
     }
-    drawScrollbar(s, s.w - 2, kBodyY, visibleRows * kMenuRowH, st.top, visibleRows,
+    drawScrollbar(s, s.w - 2, kBodyY, visibleRows * kGlyphH, st.top, visibleRows,
                   static_cast<int>(items.size()));
+}
+
+void App::drawMenuModal(Surface& s, const std::string& title,
+                        const std::vector<MenuItem>& items, ListState& st) {
+    constexpr int boxX = 14;
+    constexpr int boxY = 17;
+    const int boxW = s.w - 2 * boxX;
+    const int boxH = s.h - kHintH - boxY - 4;
+    const int rowStart = boxY + 22;
+    const int visibleRows = std::max(1, (boxY + boxH - 4 - rowStart) / kGlyphH);
+
+    fillRect(s, boxX, boxY, boxW, boxH, theme::accent);
+    rect(s, boxX + 1, boxY + 1, boxW - 2, boxH - 2, theme::bg);
+
+    const int titleMax = std::max(1, (boxW - 20) / kGlyphW);
+    const std::string shown = static_cast<int>(title.size()) <= titleMax
+                                  ? title
+                                  : title.substr(0, static_cast<size_t>(titleMax - 1)) + "~";
+    drawText(s, boxX + (boxW - textWidth(shown)) / 2, boxY + 5, shown, theme::bg);
+    hLine(s, boxX + 10, boxY + 17, boxW - 20, theme::bg);
+
+    if (items.empty()) {
+        drawText(s, boxX + 10, rowStart, "(nothing here)", theme::bg);
+        return;
+    }
+
+    st.clamp(static_cast<int>(items.size()), visibleRows);
+    const int maxChars = std::max(1, (boxW - 20) / kGlyphW);
+    for (int row = 0; row < visibleRows; ++row) {
+        const int idx = st.top + row;
+        if (idx >= static_cast<int>(items.size())) break;
+        const int y = rowStart + row * kGlyphH;
+        const bool selected = idx == st.sel;
+        if (selected) {
+            fillRect(s, boxX + 6, y, boxW - 12, kGlyphH, theme::bg);
+        }
+        const Color fg = items[static_cast<size_t>(idx)].enabled
+                             ? (selected ? theme::accent : theme::bg)
+                             : theme::accentDim;
+        const std::string rowText = (selected ? "> " : "  ") +
+                                    items[static_cast<size_t>(idx)].label;
+        drawTextClipped(s, boxX + 10, y, rowText, maxChars, fg);
+    }
 }
 
 void App::drawPorts(Surface& s) {
@@ -379,9 +409,28 @@ void App::drawMenu(Surface& s) {
     const bool quick = (screen_ == Screen::Quick);
     std::vector<MenuItem>& items = quick ? quick_ : currentMenuItems();
     ListState& st = quick ? quickList_ : currentMenuList();
-    const int rows = menuRows();
-    st.clamp(static_cast<int>(items.size()), rows);
-    drawList(s, items, st, rows);
+    const int rows = bodyRows(false);
+    if (!quick && menuPage_ == MenuPage::Root) {
+        st.clamp(static_cast<int>(items.size()), rows);
+        drawList(s, items, st, rows);
+    } else {
+        ListState backdrop = menuList_;
+        backdrop.clamp(static_cast<int>(menu_.size()), rows);
+        drawList(s, menu_, backdrop, rows, false);
+
+        std::string title = "Quick commands";
+        if (!quick) {
+            switch (menuPage_) {
+            case MenuPage::FlightController: title = "Flight controller"; break;
+            case MenuPage::BackupRestore:    title = "Backup & restore"; break;
+            case MenuPage::ControlsInfo:     title = "Controls & info"; break;
+            case MenuPage::SoundDisplay:     title = "Sound & display"; break;
+            case MenuPage::ConnectionExit:   title = "Connection & exit"; break;
+            case MenuPage::Root:             title = "Menu"; break;
+            }
+        }
+        drawMenuModal(s, title, items, st);
+    }
 
     std::string hint = "Enter select   Esc back";
     if (!items.empty()) {

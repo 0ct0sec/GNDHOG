@@ -95,28 +95,23 @@ int App::bodyRows(bool withInput) const {
     return std::max(1, (bottom - kBodyY) / kGlyphH);
 }
 
-int App::menuRows() const {
-    const int bottom = display_.height() - kHintH;
-    return std::max(1, (bottom - kBodyY) / kMenuRowH);
-}
-
 void App::setupMenus() {
     menu_ = {
-        {"Flight controller...", "checks and common CLI queries", MenuOpenFlightController, true},
-        {"Backup & restore...", "save, inspect, or restore configuration", MenuOpenBackupRestore, true},
-        {"Controls & info...", "keymap, help, and build identity", MenuOpenControlsInfo, true},
-        {"Sound & display...", "HUD audio, volume, and brightness", MenuOpenSoundDisplay, true},
-        {"Connection & exit...", "close the FC link or return to launcher", MenuOpenConnectionExit, true},
+        {"Flight controller", "checks and common CLI queries", MenuOpenFlightController, true},
+        {"Backup & restore", "save, inspect, or restore configuration", MenuOpenBackupRestore, true},
+        {"Controls & info", "keymap, help, and build identity", MenuOpenControlsInfo, true},
+        {"Sound & display", "HUD audio, volume, and brightness", MenuOpenSoundDisplay, true},
+        {"Connection & exit", "close the FC link or return to launcher", MenuOpenConnectionExit, true},
     };
     controllerMenu_ = {
         {"Run field check", "no config writes; status, blockers, runtime", MenuFieldCheck, true},
-        {"Quick commands...", "common CLI queries", MenuQuick, true},
+        {"Quick commands", "common CLI queries", MenuQuick, true},
     };
     backupMenu_ = {
         {"Backup config to file", "runs `diff all`", MenuBackupDiff, true},
         {"Full dump to file", "runs `dump all`", MenuBackupDump, true},
-        {"Restore from backup...", "sends a saved file", MenuRestore, true},
-        {"Saved backups...", "view or delete", MenuFiles, true},
+        {"Restore from backup", "sends a saved file", MenuRestore, true},
+        {"Saved backups", "view or delete", MenuFiles, true},
     };
     controlsMenu_ = {
         {"Keymap & key test", "find a symbol key", MenuKeymap, true},
@@ -165,7 +160,7 @@ void App::openMenuPage(MenuPage page) {
     if (menuPage_ == page) return;
     menuPage_ = page;
     if (page != MenuPage::Root) submenuList_ = ListState{};
-    currentMenuList().clamp(static_cast<int>(currentMenuItems().size()), menuRows());
+    currentMenuList().clamp(static_cast<int>(currentMenuItems().size()), bodyRows(false));
     keyboard_.releaseAll();
     dirty_ = true;
 }
@@ -1040,7 +1035,7 @@ void App::onTerminalKey(const KeyEvent& e) {
             return;
         }
         openMenuPage(MenuPage::Root);
-        menuList_.clamp(static_cast<int>(menu_.size()), menuRows());
+        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
         audio_.play(HudCue::Back);
         setScreen(Screen::Menu);
         return;
@@ -1059,7 +1054,7 @@ void App::onTerminalKey(const KeyEvent& e) {
         return;
     case Key::F9:
         openMenuPage(MenuPage::Root);
-        menuList_.clamp(static_cast<int>(menu_.size()), menuRows());
+        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
         setScreen(Screen::Menu);
         return;
     case Key::F10: requestDisconnect(false); return;
@@ -1077,7 +1072,7 @@ void App::onMenuKey(const KeyEvent& e) {
     const bool quick = (screen_ == Screen::Quick);
     std::vector<MenuItem>& items = quick ? quick_ : currentMenuItems();
     ListState& st = quick ? quickList_ : currentMenuList();
-    const int rows = menuRows();
+    const int rows = bodyRows(false);
     const int n = static_cast<int>(items.size());
 
     switch (e.key) {

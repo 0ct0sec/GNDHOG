@@ -25,9 +25,6 @@ constexpr int kTopH    = 11;
 constexpr int kBodyY   = 13;
 constexpr int kHintH   = 10;
 constexpr int kInputH  = 11;
-constexpr int kMenuTextScale = 2;
-constexpr int kMenuGlyphW = kGlyphW * kMenuTextScale;
-constexpr int kMenuRowH = kGlyphH * kMenuTextScale;
 
 enum class Screen {
     Ports,
@@ -119,7 +116,9 @@ private:
     void drawAbout(Surface& s);
     void drawModal(Surface& s);
     void drawList(Surface& s, const std::vector<MenuItem>& items, ListState& st,
-                  int visibleRows);
+                  int visibleRows, bool showSelection = true);
+    void drawMenuModal(Surface& s, const std::string& title,
+                       const std::vector<MenuItem>& items, ListState& st);
 
     void setupMenus();
     std::vector<MenuItem>& currentMenuItems();
@@ -161,7 +160,6 @@ private:
     void setScreen(Screen s);
 
     int bodyRows(bool withInput) const;
-    int menuRows() const;
     int columns() const;
 
     // ---- state

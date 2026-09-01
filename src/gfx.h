@@ -72,14 +72,8 @@ void drawChar(Surface& s, int x, int y, char c, Color fg);
 void drawChar(Surface& s, int x, int y, char c, Color fg, Color bg);
 int  drawText(Surface& s, int x, int y, const std::string& t, Color fg);
 int  drawText(Surface& s, int x, int y, const std::string& t, Color fg, Color bg);
-// Integer-only nearest-neighbour scaling for deliberately chunky UI labels.
-// A scale of 2 turns the 6x8 cell into an exact 12x16 pixel lattice.
-void drawCharScaled(Surface& s, int x, int y, char c, Color fg, int scale);
-int  drawTextScaled(Surface& s, int x, int y, const std::string& t, Color fg, int scale);
 // Clipped to `maxChars`, appending an ellipsis when it had to cut.
 int  drawTextClipped(Surface& s, int x, int y, const std::string& t, int maxChars, Color fg);
-int  drawTextClippedScaled(Surface& s, int x, int y, const std::string& t,
-                           int maxChars, Color fg, int scale);
 int  textWidth(const std::string& t);
 
 // Small chrome helpers shared by the screens.
