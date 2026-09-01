@@ -129,7 +129,9 @@ void App::drawTopBar(Surface& s) {
     case Screen::About:  mid = "about"; break;
     case Screen::Terminal:
         if (!session_.connected()) {
-            mid = "offline";
+            // The state chip already says "offline". Keep the middle label as
+            // screen context instead of printing the same state twice.
+            mid = "terminal";
         } else {
             mid = session_.device().substr(session_.device().find_last_of('/') + 1);
             if (!session_.craft().empty()) mid += " " + session_.craft();

@@ -11,6 +11,15 @@ MANIFEST="$ROOT/app-builder.json"
 BINARY=${GNDHOG_ARM64_BINARY:-"$ROOT/build-arm64/bfcli"}
 OUTPUT_DIR=${1:-"$ROOT/dist"}
 
+# Give dpkg-deb a stable archive timestamp. This keeps repeated packages of the
+# same source revision byte-identical while still allowing release automation
+# to supply its own SOURCE_DATE_EPOCH.
+if [ "${SOURCE_DATE_EPOCH+x}" != x ]; then
+    PACKAGE_EPOCH=$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || true)
+    SOURCE_DATE_EPOCH=${PACKAGE_EPOCH:-0}
+    export SOURCE_DATE_EPOCH
+fi
+
 command -v "$PYTHON" >/dev/null 2>&1 || {
     echo "python3 is required to read and validate app-builder.json" >&2
     exit 1

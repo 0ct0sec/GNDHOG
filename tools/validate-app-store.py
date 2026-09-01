@@ -11,7 +11,7 @@ import struct
 import subprocess
 import sys
 import tarfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,13 +44,44 @@ def png_dimensions(path: Path) -> tuple[int, int] | None:
 
 
 def normalized_name(value: str) -> str:
-    return re.sub(r"[-_.]", "", value.lower())
+    return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
-def named_after_package(value: str, package: str) -> bool:
-    name = normalized_name(re.sub(r"\.(service|socket|timer|target|path|mount)$", "", value))
-    pkg = normalized_name(package)
-    return bool(name and pkg) and (name.startswith(pkg) or pkg.startswith(name))
+def named_after_owner(value: str, *owners: str) -> bool:
+    stem = re.sub(r"\.(desktop|service|socket|timer|target|path|mount)$", "", value)
+    name = normalized_name(stem)
+    return bool(name) and any(
+        owner and name.startswith(owner)
+        for owner in (normalized_name(candidate) for candidate in owners)
+    )
+
+
+def manifest_asset_path(value: object) -> Path | None:
+    if not isinstance(value, str) or not value or "\\" in value:
+        return None
+    relative = PurePosixPath(value)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        return None
+    path = (ROOT / Path(*relative.parts)).resolve()
+    try:
+        path.relative_to(ROOT.resolve())
+    except ValueError:
+        return None
+    return path
+
+
+def archive_path(value: str) -> str | None:
+    while value.startswith("./"):
+        value = value[2:]
+    value = value.rstrip("/")
+    if not value:
+        return ""
+    if "\\" in value or "//" in value:
+        return None
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return str(path)
 
 
 def validate_manifest(errors: list[str]) -> dict:
@@ -101,7 +132,8 @@ def validate_manifest(errors: list[str]) -> dict:
         fail(errors, "store.categories contains a value outside the current enum")
 
     icon = store.get("icon")
-    icon_dimensions = png_dimensions(ROOT / icon) if isinstance(icon, str) else None
+    icon_path = manifest_asset_path(icon)
+    icon_dimensions = png_dimensions(icon_path) if icon_path else None
     if icon_dimensions is None:
         fail(errors, "store.icon must point to an existing PNG")
     elif icon_dimensions[0] != icon_dimensions[1] or not 128 <= icon_dimensions[0] <= 512:
@@ -113,7 +145,8 @@ def validate_manifest(errors: list[str]) -> dict:
     else:
         basenames: set[str] = set()
         for screenshot in screenshots:
-            dimensions = png_dimensions(ROOT / screenshot) if isinstance(screenshot, str) else None
+            screenshot_path = manifest_asset_path(screenshot)
+            dimensions = png_dimensions(screenshot_path) if screenshot_path else None
             if dimensions != (320, 170):
                 fail(errors, f"screenshot {screenshot!r} must be a 320x170 PNG; got {dimensions}")
             if isinstance(screenshot, str):
@@ -169,22 +202,61 @@ def control_field(package_path: Path, field: str) -> str:
     return result.stdout.strip()
 
 
-def install_path_allowed(path: str, package: str) -> bool:
-    if path.startswith(("usr/share/APPLaunch/", "usr/share/doc/")):
-        return True
+def install_path_allowed(path: str, package: str, app_name: str) -> bool:
+    if path.startswith("usr/share/APPLaunch/applications/"):
+        name = path.removeprefix("usr/share/APPLaunch/applications/")
+        return "/" not in name and name.endswith(".desktop") and \
+            named_after_owner(name, package, app_name)
+    if path.startswith("usr/share/APPLaunch/share/images/"):
+        name = path.removeprefix("usr/share/APPLaunch/share/images/")
+        return "/" not in name and name.endswith(".png") and \
+            named_after_owner(name, package, app_name)
+    if path.startswith("usr/share/APPLaunch/"):
+        return False
+    if path.startswith("usr/share/doc/"):
+        rest = path.removeprefix("usr/share/doc/")
+        return "/" in rest and rest.split("/", 1)[0] == package
     if path.startswith(("lib/systemd/system/", "usr/lib/systemd/system/")):
         name = path.rsplit("/", 1)[-1]
-        return named_after_package(name, package)
+        return named_after_owner(name, package, app_name)
     if path.startswith("usr/bin/"):
         name = path[len("usr/bin/"):]
-        return "/" not in name and named_after_package(name, package)
+        return "/" not in name and named_after_owner(name, package, app_name)
     if path.startswith("etc/"):
-        return named_after_package(path[len("etc/"):].split("/", 1)[0], package)
+        return named_after_owner(path[len("etc/"):].split("/", 1)[0], package, app_name)
     for prefix in ("usr/share/", "usr/lib/", "opt/", "var/lib/"):
         if path.startswith(prefix):
             rest = path[len(prefix):]
-            return "/" in rest and named_after_package(rest.split("/", 1)[0], package)
+            return "/" in rest and named_after_owner(
+                rest.split("/", 1)[0], package, app_name
+            )
     return False
+
+
+def desktop_fields(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    in_desktop = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_desktop = line == "[Desktop Entry]"
+            continue
+        if in_desktop and "=" in line:
+            key, value = line.split("=", 1)
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+def is_aarch64_elf(payload: bytes) -> bool:
+    return (
+        len(payload) >= 20
+        and payload[:4] == b"\x7fELF"
+        and payload[4] == 2       # ELFCLASS64
+        and payload[5] == 1       # little endian
+        and int.from_bytes(payload[18:20], "little") == 183  # EM_AARCH64
+    )
 
 
 def service_runs_as_root(text: str) -> bool:
@@ -245,9 +317,11 @@ def validate_package(errors: list[str], manifest: dict, package_path: Path) -> N
 
     with tarfile.open(fileobj=io.BytesIO(control_bytes)) as control_archive:
         control_names = {
-            re.sub(r"^\./", "", member.name).rstrip("/")
+            path
             for member in control_archive.getmembers()
             if not member.isdir()
+            for path in [archive_path(member.name)]
+            if path is not None
         }
     maintainer_scripts = control_names & {"preinst", "postinst", "prerm", "postrm"}
     if maintainer_scripts:
@@ -256,20 +330,30 @@ def validate_package(errors: list[str], manifest: dict, package_path: Path) -> N
 
     files: dict[str, tarfile.TarInfo] = {}
     contents: dict[str, bytes] = {}
+    app_name = str(manifest.get("app_name", ""))
     with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as archive:
         for member in archive.getmembers():
-            path = re.sub(r"^\./", "", member.name).rstrip("/")
-            if not path or member.isdir():
+            path = archive_path(member.name)
+            if path is None:
+                fail(errors, f"package contains an unsafe archive path: {member.name!r}")
                 continue
+            if not path:
+                continue
+            if member.uid != 0 or member.gid != 0:
+                fail(errors, f"package path is not owned by root:root: {path}")
+            if member.isdir():
+                continue
+            if path in files:
+                fail(errors, f"package contains a duplicate archive path: {path}")
             files[path] = member
-            if member.isfile():
-                stream = archive.extractfile(member)
-                contents[path] = stream.read() if stream else b""
-            if member.ischr() or member.isblk():
-                fail(errors, f"package contains device node {path}")
+            if not member.isfile():
+                fail(errors, f"package contains a non-regular payload: {path}")
+                continue
+            stream = archive.extractfile(member)
+            contents[path] = stream.read() if stream else b""
             if member.mode & (stat.S_ISUID | stat.S_ISGID):
                 fail(errors, f"package contains setuid/setgid path {path}")
-            if not install_path_allowed(path, package):
+            if not install_path_allowed(path, package, app_name):
                 fail(errors, f"package installs to a disallowed path: {path}")
 
     desktop_path = "usr/share/APPLaunch/applications/bfcli.desktop"
@@ -277,28 +361,53 @@ def validate_package(errors: list[str], manifest: dict, package_path: Path) -> N
         fail(errors, "package is missing the APPLaunch desktop entry")
     else:
         desktop = contents.get(desktop_path, b"").decode("utf-8", "replace")
-        if "Name=GNDHOG ZERO" not in desktop:
+        desktop_data = desktop_fields(desktop)
+        if desktop_data.get("Name") != "GNDHOG ZERO":
             fail(errors, "desktop entry does not preserve the visible app name")
-        if "Exec=/opt/bfcli/run-bfcli" not in desktop:
+        if desktop_data.get("Exec") != "/opt/bfcli/run-bfcli":
             fail(errors, "desktop Exec does not point at the packaged launcher")
-        if "Icon=share/images/gndhog-zero_100.png" not in desktop:
+        if desktop_data.get("Icon") != "share/images/gndhog-zero_100.png":
             fail(errors, "desktop Icon does not point at the packaged mascot")
 
-    for required in (
-        "opt/bfcli/bin/bfcli",
-        "opt/bfcli/run-bfcli",
-        "usr/share/APPLaunch/share/images/gndhog-zero_100.png",
-        "usr/share/doc/bfcli/README.md",
-        "usr/share/doc/bfcli/copyright",
-    ):
-        if required not in files:
+    expected_payloads = {
+        "opt/bfcli/bin/bfcli": (ROOT / "build-arm64/bfcli", 0o755),
+        "opt/bfcli/run-bfcli": (ROOT / "packaging/run-bfcli", 0o755),
+        desktop_path: (ROOT / "packaging/bfcli.desktop", 0o644),
+        "usr/share/APPLaunch/share/images/gndhog-zero_100.png": (
+            ROOT / "assets/gndhog-zero_100.png", 0o644
+        ),
+        "usr/share/doc/bfcli/README.md": (ROOT / "README.md", 0o644),
+        "usr/share/doc/bfcli/copyright": (ROOT / "packaging/copyright", 0o644),
+    }
+    for required, (source, expected_mode) in expected_payloads.items():
+        member = files.get(required)
+        if member is None:
             fail(errors, f"package is missing {required}")
+            continue
+        if member.mode & 0o7777 != expected_mode:
+            fail(errors, f"package mode for {required} must be {expected_mode:04o}")
+        try:
+            expected = source.read_bytes()
+        except OSError as exc:
+            fail(errors, f"cannot read package source {source}: {exc}")
+            continue
+        if contents.get(required) != expected:
+            fail(errors, f"packaged payload does not match its source: {required}")
+
+    binary_path = "opt/bfcli/bin/bfcli"
+    if binary_path in contents and not is_aarch64_elf(contents[binary_path]):
+        fail(errors, "packaged bfcli is not a little-endian AArch64 ELF executable")
 
     for path, payload in contents.items():
         if path.endswith(".service") and path.startswith(
             ("lib/systemd/system/", "usr/lib/systemd/system/", "etc/systemd/system/")
-        ) and service_runs_as_root(payload.decode("utf-8", "replace")):
-            fail(errors, f"system service would run as root: {path}")
+        ):
+            store = manifest.get("store", {})
+            permissions = store.get("permissions", {}) if isinstance(store, dict) else {}
+            if not permissions.get("background_service", False):
+                fail(errors, f"package contains an undeclared background service: {path}")
+            elif service_runs_as_root(payload.decode("utf-8", "replace")):
+                fail(errors, f"system service would run as root: {path}")
 
 
 def main() -> int:
