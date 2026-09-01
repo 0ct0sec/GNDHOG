@@ -437,7 +437,7 @@ DiagnosticReport buildDiagnosticReport(const std::string& statusText,
         std::string detail = std::to_string(status.coreTemperatureC) + "C MCU core";
         if (status.coreTemperatureC >= 80) {
             level = DiagnosticLevel::Failure;
-            detail += "; critical heat - disconnect power and cool the stack";
+            detail += "; critical heat - unplug USB/battery power and cool the stack";
         } else if (status.coreTemperatureC >= kDefaultCoreTemperatureAlarmC) {
             level = DiagnosticLevel::Warning;
             detail += "; at/above Betaflight's 70C default alarm";

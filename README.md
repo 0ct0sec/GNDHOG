@@ -174,11 +174,19 @@ if that readback also fails, disconnect continues to offer a reboot restore.
 This protects supported VTX hardware; it is not proof of RF output or a
 substitute for an antenna and airflow.
 
-Once CLI is ready, GNDHOG runs one automatic `status` capture for the FC MCU
-core temperature. A reported value at or above Betaflight's default 70 C alarm
-opens a warning; 80 C and above is treated as critical. This reading is not a
-VTX temperature sensor. On integrated AIO hardware it is useful nearby heat
-evidence, not a measurement of the transmitter die.
+Once CLI is ready, GNDHOG runs an automatic `status` capture for the FC MCU
+core temperature, then repeats it every 30 seconds while the CLI is otherwise
+idle. The raw responses remain in the terminal. A reported value at or above
+Betaflight's default 70 C alarm opens a warning; a later rise to 80 C escalates
+to critical. This reading is not a VTX temperature sensor. On integrated AIO
+hardware it is useful nearby heat evidence, not a measurement of the
+transmitter die. A target that does not report core temperature is sampled
+once, marked unavailable, and not polled repeatedly.
+
+Closing the serial link does **not** remove the USB 5 V supply. If the stack is
+hot, unplug the FC's USB lead and any battery supply. Software-controlled USB
+port power is only safe after the exact external hub port and real VBUS cutoff
+have been verified on the hardware; GNDHOG does not guess either one.
 
 ## Field check
 

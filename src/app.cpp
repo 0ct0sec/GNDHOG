@@ -52,6 +52,13 @@ const QuickCmd kQuick[] = {
 };
 constexpr int kQuickCount = static_cast<int>(sizeof(kQuick) / sizeof(kQuick[0]));
 
+// A connection-time sample cannot catch the common bench case where an AIO
+// stack warms for a few minutes before crossing its alarm threshold. `status`
+// is read-only, so repeat it at a low cadence whenever the CLI is otherwise
+// idle. The raw response remains visible instead of hiding safety evidence.
+constexpr uint64_t kTemperatureCheckIntervalMs = 30000;
+constexpr uint64_t kTemperatureCheckRetryMs = 1000;
+
 } // namespace
 
 void ListState::clamp(int count, int visible) {
@@ -218,7 +225,11 @@ bool App::setup(const Options& opt, std::string& error) {
     } else if (!opt_.portOverride.empty()) {
         std::string cerr;
         if (session_.connect(opt_.portOverride, opt_.baud, cerr)) {
-            temperatureCheckPending_ = true;
+            nextTemperatureCheckMs_ = nowMs();
+            temperatureMonitorStarted_ = false;
+            temperatureAlarmLevel_ = 0;
+            temperatureWarningPending_ = false;
+            temperatureWarningC_ = 0;
             setScreen(Screen::Terminal);
         } else {
             pushLocal("connect failed: " + cerr, LineKind::Error);
@@ -275,8 +286,11 @@ void App::connectSelected() {
         notice("Could not open port", err);
         return;
     }
-    temperatureCheckPending_ = true;
-    temperatureAlarmLatched_ = false;
+    nextTemperatureCheckMs_ = nowMs();
+    temperatureMonitorStarted_ = false;
+    temperatureAlarmLevel_ = 0;
+    temperatureWarningPending_ = false;
+    temperatureWarningC_ = 0;
     setScreen(Screen::Terminal);
 }
 
@@ -284,7 +298,11 @@ void App::finishDisconnect(bool exitAfter) {
     diagnosticRunning_ = false;
     session_.disconnect();
     pushLocal("-- disconnected --", LineKind::Warn);
-    temperatureCheckPending_ = false;
+    nextTemperatureCheckMs_ = 0;
+    temperatureMonitorStarted_ = false;
+    temperatureAlarmLevel_ = 0;
+    temperatureWarningPending_ = false;
+    temperatureWarningC_ = 0;
     refreshPorts();
     if (exitAfter) running_ = false;
     else setScreen(Screen::Ports);
@@ -948,18 +966,33 @@ void App::tick(uint64_t now) {
                 [this]() { session_.skipVtxBenchGuard(); });
     }
 
-    if (temperatureCheckPending_ && session_.ready() && !session_.job().active()) {
-        temperatureCheckPending_ = false;
-        pushLocal("-- safety check: reading FC core temperature --", LineKind::Local);
+    if (nextTemperatureCheckMs_ != 0 && now >= nextTemperatureCheckMs_ &&
+        session_.ready() && !session_.job().active()) {
+        nextTemperatureCheckMs_ = now + kTemperatureCheckIntervalMs;
+        if (!temperatureMonitorStarted_) {
+            temperatureMonitorStarted_ = true;
+            pushLocal("-- temperature watch: status now, then every 30s while idle --",
+                      LineKind::Local);
+        }
         if (!session_.startCapture(
-                "status", "Reading FC temperature",
-                [this](bool ok, const std::string&) {
+                "status", "Watching FC temperature",
+                [this](bool ok, const std::string& text) {
                     if (!ok) {
                         status_ = "FC temperature unavailable";
                         statusUntil_ = nowMs() + 3000;
+                        return;
+                    }
+                    int temperatureC = 0;
+                    if (!parseCoreTemperatureC(text, temperatureC)) {
+                        // Older targets that omit the field should not have
+                        // their terminal filled with an unproductive query.
+                        nextTemperatureCheckMs_ = 0;
+                        status_ = "FC does not report core temperature - watch stopped";
+                        statusUntil_ = nowMs() + 5000;
                     }
                 })) {
-            status_ = "temperature check deferred - FC busy";
+            nextTemperatureCheckMs_ = now + kTemperatureCheckRetryMs;
+            status_ = "temperature watch deferred - FC busy";
             statusUntil_ = now + 3000;
         }
     }
@@ -969,23 +1002,33 @@ void App::tick(uint64_t now) {
         const int temperatureC = session_.coreTemperatureC();
         status_ = "FC core " + std::to_string(temperatureC) + "C";
         statusUntil_ = now + 5000;
-        if (temperatureC >= kDefaultCoreTemperatureAlarmC && !temperatureAlarmLatched_) {
-            temperatureAlarmLatched_ = true;
+        const int alarmLevel = temperatureC >= 80
+                                   ? 2
+                                   : temperatureC >= kDefaultCoreTemperatureAlarmC ? 1 : 0;
+        if (alarmLevel > temperatureAlarmLevel_) {
+            temperatureAlarmLevel_ = alarmLevel;
             temperatureWarningPending_ = true;
+            temperatureWarningC_ = temperatureC;
+        } else if (temperatureWarningPending_ && temperatureC > temperatureWarningC_) {
+            // A different modal can delay the notice. Retain the hottest
+            // observed sample instead of presenting a later cooled value.
+            temperatureWarningC_ = temperatureC;
         } else if (temperatureC < kDefaultCoreTemperatureAlarmC - 5) {
-            temperatureAlarmLatched_ = false;
+            temperatureAlarmLevel_ = 0;
         }
         dirty_ = true;
     }
 
     if (temperatureWarningPending_ && !modal_) {
         temperatureWarningPending_ = false;
-        const int temperatureC = session_.coreTemperatureC();
+        const int temperatureC = temperatureWarningC_;
+        temperatureWarningC_ = 0;
         notice(temperatureC >= 80 ? "CRITICAL FC TEMPERATURE" : "FC temperature warning",
                "FC MCU core is " + std::to_string(temperatureC) +
                    "C. Betaflight's default alarm is 70C.\n\n"
-                   "This is not a VTX temperature sensor. Stop bench work, disconnect battery "
-                   "power, and let the stack cool before continuing.");
+                   "This is not a VTX temperature sensor. Stop bench work, unplug FC USB and "
+                   "battery power, and let the stack cool. Closing the serial link does not "
+                   "remove USB power.");
     }
 
     if (disconnectAfterVtxRestore_ && !session_.connected()) {
@@ -1098,8 +1141,9 @@ int App::run(const Options& opt) {
         closeModal();
         notice("CRITICAL FC TEMPERATURE",
                "FC MCU core is 82C. Betaflight's default alarm is 70C.\n\n"
-               "This is not a VTX temperature sensor. Stop bench work, disconnect battery "
-               "power, and let the stack cool before continuing.");
+               "This is not a VTX temperature sensor. Stop bench work, unplug FC USB and "
+               "battery power, and let the stack cool. Closing the serial link does not "
+               "remove USB power.");
         render();
         if (display_.canvas().writePpm(opt.previewDir + "/12-temperature-warning.ppm")) ++written;
         closeModal();
@@ -1128,7 +1172,11 @@ int App::run(const Options& opt) {
         std::string cerr;
         pushLocal("simulated flight controller on " + sim.devicePath(), LineKind::Local);
         session_.connect(sim.devicePath(), 115200, cerr);
-        temperatureCheckPending_ = true;
+        nextTemperatureCheckMs_ = nowMs();
+        temperatureMonitorStarted_ = false;
+        temperatureAlarmLevel_ = 0;
+        temperatureWarningPending_ = false;
+        temperatureWarningC_ = 0;
         setScreen(Screen::Terminal);
     }
 

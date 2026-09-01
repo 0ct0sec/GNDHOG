@@ -194,9 +194,11 @@ private:
     std::string status_;
     uint64_t statusUntil_ = 0;
     bool linkLossHandled_ = false;
-    bool temperatureCheckPending_ = false;
-    bool temperatureAlarmLatched_ = false;
+    uint64_t nextTemperatureCheckMs_ = 0;
+    bool temperatureMonitorStarted_ = false;
+    int temperatureAlarmLevel_ = 0;
     bool temperatureWarningPending_ = false;
+    int temperatureWarningC_ = 0;
     uint64_t lastTemperatureSequence_ = 0;
     bool disconnectAfterVtxRestore_ = false;
     bool exitAfterVtxRestore_ = false;

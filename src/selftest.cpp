@@ -894,10 +894,10 @@ int runSelfTest() {
         std::string error;
         check(sim.start(error), "VTX-guard simulator starts: " + error);
         if (error.empty()) {
-            sim.setCoreTemperatureC(82);
+            sim.setCoreTemperatureC(72);
             App app;
             app.display_.setHeadlessSize(kScreenW, kScreenH);
-            app.temperatureCheckPending_ = true;
+            app.nextTemperatureCheckMs_ = nowMs();
             check(app.session_.connect(sim.devicePath(), 115200, error),
                   "VTX-guard app connects: " + error);
             app.setScreen(Screen::Terminal);
@@ -920,9 +920,27 @@ int runSelfTest() {
             }
             check(app.session_.ready() && app.session_.vtxBenchGuardActive(),
                   "accepted pit mode is verified before CLI becomes ready");
+            check(app.modal_ && app.modalTitle_ == "FC temperature warning" &&
+                      app.session_.coreTemperatureC() == 72,
+                  "the automatic status capture opens the 70C MCU-temperature warning");
+            app.handleKey(enter);
+
+            const uint64_t warmSequence = app.session_.coreTemperatureSequence();
+            sim.setCoreTemperatureC(82);
+            app.nextTemperatureCheckMs_ = nowMs();
+            const uint64_t criticalDeadline = nowMs() + 4000;
+            while (nowMs() < criticalDeadline &&
+                   (app.session_.coreTemperatureSequence() == warmSequence ||
+                    !app.session_.ready())) {
+                sim.pump();
+                app.tick(nowMs());
+                sleepMs(4);
+            }
+            check(app.session_.coreTemperatureSequence() > warmSequence,
+                  "the idle temperature watch repeats without waiting for a reconnect");
             check(app.modal_ && app.modalTitle_ == "CRITICAL FC TEMPERATURE" &&
                       app.session_.coreTemperatureC() == 82,
-                  "the automatic status capture opens a critical MCU-temperature warning");
+                  "a later rise from warning to 80C escalates to critical");
             app.handleKey(enter);
             app.requestDisconnect(false);
             check(app.modal_ && app.modalTitle_ == "Restore VTX state?",
