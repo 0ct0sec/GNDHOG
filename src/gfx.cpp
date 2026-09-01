@@ -111,11 +111,47 @@ int drawText(Surface& s, int x, int y, const std::string& t, Color fg, Color bg)
     return drawText(s, x, y, t, fg);
 }
 
+void drawCharScaled(Surface& s, int x, int y, char c, Color fg, int scale) {
+    if (!s.valid() || scale <= 0) return;
+    const uint8_t* g = glyph(c);
+    for (int col = 0; col < kGlyphCols; ++col) {
+        const uint8_t bits = g[col];
+        if (!bits) continue;
+        for (int rowIdx = 0; rowIdx < 7; ++rowIdx) {
+            if (!(bits & (1u << rowIdx))) continue;
+            fillRect(s, x + col * scale, y + (rowIdx + 1) * scale,
+                     scale, scale, fg);
+        }
+    }
+}
+
+int drawTextScaled(Surface& s, int x, int y, const std::string& t, Color fg, int scale) {
+    if (scale <= 0) return x;
+    int cx = x;
+    for (char c : t) {
+        drawCharScaled(s, cx, y, c, fg, scale);
+        cx += kGlyphW * scale;
+    }
+    return cx;
+}
+
 int drawTextClipped(Surface& s, int x, int y, const std::string& t, int maxChars, Color fg) {
     if (maxChars <= 0) return x;
     if (static_cast<int>(t.size()) <= maxChars) return drawText(s, x, y, t, fg);
     if (maxChars <= 1) return drawText(s, x, y, std::string(1, '~'), fg);
     return drawText(s, x, y, t.substr(0, static_cast<size_t>(maxChars) - 1) + "~", fg);
+}
+
+int drawTextClippedScaled(Surface& s, int x, int y, const std::string& t,
+                          int maxChars, Color fg, int scale) {
+    if (maxChars <= 0 || scale <= 0) return x;
+    if (static_cast<int>(t.size()) <= maxChars) {
+        return drawTextScaled(s, x, y, t, fg, scale);
+    }
+    if (maxChars <= 1) return drawTextScaled(s, x, y, std::string(1, '~'), fg, scale);
+    return drawTextScaled(s, x, y,
+                          t.substr(0, static_cast<size_t>(maxChars) - 1) + "~",
+                          fg, scale);
 }
 
 int textWidth(const std::string& t) { return static_cast<int>(t.size()) * kGlyphW; }

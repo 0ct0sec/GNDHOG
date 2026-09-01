@@ -29,6 +29,11 @@ enum MenuId {
     MenuBrightUp,
     MenuDisconnect,
     MenuExit,
+    MenuOpenFlightController = 100,
+    MenuOpenBackupRestore,
+    MenuOpenControlsInfo,
+    MenuOpenSoundDisplay,
+    MenuOpenConnectionExit,
 };
 
 struct QuickCmd {
@@ -88,6 +93,81 @@ int App::columns() const { return display_.width() / kGlyphW; }
 int App::bodyRows(bool withInput) const {
     const int bottom = display_.height() - kHintH - (withInput ? kInputH : 0);
     return std::max(1, (bottom - kBodyY) / kGlyphH);
+}
+
+int App::menuRows() const {
+    const int bottom = display_.height() - kHintH;
+    return std::max(1, (bottom - kBodyY) / kMenuRowH);
+}
+
+void App::setupMenus() {
+    menu_ = {
+        {"Flight controller...", "checks and common CLI queries", MenuOpenFlightController, true},
+        {"Backup & restore...", "save, inspect, or restore configuration", MenuOpenBackupRestore, true},
+        {"Controls & info...", "keymap, help, and build identity", MenuOpenControlsInfo, true},
+        {"Sound & display...", "HUD audio, volume, and brightness", MenuOpenSoundDisplay, true},
+        {"Connection & exit...", "close the FC link or return to launcher", MenuOpenConnectionExit, true},
+    };
+    controllerMenu_ = {
+        {"Run field check", "no config writes; status, blockers, runtime", MenuFieldCheck, true},
+        {"Quick commands...", "common CLI queries", MenuQuick, true},
+    };
+    backupMenu_ = {
+        {"Backup config to file", "runs `diff all`", MenuBackupDiff, true},
+        {"Full dump to file", "runs `dump all`", MenuBackupDump, true},
+        {"Restore from backup...", "sends a saved file", MenuRestore, true},
+        {"Saved backups...", "view or delete", MenuFiles, true},
+    };
+    controlsMenu_ = {
+        {"Keymap & key test", "find a symbol key", MenuKeymap, true},
+        {"Help", "keys and workflow", MenuHelp, true},
+        {"About GNDHOG ZERO", "0ct0 / build / ground crew", MenuAbout, true},
+    };
+    settingsMenu_ = {
+        {"HUD sounds", "fighter-HUD cues", MenuSoundToggle, true},
+        {"HUD volume -", "", MenuSoundDown, true},
+        {"HUD volume +", "", MenuSoundUp, true},
+        {"Brightness -", "", MenuBrightDown, true},
+        {"Brightness +", "", MenuBrightUp, true},
+    };
+    connectionMenu_ = {
+        {"Disconnect", "restore bench VTX state or close link", MenuDisconnect, true},
+        {"Exit GNDHOG ZERO", "return to the launcher", MenuExit, true},
+    };
+    menuPage_ = MenuPage::Root;
+    menuList_ = ListState{};
+    submenuList_ = ListState{};
+
+    quick_.clear();
+    for (int i = 0; i < kQuickCount; ++i) {
+        quick_.push_back(MenuItem{kQuick[i].label, kQuick[i].hint, i, true});
+    }
+    quickList_ = ListState{};
+}
+
+std::vector<MenuItem>& App::currentMenuItems() {
+    switch (menuPage_) {
+    case MenuPage::FlightController: return controllerMenu_;
+    case MenuPage::BackupRestore:    return backupMenu_;
+    case MenuPage::ControlsInfo:     return controlsMenu_;
+    case MenuPage::SoundDisplay:     return settingsMenu_;
+    case MenuPage::ConnectionExit:   return connectionMenu_;
+    case MenuPage::Root:
+    default:                         return menu_;
+    }
+}
+
+ListState& App::currentMenuList() {
+    return menuPage_ == MenuPage::Root ? menuList_ : submenuList_;
+}
+
+void App::openMenuPage(MenuPage page) {
+    if (menuPage_ == page) return;
+    menuPage_ = page;
+    if (page != MenuPage::Root) submenuList_ = ListState{};
+    currentMenuList().clamp(static_cast<int>(currentMenuItems().size()), menuRows());
+    keyboard_.releaseAll();
+    dirty_ = true;
 }
 
 void App::pushLocal(const std::string& text, LineKind kind) {
@@ -206,29 +286,8 @@ bool App::setup(const Options& opt, std::string& error) {
     term_.setWidth(columns());
     editor_.loadHistory(storage_.loadHistory());
 
-    menu_ = {
-        {"Run field check", "no config writes; status, blockers, runtime", MenuFieldCheck, true},
-        {"Backup config to file", "runs `diff all`", MenuBackupDiff, true},
-        {"Full dump to file", "runs `dump all`", MenuBackupDump, true},
-        {"Restore from backup...", "sends a saved file", MenuRestore, true},
-        {"Quick commands...", "common CLI queries", MenuQuick, true},
-        {"Saved backups...", "view or delete", MenuFiles, true},
-        {"Keymap & key test", "find a symbol key", MenuKeymap, true},
-        {"Help", "keys and workflow", MenuHelp, true},
-        {"About GNDHOG ZERO", "0ct0 / build / ground crew", MenuAbout, true},
-        {"HUD sounds", "fighter-HUD cues", MenuSoundToggle, true},
-        {"HUD volume -", "", MenuSoundDown, true},
-        {"HUD volume +", "", MenuSoundUp, true},
-        {"Brightness -", "", MenuBrightDown, true},
-        {"Brightness +", "", MenuBrightUp, true},
-        {"Disconnect", "restore bench VTX state or close link", MenuDisconnect, true},
-        {"Exit GNDHOG ZERO", "return to the launcher", MenuExit, true},
-    };
+    setupMenus();
     refreshSoundMenu();
-    quick_.clear();
-    for (int i = 0; i < kQuickCount; ++i) {
-        quick_.push_back(MenuItem{kQuick[i].label, kQuick[i].hint, i, true});
-    }
 
     for (int i = 0; i < kBaudChoiceCount; ++i) {
         if (kBaudChoices[i] == opt_.baud) baudIndex_ = i;
@@ -762,7 +821,7 @@ void App::adjustBrightness(int delta) {
 
 void App::refreshSoundMenu() {
     const std::string audioError = audio_.lastError();
-    for (MenuItem& item : menu_) {
+    for (MenuItem& item : settingsMenu_) {
         if (item.id == MenuSoundToggle) {
             item.label = opt_.muteSound
                              ? "HUD sounds: OFF (--mute)"
@@ -815,6 +874,21 @@ void App::adjustSoundVolume(int delta) {
 
 void App::applyMenu(int id) {
     switch (id) {
+    case MenuOpenFlightController:
+        openMenuPage(MenuPage::FlightController);
+        break;
+    case MenuOpenBackupRestore:
+        openMenuPage(MenuPage::BackupRestore);
+        break;
+    case MenuOpenControlsInfo:
+        openMenuPage(MenuPage::ControlsInfo);
+        break;
+    case MenuOpenSoundDisplay:
+        openMenuPage(MenuPage::SoundDisplay);
+        break;
+    case MenuOpenConnectionExit:
+        openMenuPage(MenuPage::ConnectionExit);
+        break;
     case MenuFieldCheck:
         runFieldCheck();
         break;
@@ -965,7 +1039,8 @@ void App::onTerminalKey(const KeyEvent& e) {
             session_.cancelJob();
             return;
         }
-        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
+        openMenuPage(MenuPage::Root);
+        menuList_.clamp(static_cast<int>(menu_.size()), menuRows());
         audio_.play(HudCue::Back);
         setScreen(Screen::Menu);
         return;
@@ -983,7 +1058,8 @@ void App::onTerminalKey(const KeyEvent& e) {
         applyQuick(12);   // save, with its confirmation
         return;
     case Key::F9:
-        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
+        openMenuPage(MenuPage::Root);
+        menuList_.clamp(static_cast<int>(menu_.size()), menuRows());
         setScreen(Screen::Menu);
         return;
     case Key::F10: requestDisconnect(false); return;
@@ -999,9 +1075,9 @@ void App::onTerminalKey(const KeyEvent& e) {
 
 void App::onMenuKey(const KeyEvent& e) {
     const bool quick = (screen_ == Screen::Quick);
-    std::vector<MenuItem>& items = quick ? quick_ : menu_;
-    ListState& st = quick ? quickList_ : menuList_;
-    const int rows = bodyRows(false);
+    std::vector<MenuItem>& items = quick ? quick_ : currentMenuItems();
+    ListState& st = quick ? quickList_ : currentMenuList();
+    const int rows = menuRows();
     const int n = static_cast<int>(items.size());
 
     switch (e.key) {
@@ -1024,7 +1100,13 @@ void App::onMenuKey(const KeyEvent& e) {
         break;
     case Key::Escape:
         audio_.play(HudCue::Back);
-        setScreen(quick ? Screen::Menu : Screen::Terminal);
+        if (quick) {
+            setScreen(Screen::Menu);
+        } else if (menuPage_ != MenuPage::Root) {
+            openMenuPage(MenuPage::Root);
+        } else {
+            setScreen(Screen::Terminal);
+        }
         break;
     default: break;
     }
@@ -1348,13 +1430,21 @@ int App::run(const Options& opt) {
     if (!opt.previewDir.empty()) {
         // Render one frame of every screen for host-side inspection. Nothing is
         // connected and no key is synthesised, so this is purely a paint test.
-        const struct { Screen screen; const char* name; } kShots[] = {
-            {Screen::Ports, "01-ports"},   {Screen::Terminal, "02-terminal"},
-            {Screen::Menu, "03-menu"},     {Screen::Quick, "04-quick"},
-            {Screen::Files, "05-files"},   {Screen::Keymap, "06-keymap"},
-            {Screen::Help, "07-help"},
-            {Screen::Diagnostics, "08-field-check"},
-            {Screen::About, "09-about"},
+        const struct { Screen screen; MenuPage menuPage; const char* name; } kShots[] = {
+            {Screen::Ports, MenuPage::Root, "01-ports"},
+            {Screen::Terminal, MenuPage::Root, "02-terminal"},
+            {Screen::Menu, MenuPage::Root, "03-menu"},
+            {Screen::Menu, MenuPage::FlightController, "04-menu-flight-controller"},
+            {Screen::Menu, MenuPage::BackupRestore, "05-menu-backup-restore"},
+            {Screen::Menu, MenuPage::ControlsInfo, "06-menu-controls-info"},
+            {Screen::Menu, MenuPage::SoundDisplay, "07-menu-sound-display"},
+            {Screen::Menu, MenuPage::ConnectionExit, "08-menu-connection-exit"},
+            {Screen::Quick, MenuPage::FlightController, "09-quick"},
+            {Screen::Files, MenuPage::Root, "10-files"},
+            {Screen::Keymap, MenuPage::Root, "11-keymap"},
+            {Screen::Help, MenuPage::Root, "12-help"},
+            {Screen::Diagnostics, MenuPage::Root, "13-field-check"},
+            {Screen::About, MenuPage::Root, "14-about"},
         };
         status_.clear();   // show each screen's real hint bar, not a startup notice
         pushLocal("# Betaflight / STM32G47X (G473) 2026.6.0-alpha MSP API: 1.48", LineKind::Fc);
@@ -1376,6 +1466,7 @@ int App::run(const Options& opt) {
         int written = 0;
         for (const auto& shot : kShots) {
             screen_ = shot.screen;
+            if (shot.screen == Screen::Menu) menuPage_ = shot.menuPage;
             render();
             const std::string path = opt.previewDir + "/" + shot.name + ".ppm";
             if (display_.canvas().writePpm(path)) ++written;
@@ -1384,7 +1475,7 @@ int App::run(const Options& opt) {
         screen_ = Screen::Terminal;
         confirm("Props off?", "Spins a motor. Props off?\n\n> motor 1 1100", "Send", nullptr);
         render();
-        if (display_.canvas().writePpm(opt.previewDir + "/10-confirm.ppm")) ++written;
+        if (display_.canvas().writePpm(opt.previewDir + "/15-confirm.ppm")) ++written;
         closeModal();
         confirm("Bench VTX guard?",
                 "SmartAudio reports power level 3/4.\n\nTry verified pit mode before entering "
@@ -1392,7 +1483,7 @@ int App::run(const Options& opt) {
                 "Unsupported hardware is left unchanged.",
                 "Use pit", nullptr);
         render();
-        if (display_.canvas().writePpm(opt.previewDir + "/11-vtx-guard.ppm")) ++written;
+        if (display_.canvas().writePpm(opt.previewDir + "/16-vtx-guard.ppm")) ++written;
         closeModal();
         notice("CRITICAL FC TEMPERATURE",
                "FC MCU core is 82C. Betaflight's default alarm is 70C.\n\n"
@@ -1400,7 +1491,7 @@ int App::run(const Options& opt) {
                "battery power, and let the stack cool. Closing the serial link does not "
                "remove USB power.");
         render();
-        if (display_.canvas().writePpm(opt.previewDir + "/12-temperature-warning.ppm")) ++written;
+        if (display_.canvas().writePpm(opt.previewDir + "/17-temperature-warning.ppm")) ++written;
         closeModal();
         confirm("Restore VTX state?",
                 "Pit mode is active for bench work. Restore the saved flight state?\n\n"
@@ -1409,7 +1500,7 @@ int App::run(const Options& opt) {
                 "power-cycled.",
                 "Restore", nullptr);
         render();
-        if (display_.canvas().writePpm(opt.previewDir + "/13-vtx-restore.ppm")) ++written;
+        if (display_.canvas().writePpm(opt.previewDir + "/18-vtx-restore.ppm")) ++written;
         closeModal();
         std::printf("wrote %d previews to %s\n", written, opt.previewDir.c_str());
         teardown();

@@ -19,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <string>
 
 #if defined(__linux__)
@@ -785,6 +786,25 @@ void testGraphics() {
     dimSurface(ds, theme::black);
     check(ds.px[0] == 0x8410 && ds.px[1] == 0x8410,
           "modal dimming blends every pixel instead of dropping scanlines");
+
+    Canvas scaled(12, 16);
+    Surface ss = scaled.surface();
+    fill(ss, theme::bg);
+    drawCharScaled(ss, 0, 0, 'A', theme::accent, 2);
+    bool exactTwoByTwo = true;
+    for (int sourceY = 0; sourceY < kGlyphH; ++sourceY) {
+        for (int sourceX = 0; sourceX < kGlyphW; ++sourceX) {
+            const bool set = sourceX < kGlyphCols && sourceY > 0 &&
+                             (glyph('A')[sourceX] & (1u << (sourceY - 1))) != 0;
+            const Color want = set ? theme::accent : theme::bg;
+            for (int yy = 0; yy < 2; ++yy) {
+                for (int xx = 0; xx < 2; ++xx) {
+                    exactTwoByTwo &= ss.row(sourceY * 2 + yy)[sourceX * 2 + xx] == want;
+                }
+            }
+        }
+    }
+    check(exactTwoByTwo, "2x menu glyphs are exact pixel blocks without interpolation");
 }
 
 // ------------------------------------------------- end-to-end against a pty
@@ -1040,6 +1060,60 @@ int runSelfTest() {
     }
 #endif
     testGraphics();
+    section("menu hierarchy and typography");
+    {
+        App app;
+        app.display_.setHeadlessSize(kScreenW, kScreenH);
+        app.setupMenus();
+        check(app.menu_.size() == 5, "main menu exposes five coherent categories");
+
+        const MenuPage pages[] = {
+            MenuPage::FlightController,
+            MenuPage::BackupRestore,
+            MenuPage::ControlsInfo,
+            MenuPage::SoundDisplay,
+            MenuPage::ConnectionExit,
+        };
+        std::set<int> actionIds;
+        bool labelsFit = true;
+        int actionCount = 0;
+        const int labelColumns = kScreenW / kMenuGlyphW - 2;
+        for (MenuPage page : pages) {
+            app.openMenuPage(page);
+            for (const MenuItem& item : app.currentMenuItems()) {
+                ++actionCount;
+                actionIds.insert(item.id);
+                labelsFit &= static_cast<int>(item.label.size()) <= labelColumns;
+            }
+        }
+        check(actionCount == 16 && actionIds.size() == 16,
+              "all 16 actions have exactly one category owner");
+        check(labelsFit, "every category action fits the 2x menu grid without clipping");
+        check(app.menuRows() == 9, "2x menu typography leaves nine selectable rows");
+
+        app.openMenuPage(MenuPage::Root);
+        app.screen_ = Screen::Menu;
+        app.render();
+        Surface menuSurface = app.display_.surface();
+        check(menuSurface.row(kBodyY + kMenuRowH - 1)[300] == theme::panelHi &&
+                  menuSurface.row(kBodyY + kMenuRowH)[300] == theme::bg,
+              "menu selection plate follows the 16px row lattice");
+
+        KeyEvent key;
+        key.key = Key::Enter;
+        app.handleKey(key);
+        check(app.screen_ == Screen::Menu &&
+                  app.menuPage_ == MenuPage::FlightController &&
+                  app.currentMenuItems().size() == 2,
+              "selecting a category opens its submenu");
+        key.key = Key::Escape;
+        app.handleKey(key);
+        check(app.screen_ == Screen::Menu && app.menuPage_ == MenuPage::Root,
+              "Escape returns from a category to the main menu");
+        app.handleKey(key);
+        check(app.screen_ == Screen::Terminal,
+              "Escape from the main menu returns to the terminal");
+    }
     section("brand and About");
     checkEq(kAppName, "GNDHOG ZERO", "final project name");
     checkEq(kAuthor, "0ct0", "author credit");

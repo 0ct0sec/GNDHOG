@@ -25,6 +25,9 @@ constexpr int kTopH    = 11;
 constexpr int kBodyY   = 13;
 constexpr int kHintH   = 10;
 constexpr int kInputH  = 11;
+constexpr int kMenuTextScale = 2;
+constexpr int kMenuGlyphW = kGlyphW * kMenuTextScale;
+constexpr int kMenuRowH = kGlyphH * kMenuTextScale;
 
 enum class Screen {
     Ports,
@@ -36,6 +39,15 @@ enum class Screen {
     Keymap,
     Help,
     About,
+};
+
+enum class MenuPage {
+    Root,
+    FlightController,
+    BackupRestore,
+    ControlsInfo,
+    SoundDisplay,
+    ConnectionExit,
 };
 
 struct MenuItem {
@@ -109,6 +121,11 @@ private:
     void drawList(Surface& s, const std::vector<MenuItem>& items, ListState& st,
                   int visibleRows);
 
+    void setupMenus();
+    std::vector<MenuItem>& currentMenuItems();
+    ListState& currentMenuList();
+    void openMenuPage(MenuPage page);
+
     // ---- actions
     void refreshPorts();
     void connectSelected();
@@ -144,6 +161,7 @@ private:
     void setScreen(Screen s);
 
     int bodyRows(bool withInput) const;
+    int menuRows() const;
     int columns() const;
 
     // ---- state
@@ -173,6 +191,13 @@ private:
     ListState diagnosticList_;
     std::vector<MenuItem> menu_;
     ListState menuList_;
+    std::vector<MenuItem> controllerMenu_;
+    std::vector<MenuItem> backupMenu_;
+    std::vector<MenuItem> controlsMenu_;
+    std::vector<MenuItem> settingsMenu_;
+    std::vector<MenuItem> connectionMenu_;
+    ListState submenuList_;
+    MenuPage menuPage_ = MenuPage::Root;
     std::vector<MenuItem> quick_;
     ListState quickList_;
     ListState keymapList_;

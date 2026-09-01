@@ -156,7 +156,17 @@ void App::drawTopBar(Surface& s) {
     std::string mid;
     switch (screen_) {
     case Screen::Ports:  mid = "select port"; break;
-    case Screen::Menu:   mid = "menu"; break;
+    case Screen::Menu:
+        switch (menuPage_) {
+        case MenuPage::FlightController: mid = "flight controller"; break;
+        case MenuPage::BackupRestore:    mid = "backup & restore"; break;
+        case MenuPage::ControlsInfo:     mid = "controls & info"; break;
+        case MenuPage::SoundDisplay:     mid = "sound & display"; break;
+        case MenuPage::ConnectionExit:   mid = "connection & exit"; break;
+        case MenuPage::Root:
+        default:                         mid = "menu"; break;
+        }
+        break;
     case Screen::Quick:  mid = "quick commands"; break;
     case Screen::Files:  mid = "backups"; break;
     case Screen::Diagnostics: mid = "field check"; break;
@@ -216,27 +226,31 @@ void App::drawHintBar(Surface& s, const std::string& hints,
 
 void App::drawList(Surface& s, const std::vector<MenuItem>& items, ListState& st,
                    int visibleRows) {
-    const int cols = columns();
+    const int cols = s.w / kMenuGlyphW;
     if (items.empty()) {
-        drawText(s, 4, kBodyY, "(nothing here)", theme::textDim);
+        drawTextScaled(s, 4, kBodyY, "(nothing here)", theme::textDim,
+                       kMenuTextScale);
         return;
     }
     for (int i = 0; i < visibleRows; ++i) {
         const int idx = st.top + i;
         if (idx >= static_cast<int>(items.size())) break;
-        const int y = kBodyY + i * kGlyphH;
+        const int y = kBodyY + i * kMenuRowH;
         const bool selected = (idx == st.sel);
         if (selected) {
-            fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
-            fillRect(s, 0, y, 2, kGlyphH, theme::accent);
+            fillRect(s, 0, y, s.w - 3, kMenuRowH, theme::panelHi);
+            fillRect(s, 0, y, 2, kMenuRowH, theme::accent);
         }
         const Color fg = items[static_cast<size_t>(idx)].enabled
                              ? (selected ? theme::accent : theme::text)
                              : theme::textDim;
-        drawText(s, 2, y, selected ? ">" : " ", theme::accent);
-        drawTextClipped(s, 2 + kGlyphW, y, items[static_cast<size_t>(idx)].label, cols - 3, fg);
+        drawTextScaled(s, 2, y, selected ? ">" : " ", theme::accent,
+                       kMenuTextScale);
+        drawTextClippedScaled(s, 2 + kMenuGlyphW, y,
+                              items[static_cast<size_t>(idx)].label,
+                              cols - 2, fg, kMenuTextScale);
     }
-    drawScrollbar(s, s.w - 2, kBodyY, visibleRows * kGlyphH, st.top, visibleRows,
+    drawScrollbar(s, s.w - 2, kBodyY, visibleRows * kMenuRowH, st.top, visibleRows,
                   static_cast<int>(items.size()));
 }
 
@@ -363,9 +377,9 @@ void App::drawTerminal(Surface& s) {
 
 void App::drawMenu(Surface& s) {
     const bool quick = (screen_ == Screen::Quick);
-    std::vector<MenuItem>& items = quick ? quick_ : menu_;
-    ListState& st = quick ? quickList_ : menuList_;
-    const int rows = bodyRows(false);
+    std::vector<MenuItem>& items = quick ? quick_ : currentMenuItems();
+    ListState& st = quick ? quickList_ : currentMenuList();
+    const int rows = menuRows();
     st.clamp(static_cast<int>(items.size()), rows);
     drawList(s, items, st, rows);
 
