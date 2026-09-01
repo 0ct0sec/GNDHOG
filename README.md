@@ -28,6 +28,22 @@ loop at 30 fps runs the whole suspiciously small department.
 └─────────────────────────────────────────────────────┘
 ```
 
+## Quick start
+
+1. Remove the propellers. This is step one because fingers remain difficult to
+   package as replacement parts.
+2. Build the ARM64 binary with `make arm64`, then install it with
+   `sudo ./tools/install.sh --add-groups`.
+3. Log out and back in if the installer added `video`, `input`, or `dialout`.
+   Linux does not renegotiate group membership because the operator looked
+   sincere.
+4. Put the Cardputer Zero **Host/Slave switch in HOST**, then connect the flight
+   controller to **USB-A**.
+5. Launch **GNDHOG ZERO** from APPLaunch. If the port picker appears, choose the
+   CDC-ACM device for the FC, usually `/dev/ttyACM0`.
+6. Press **Fn+2** for `status`. Press **Esc** for the menu. Make a backup before
+   changing anything expensive, airborne, or both.
+
 ## What it does
 
 - **Full CLI terminal.** Run `status`, `get`, `set`, `diff`, `resource`,
@@ -77,10 +93,10 @@ GNDHOG gives them one:
 The rest of the Sym layer (``[ ] ; ' ` \\ , . / *`` plus a numeric keypad)
 follows the keycodes emitted by the v5 overlay.
 
-**The ten unusual assignments are partly inferred.** The vendor overlay routes
-those Sym positions through placeholder keycodes such as `KEY_RO`,
-`KEY_MUHENKAN`, and the Japanese IME block. Those codes carry no US-layout
-meaning, so GNDHOG assigns one. That is an educated mapping, not a treaty.
+Ten unusual Sym positions arrive through placeholder keycodes such as `KEY_RO`,
+`KEY_MUHENKAN`, and the Japanese IME block. Those codes have no US-layout
+character, so GNDHOG supplies configurable defaults. If your overlay disagrees,
+the key test settles the argument without requiring a rebuild.
 
 If a character is wrong on your unit:
 
@@ -161,27 +177,25 @@ library or an artwork download.
 
 ## Cardputer Zero AppStore package
 
-The repository carries the current Cardputer Zero store contract in
-`app-builder.json`: the package identity, listing copy, 320×170 screenshots,
-square icon, categories, author, license, share code, and all seven permission
-declarations. Build the upload artifact in WSL or another Debian-based ARM64
-cross-build environment:
+The Cardputer Zero store metadata lives in `app-builder.json`: package identity,
+listing copy, 320×170 screenshots, square icon, categories, author, license,
+share code, and permissions. Build the upload artifact in WSL or another
+Debian-based ARM64 cross-build environment:
 
 ```sh
 make package
 # dist/bfcli_0.1.0_arm64.deb
 ```
 
-The package target cross-builds the binary, stages only policy-approved paths,
-creates no systemd service, and runs `tools/validate-app-store.py` against both
-the manifest and the finished Debian archive. Run the metadata check without a
-build with `make store-check`.
+The package target cross-builds the binary, stages the install tree, creates no
+systemd service, and checks both the manifest and the finished Debian archive
+with `tools/validate-app-store.py`. Run only the metadata check with
+`make store-check`.
 
-The permission manifest says `additional_hardware: true` because GNDHOG uses
-the framebuffer, evdev keyboard, backlight, and a USB or UART serial device.
-Camera, microphone, IMU, network, background service, and external display are
-all `false`; those are claims about shipped behavior, not a wish list with
-booleans taped to it.
+The permission manifest enables `additional_hardware` for the framebuffer,
+evdev keyboard, backlight, and USB or UART serial device. Camera, microphone,
+IMU, network, background service, and external display stay disabled. The app
+is a serial terminal, not a hardware buffet.
 
 Install a built package for a device smoke test with:
 
@@ -190,11 +204,9 @@ sudo apt install --no-install-recommends ./dist/bfcli_0.1.0_arm64.deb
 ```
 
 For submission, use the current
-[Cardputer Zero AppBuilder](https://github.com/CardputerZero/AppBuilder) and
-run `czdev publish --deb dist/bfcli_0.1.0_arm64.deb` from this repository.
-Publishing creates a review PR; the first release also requires a short video
-of the app running on a real Cardputer Zero in that PR. A simulator screenshot
-can prove pixels. It cannot testify that a thumb pressed the key.
+[Cardputer Zero AppBuilder](https://github.com/CardputerZero/AppBuilder) and run
+`czdev publish --deb dist/bfcli_0.1.0_arm64.deb` from this repository. Follow the
+publisher prompts and attach the real-device demo requested for a first release.
 
 ## Install
 
@@ -267,44 +279,6 @@ Enter harder does not change the storage model.
 Remove propellers before bench work that can arm or drive motors. Software
 confirmation is a guardrail. It is not a small orange force field.
 
-## Evidence and open ground
-
-Capability claims are separated here because a compiled branch, a simulated
-flight controller, and a live wire are three different witnesses.
-
-**Verified on x86-64 Linux and ARM64 under QEMU.** The 208 self-checks cover the
-session state machine against a simulated Betaflight FC over a real pty: CLI
-entry, prompt detection through a streaming `diff`, complete `diff all`
-capture, a 40-line restore, reconnect/link-loss handling, and response
-accounting across scrollback trims. Keyboard decoding is checked against the
-v5 matrix. Preview output covers the screen layouts. The suite also passes
-under AddressSanitizer and UndefinedBehaviorSanitizer. Seven isolated Git
-scenarios cover clean, dirty, unknown, and post-commit build identities.
-
-**Verified on the bench Cardputer Zero at published commit `d98c3be`.** That
-ARM64 binary passed all 187 checks natively. A bounded `--about` run opened the
-real framebuffer and evdev input, rendered the inspected 320×170 About screen,
-and exited cleanly before APPLaunch was restored. That check opened no FC
-serial port; later commits are not claimed as device-tested here.
-
-**Implemented against documented Linux interfaces.** Framebuffer geometry and
-pixel bitfields come from `FBIOGET_VSCREENINFO` and
-`FBIOGET_FSCREENINFO`; conversion handles formats beyond plain RGB565. The
-keyboard is found and rechecked by evdev name (`tca8418c`), never trusted by
-event number. Serial ports are ranked using USB identity from sysfs. Backlight
-range is read from sysfs, and writes are read back.
-
-**Not yet established on real FC hardware.** Physical readability, actual
-TCA8418 key events, the ten inferred Sym assignments, USB-A enumeration of a
-specific FC, and end-to-end restore timing over CDC-ACM still need direct
-flight-controller observation. The key-test screen and `config.ini` override
-exist because inference is useful, but it is not solder.
-
-**Deliberately absent.** No monitor-mode Wi-Fi, CSI, camera, IMU, GPIO, or I²C
-experiments. GNDHOG uses the framebuffer, evdev, one serial port, and the sysfs
-backlight. It does not become a spectrum analyzer because the README used an
-adjective.
-
 ## Development
 
 ```sh
@@ -320,7 +294,8 @@ adjective.
 `--sim` creates a pseudo-terminal answering as a BETAFPVG473_V2 running
 Betaflight 2026.6.0-alpha, including a realistic `diff all`. The complete
 connect → backup → restore path can therefore be exercised without hardware.
-The simulator is a witness with excellent availability and no propellers.
+It does not exercise the physical keyboard, framebuffer, USB link, or an actual
+flight controller. Even imaginary hardware has a job description.
 
 ## Layout
 
