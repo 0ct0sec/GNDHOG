@@ -58,6 +58,7 @@ bool MeshSession::connect(const std::string& device, int baud, std::string& erro
     const uint64_t now = nowMs();
     lastByteMs_ = now;
     wakeSentMs_ = now;
+    configProgressMs_ = now;
     lastHeartbeatMs_ = now;
     configAttempts_ = 0;
     configItems_ = 0;
@@ -475,6 +476,11 @@ void MeshSession::handleFrame(const std::string& body, uint64_t now) {
         return;
     }
 
+    // Every piece of the download that lands is evidence the radio is answering.
+    // Recorded around the whole switch so no future config-bearing kind can be
+    // added without also counting as progress.
+    const int itemsBefore = configItems_;
+
     switch (frame.kind) {
     case MeshFromRadio::Kind::MyInfo:
         radio_.myNodeNum = frame.myNodeNum;
@@ -566,6 +572,8 @@ void MeshSession::handleFrame(const std::string& body, uint64_t now) {
     case MeshFromRadio::Kind::Unknown:
         break;
     }
+
+    if (configItems_ != itemsBefore) configProgressMs_ = now;
 }
 
 // -------------------------------------------------------------------- poll
@@ -615,11 +623,18 @@ void MeshSession::poll(uint64_t now) {
         term_.addLine("-- meshtastic: requesting the node database --", LineKind::Local);
         break;
 
-    case MeshState::Configuring:
-        if (now - configSentMs_ < kConfigTimeoutMs) break;
+    case MeshState::Configuring: {
+        // Measured from the last thing that arrived. A radio still streaming its
+        // node database has not gone quiet, however long the whole download
+        // takes, and asking again would only send it back to the beginning.
+        const uint64_t lastProgress = std::max(configSentMs_, configProgressMs_);
+        if (now - lastProgress < kConfigTimeoutMs) break;
         if (configAttempts_ >= kConfigMaxAttempts) {
-            fail("no Meshtastic device answered. Is this the right port, and is the "
-                 "firmware running?");
+            fail(configItems_ > 0
+                     ? "the radio stopped partway through the config download after " +
+                           std::to_string(configItems_) + " item(s)"
+                     : std::string("no Meshtastic device answered. Is this the right "
+                                   "port, and is the firmware running?"));
             break;
         }
         ++configAttempts_;
@@ -632,6 +647,7 @@ void MeshSession::poll(uint64_t now) {
                           std::to_string(configAttempts_) + ") --",
                       LineKind::Warn);
         break;
+    }
 
     case MeshState::Ready: {
         if (now - lastHeartbeatMs_ >= kHeartbeatIntervalMs) {

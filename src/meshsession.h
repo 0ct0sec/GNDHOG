@@ -135,6 +135,10 @@ private:
     uint64_t lastByteMs_ = 0;
     uint64_t wakeSentMs_ = 0;
     uint64_t configSentMs_ = 0;
+    // When the last piece of the config download arrived. The retry deadline is
+    // measured from here, not from configSentMs_: a large node database can take
+    // longer to stream than the deadline, and re-asking restarts it.
+    uint64_t configProgressMs_ = 0;
     uint64_t lastHeartbeatMs_ = 0;
     uint32_t configId_ = 0;
     int configAttempts_ = 0;

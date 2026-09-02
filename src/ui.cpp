@@ -72,6 +72,9 @@ const char* markerFor(DiagnosticLevel level) {
 // Wraps `text` (which may contain explicit newlines) to `cols` columns.
 std::vector<std::string> wrapText(const std::string& text, int cols) {
     std::vector<std::string> out;
+    // A width of zero makes every cut a zero-length one, and the loop below
+    // never shortens the paragraph. One column always makes progress.
+    if (cols < 1) cols = 1;
     size_t pos = 0;
     while (pos <= text.size()) {
         const size_t nl = text.find('\n', pos);

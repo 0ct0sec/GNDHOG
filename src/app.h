@@ -187,7 +187,10 @@ private:
     void flushMeshChats();
     void openChat(uint32_t peer);
     void submitChatLine();
-    void shareMyPosition();
+    // The recipient is passed in rather than read from chatPeer_: the node list
+    // shares with the highlighted row, and borrowing the open conversation to
+    // carry that would silently repoint Export and Clear at it.
+    void shareMyPosition(uint32_t peer);
     void showRadioInfo();
     void showGnssStatus();
     void toggleGnss();

@@ -177,28 +177,33 @@ void SimMesh::flush() {
 void SimMesh::sendConfig(uint32_t configId) {
     const uint32_t now = static_cast<uint32_t>(::time(nullptr));
 
+    // With a drip configured the frames are queued and released one per
+    // interval by pump(); otherwise they all go out at once.
+    std::vector<std::string> frames;
+    auto push = [&](const std::string& payload) { frames.push_back(payload); };
+
     pb::Writer myInfo;
     myInfo.varint(1, kSelfNum);
-    emitFrame(wrapFromRadio(3, myInfo.data()));
+    push(wrapFromRadio(3, myInfo.data()));
 
     pb::Writer metadata;
     metadata.bytes(1, "2.7.11.abcdef1");
     metadata.varint(7, 0);
     metadata.varint(9, 9);
-    emitFrame(wrapFromRadio(13, metadata.data()));
+    push(wrapFromRadio(13, metadata.data()));
 
-    emitFrame(wrapFromRadio(4, nodeInfoPayload(kSelfNum, "GNDHOG BENCH", "GNDH", 0,
-                                               now, 0.0f, false, 0, 0, false, 0,
-                                               96, 4.05f)));
+    push(wrapFromRadio(4, nodeInfoPayload(kSelfNum, "GNDHOG BENCH", "GNDH", 0,
+                                          now, 0.0f, false, 0, 0, false, 0,
+                                          96, 4.05f)));
     // Real firmware interleaves its own console output with the frames; if this
     // application cannot survive that, it cannot survive a real radio.
     emitConsole("INFO  | Sending our nodeinfo to mesh\r\n");
-    emitFrame(wrapFromRadio(4, nodeInfoPayload(kHilltopNum, "HILLTOP RELAY", "HILL", 2,
-                                               now - 120, 6.25f, true, kHilltopLat,
-                                               kHilltopLon, true, 1, 87, 3.98f)));
-    emitFrame(wrapFromRadio(4, nodeInfoPayload(kVanNum, "VAN 2", "VAN2", 0,
-                                               now - 5400, -3.5f, false, 0, 0,
-                                               true, 2, 42, 3.62f)));
+    push(wrapFromRadio(4, nodeInfoPayload(kHilltopNum, "HILLTOP RELAY", "HILL", 2,
+                                          now - 120, 6.25f, true, kHilltopLat,
+                                          kHilltopLon, true, 1, 87, 3.98f)));
+    push(wrapFromRadio(4, nodeInfoPayload(kVanNum, "VAN 2", "VAN2", 0,
+                                          now - 5400, -3.5f, false, 0, 0,
+                                          true, 2, 42, 3.62f)));
 
     pb::Writer lora;
     lora.boolean(1, true);
@@ -208,14 +213,14 @@ void SimMesh::sendConfig(uint32_t configId) {
     lora.boolean(9, txEnabled_);
     pb::Writer loraConfig;
     loraConfig.message(6, lora);
-    emitFrame(wrapFromRadio(5, loraConfig.data()));
+    push(wrapFromRadio(5, loraConfig.data()));
 
     pb::Writer position;
     position.boolean(3, false);
     position.varint(13, 2);                              // GpsMode NOT_PRESENT
     pb::Writer positionConfig;
     positionConfig.message(2, position);
-    emitFrame(wrapFromRadio(5, positionConfig.data()));
+    push(wrapFromRadio(5, positionConfig.data()));
 
     pb::Writer settings;
     settings.bytes(3, "LongFast");
@@ -223,17 +228,27 @@ void SimMesh::sendConfig(uint32_t configId) {
     channel.varint(1, 0);
     channel.message(2, settings);
     channel.varint(3, 1);                                // PRIMARY
-    emitFrame(wrapFromRadio(10, channel.data()));
+    push(wrapFromRadio(10, channel.data()));
 
     pb::Writer complete;
     complete.varint(7, configId);
-    emitFrame(complete.data());
+    push(complete.data());
+
+    if (configDripMs_ == 0) {
+        for (const std::string& payload : frames) emitFrame(payload);
+        return;
+    }
+    // A re-request abandons whatever is still queued, exactly as the firmware
+    // restarts the download when a client asks again.
+    pendingConfig_ = std::move(frames);
+    nextConfigFrameMs_ = nowMs() + configDripMs_;
 }
 
 void SimMesh::handleToRadio(const std::string& body) {
     pb::Reader r(body);
     while (r.next()) {
         if (r.field() == 3) {                            // want_config_id
+            ++configRequestsReceived_;
             sendConfig(r.u32());
             continue;
         }
@@ -325,6 +340,12 @@ void SimMesh::pump() {
     for (const std::string& frame : frames) handleToRadio(frame);
 
     const uint64_t now = nowMs();
+    if (!pendingConfig_.empty() && now >= nextConfigFrameMs_) {
+        emitFrame(pendingConfig_.front());
+        pendingConfig_.erase(pendingConfig_.begin());
+        nextConfigFrameMs_ = now + configDripMs_;
+    }
+
     for (size_t i = 0; i < acks_.size();) {
         if (acks_[i].dueMs > now) {
             ++i;

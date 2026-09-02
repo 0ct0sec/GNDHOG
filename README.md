@@ -332,6 +332,12 @@ UART exists whether or not a cap is clipped to it. If nothing speaks NMEA within
 a few seconds the port is closed again and the receiver is reported absent,
 which also keeps GNDHOG off the Grove header it shares.
 
+The receiver's lifetime is the radio session's. It is opened when a Meshtastic
+link comes up and closed when that link goes down, so a flight controller
+connected afterwards on the same Grove node does not have to share its bytes
+with a reader nobody asked for: nothing takes an exclusive lock on a tty, and
+two readers on one UART is a link that drops characters and never says why.
+
 With a fix, the node list shows **range and bearing** to every node that
 reported a position, and **Share my position** transmits this station's own
 coordinate after a confirmation that says what it is about to do. Without a fix

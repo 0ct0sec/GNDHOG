@@ -26,23 +26,6 @@ std::string envOr(const char* name, const std::string& fallback) {
     return (v && *v) ? std::string(v) : fallback;
 }
 
-bool makeDirs(const std::string& path, std::string& error) {
-    std::string acc;
-    std::istringstream in(path);
-    std::string part;
-    if (!path.empty() && path[0] == '/') acc = "/";
-    while (std::getline(in, part, '/')) {
-        if (part.empty()) continue;
-        acc += part;
-        if (::mkdir(acc.c_str(), 0700) != 0 && errno != EEXIST) {
-            error = acc + ": " + std::strerror(errno);
-            return false;
-        }
-        acc += "/";
-    }
-    return true;
-}
-
 bool fsyncDir(const std::string& dir) {
     const int fd = ::open(dir.c_str(), O_RDONLY);
     if (fd < 0) return false;
@@ -59,6 +42,23 @@ std::string trim(const std::string& s) {
 }
 
 } // namespace
+
+bool makeDirs(const std::string& path, std::string& error) {
+    std::string acc;
+    std::istringstream in(path);
+    std::string part;
+    if (!path.empty() && path[0] == '/') acc = "/";
+    while (std::getline(in, part, '/')) {
+        if (part.empty()) continue;
+        acc += part;
+        if (::mkdir(acc.c_str(), 0700) != 0 && errno != EEXIST) {
+            error = acc + ": " + std::strerror(errno);
+            return false;
+        }
+        acc += "/";
+    }
+    return true;
+}
 
 std::string humanBytes(uint64_t n) {
     char buf[32];

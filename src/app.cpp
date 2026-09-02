@@ -626,7 +626,7 @@ void App::submitChatLine() {
     dirty_ = true;
 }
 
-void App::shareMyPosition() {
+void App::shareMyPosition(uint32_t peer) {
     if (!meshMode() || !mesh_.ready()) {
         notice("Not ready", "Connect a Meshtastic radio first.");
         return;
@@ -645,7 +645,6 @@ void App::shareMyPosition() {
                    "\n\nGNDHOG will not transmit a stale or invented coordinate.");
         return;
     }
-    const uint32_t peer = chatPeer_;
     confirm("Transmit position?",
             "Send this station's own GNSS fix to " + peerTitle(peer) + "?\n\n" +
                 gnss_.fix().coordText() + "\n\n"
@@ -911,6 +910,13 @@ void App::finishDisconnect(bool exitAfter) {
         // change is written before the link and its node table go away.
         flushMeshChats();
         mesh_.disconnect();
+        // The cap's receiver was opened by this session and belongs to it. On
+        // this board its device node is also the Grove header, and nothing
+        // takes an exclusive lock on a tty: holding it after the radio is gone
+        // means the next thing plugged in shares its bytes with a reader that
+        // has no business reading them.
+        gnss_.close();
+        gnssProbeDeadlineMs_ = 0;
         linkMode_ = LinkMode::Betaflight;
         portLinkModeForced_ = false;
         refreshMeshMenus();
@@ -1349,7 +1355,7 @@ void App::applyMenu(int id) {
         showGnssStatus();
         break;
     case MenuMeshShare:
-        shareMyPosition();
+        shareMyPosition(chatPeer_);
         break;
     case MenuOpenControlsInfo:
         openMenuPage(MenuPage::ControlsInfo);
@@ -1762,8 +1768,7 @@ void App::onNodesKey(const KeyEvent& e) {
     case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); break;
     case Key::F2: showRadioInfo(); break;
     case Key::F5:
-        chatPeer_ = peerForNodeRow(nodeList_.sel);
-        shareMyPosition();
+        shareMyPosition(peerForNodeRow(nodeList_.sel));
         break;
     case Key::F6: showGnssStatus(); break;
     case Key::F9:
@@ -1779,8 +1784,7 @@ void App::onNodesKey(const KeyEvent& e) {
             term_.scrollToBottom(bodyRows(false));
             openReturnableScreen(Screen::Terminal);
         } else if (e.ch == 'p' || e.ch == 'P') {
-            chatPeer_ = peerForNodeRow(nodeList_.sel);
-            shareMyPosition();
+            shareMyPosition(peerForNodeRow(nodeList_.sel));
         }
         break;
     default: break;
@@ -1835,7 +1839,7 @@ void App::onChatKey(const KeyEvent& e) {
     case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
     case Key::F2: showRadioInfo(); return;
     case Key::F3: openReturnableScreen(Screen::Nodes); return;
-    case Key::F5: shareMyPosition(); return;
+    case Key::F5: shareMyPosition(chatPeer_); return;
     case Key::F6: showGnssStatus(); return;
     case Key::F9:
         openMenuPage(MenuPage::Root);
@@ -2172,6 +2176,17 @@ int App::run(const Options& opt) {
     }
 
     if (!opt.previewDir.empty()) {
+        // Every writePpm below opens a file by path, and fopen does not build
+        // the directory it was handed. Without this the whole run reports
+        // "wrote 0 previews" and never says which of the two things went
+        // wrong: the painting, or a directory that was never there.
+        std::string previewDirError;
+        if (!makeDirs(opt.previewDir, previewDirError)) {
+            std::fprintf(stderr, "%s: --preview %s: %s\n", kAppName,
+                         opt.previewDir.c_str(), previewDirError.c_str());
+            teardown();
+            return 1;
+        }
         // Render one frame of every screen for host-side inspection. Nothing is
         // connected and no key is synthesised, so this is purely a paint test.
         const struct { Screen screen; MenuPage menuPage; const char* name; } kShots[] = {

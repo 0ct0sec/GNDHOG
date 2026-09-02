@@ -1383,6 +1383,40 @@ bool spinMesh(SimMesh& sim, MeshSession& mesh, int timeoutMs,
     return false;
 }
 
+// A radio with a large node database and a chatty console takes longer to
+// answer than the retry deadline. The download is arriving the whole time, so
+// the client must measure the timeout from the last frame it received, not from
+// the moment it asked: re-requesting restarts the download, and a client that
+// restarts it every eight seconds never sees the end of it.
+void testMeshConfigProgress() {
+    SimMesh sim;
+    std::string error;
+    if (!sim.start(error)) return;
+    sim.setConfigDripMs(2);
+
+    Terminal term;
+    term.setWidth(53);
+    MeshSession mesh(term);
+    check(mesh.connect(sim.devicePath(), 115200, error),
+          "connect to a radio that answers slowly: " + error);
+
+    // Real time drips the frames; the session is handed a synthetic clock that
+    // walks past the eight-second deadline while they are still arriving.
+    const uint64_t start = nowMs();
+    for (int step = 1; step <= 14 && !mesh.ready(); ++step) {
+        sim.pump();
+        sleepMs(4);
+        mesh.poll(start + static_cast<uint64_t>(step) * 1200);
+    }
+
+    check(mesh.ready(), "a config download slower than the deadline still completes");
+    checkEq(std::to_string(sim.configRequestsReceived()), "1",
+            "a download that is still arriving is never re-requested");
+    check(mesh.state() != MeshState::Failed,
+          "a radio that is answering is never reported as not answering");
+    mesh.disconnect();
+}
+
 void testMeshSession() {
     section("meshtastic session (simulated radio over a pty)");
     SimMesh sim;
@@ -1667,6 +1701,20 @@ void testMeshApp() {
         app.handleKey(nodesKey);
         check(app.screen_ == Screen::Nodes, "N returns from the radio log to the node list");
 
+        // Sharing a position is addressed to the highlighted row, but it must
+        // not become the conversation that Export and Clear then operate on.
+        // Those two act on whatever chat is open, and a position share that
+        // silently repointed them would delete the wrong transcript.
+        app.openChat(kMeshBroadcast);
+        app.setScreen(Screen::Nodes);
+        app.nodeList_.sel = 1;
+        KeyEvent share;
+        share.key = Key::F5;
+        app.handleKey(share);
+        check(app.chatPeer_ == kMeshBroadcast,
+              "sharing a position from the node list leaves the open conversation alone");
+        app.handleKey(escape);
+
         // Disconnecting hands the menus back to the flight controller.
         app.requestDisconnect(false);
         check(!app.mesh_.connected() && app.screen_ == Screen::Ports,
@@ -1689,6 +1737,33 @@ void testMeshApp() {
             }
         }
         check(foundPing, "a saved conversation is reloaded on the next launch");
+    }
+
+    // The LoRa Cap receiver belongs to the mesh session that opened it. On this
+    // board its device node is also the Grove header, and nothing takes an
+    // exclusive lock on a tty: a receiver still held after the radio is gone
+    // would quietly steal bytes from whatever is connected next.
+    {
+        SimFc grove;
+        std::string groveError;
+        if (grove.start(groveError)) {
+            App app;
+            app.display_.setHeadlessSize(kScreenW, kScreenH);
+            check(app.storage_.init(error), "a third app instance initializes storage");
+            app.setupMenus();
+            app.gnssDevice_ = grove.devicePath();
+            check(app.mesh_.connect(sim.devicePath(), 115200, error),
+                  "the app opens the radio for the GNSS lifecycle check: " + error);
+            app.linkMode_ = LinkMode::Meshtastic;
+            app.beginMeshSession();
+            check(app.gnss_.isOpen(), "a mesh session opens the LoRa Cap receiver");
+            // The six-second "is anything talking NMEA here" probe would close
+            // the port on its own; this is a test of the disconnect path.
+            app.gnssProbeDeadlineMs_ = 0;
+            app.requestDisconnect(false);
+            check(!app.gnss_.isOpen(),
+                  "closing the radio link releases the LoRa Cap receiver's port");
+        }
     }
 
     if (saved.empty()) ::unsetenv("BFCLI_DATA_DIR");
@@ -2081,6 +2156,7 @@ int runSelfTest() {
     testMeshChatFiles();
     testGnss();
     testMeshSession();
+    testMeshConfigProgress();
     testMeshApp();
     std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;

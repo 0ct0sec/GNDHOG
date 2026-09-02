@@ -78,6 +78,9 @@ private:
     std::map<std::string, std::string> values_;
 };
 
+// mkdir -p, 0700. Succeeds when the path already exists.
+bool makeDirs(const std::string& path, std::string& error);
+
 std::string humanBytes(uint64_t n);
 std::string timestampCompact();          // 20260831_135905
 std::string sanitizeForFilename(const std::string& s);

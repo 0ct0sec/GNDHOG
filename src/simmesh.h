@@ -25,6 +25,10 @@ public:
     // Routing error returned for the next direct message: 0 acknowledges it.
     void setAckError(uint32_t reason) { ackError_ = reason; }
     void setAckDelayMs(uint64_t ms) { ackDelayMs_ = ms; }
+    // Spreads the config download over time, one frame per interval, the way a
+    // radio with a large node database and a busy console really answers.
+    void setConfigDripMs(uint64_t ms) { configDripMs_ = ms; }
+    int configRequestsReceived() const { return configRequestsReceived_; }
     // Queues an inbound text message from one of the fixture nodes.
     void injectText(uint32_t from, uint32_t to, const std::string& text);
     void injectPosition(uint32_t from, double latitude, double longitude);
@@ -59,6 +63,10 @@ private:
     bool txEnabled_ = true;
     uint32_t ackError_ = 0;
     uint64_t ackDelayMs_ = 60;
+    uint64_t configDripMs_ = 0;
+    uint64_t nextConfigFrameMs_ = 0;
+    int configRequestsReceived_ = 0;
+    std::vector<std::string> pendingConfig_;
     std::vector<DelayedAck> acks_;
     int textPacketsReceived_ = 0;
     int positionPacketsReceived_ = 0;
