@@ -1866,6 +1866,22 @@ int runSelfTest() {
         check(!app.soundEnabled_ && !app.audio_.enabled() &&
                   app.status_.find("locked off by --mute") != std::string::npos,
               "--mute remains a launch-wide override when the menu toggle is pressed");
+
+        // Same contract for the GNSS switch. One smoke test launched with
+        // --no-gnss must not disable the receiver for every launch after it.
+        app.opt_.gnssEnabled = false;
+        app.gnssWanted_ = true;
+        app.toggleGnss();
+        check(!app.gnssWanted_ &&
+                  app.status_.find("locked off by --no-gnss") != std::string::npos,
+              "--no-gnss is a launch-wide override the menu toggle cannot undo");
+        checkEq(app.config_.get("gnss.enabled", "unwritten"), "unwritten",
+                "a session GNSS override never writes itself into the saved config");
+        app.opt_.gnssEnabled = true;
+        app.gnssWanted_ = false;
+        app.toggleGnss();
+        check(app.gnssWanted_ && app.config_.getBool("gnss.enabled", false),
+              "a deliberate menu toggle does save the GNSS choice");
         KeyEvent key;
         key.key = Key::Char;
         key.ch = 'a';

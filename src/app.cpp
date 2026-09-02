@@ -185,8 +185,11 @@ void App::refreshMeshMenus() {
 
     for (MenuItem& item : meshPositionMenu_) {
         if (item.id != MenuGnssToggle) continue;
-        item.label = std::string("LoRa Cap GNSS: ") + (gnssWanted_ ? "ON" : "OFF");
-        if (!gnssWanted_) item.hint = "receiver not opened this session";
+        item.label = opt_.gnssEnabled
+                         ? std::string("LoRa Cap GNSS: ") + (gnssWanted_ ? "ON" : "OFF")
+                         : std::string("LoRa Cap GNSS: OFF (--no-gnss)");
+        if (!opt_.gnssEnabled) item.hint = "session override; restart without --no-gnss";
+        else if (!gnssWanted_) item.hint = "receiver not opened this session";
         else if (!gnss_.isOpen()) item.hint = "no receiver on " + gnssDevice_;
         else if (!gnss_.receiverPresent()) item.hint = "open, waiting for NMEA";
         else if (gnss_.fix().valid) item.hint = gnss_.fix().coordText();
@@ -405,8 +408,11 @@ void App::teardown() {
     config_.setInt("brightness", brightness_);
     if (!opt_.muteSound) config_.setBool("sound.enabled", soundEnabled_);
     config_.setInt("sound.volume", soundVolume_);
-    config_.setBool("gnss.enabled", gnssWanted_);
-    config_.set("gnss.device", gnssDevice_);
+    // --no-gnss and --gnss DEV are launch-wide overrides, exactly like --mute:
+    // they change this session and must not rewrite the saved choice. One
+    // smoke test with --no-gnss should not disable the receiver forever.
+    if (opt_.gnssEnabled) config_.setBool("gnss.enabled", gnssWanted_);
+    if (opt_.gnssDevice.empty()) config_.set("gnss.device", gnssDevice_);
     config_.setInt("gnss.baud", gnssBaud_);
     std::string err;
     config_.save(storage_, err);
@@ -524,6 +530,16 @@ void App::startGnss() {
 }
 
 void App::toggleGnss() {
+    if (!opt_.gnssEnabled) {
+        // The same contract --mute has: a launch-wide override the menu cannot
+        // quietly undo, and which says so rather than appearing to do nothing.
+        gnssWanted_ = false;
+        gnss_.close();
+        status_ = "GNSS locked off by --no-gnss for this launch";
+        statusUntil_ = nowMs() + 4000;
+        refreshMeshMenus();
+        return;
+    }
     gnssWanted_ = !gnssWanted_;
     config_.setBool("gnss.enabled", gnssWanted_);
     if (gnssWanted_) {

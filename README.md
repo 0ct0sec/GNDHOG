@@ -323,7 +323,9 @@ The Cardputer Zero's **Cap LoRa868 / Cap LoRa-1262** carries an AT6668 GNSS
 receiver alongside its SX1262. On this board that receiver arrives as a plain
 UART speaking NMEA 0183 at 115200 8N1, so GNDHOG reads `/dev/serial0` and parses
 `GGA`, `RMC`, and `GSV`. Change the device with `gnss.device` in `config.ini`,
-or launch with `--gnss DEV`; `--no-gnss` skips it entirely.
+or launch with `--gnss DEV`; `--no-gnss` skips it entirely. Both switches are
+launch-wide session overrides in the way `--mute` is: they do not rewrite the
+saved choice, and the menu toggle says so rather than appearing to do nothing.
 
 Presence is proved by sentences arriving, never by the device node opening: that
 UART exists whether or not a cap is clipped to it. If nothing speaks NMEA within
