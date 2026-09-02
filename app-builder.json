@@ -3,16 +3,18 @@
   "package_name": "bfcli",
   "version": "0.1.0",
   "bin_name": "bfcli",
-  "description": "Betaflight CLI terminal for M5Stack Cardputer Zero",
+  "description": "Betaflight CLI and Meshtastic terminal for M5Stack Cardputer Zero",
   "store": {
-    "summary": "Betaflight field checks, CLI, backups, and restores on Cardputer Zero.",
-    "description": "A native Betaflight field terminal for the M5Stack Cardputer Zero. Connect a flight controller over USB or UART to summarize current arming blockers, gyro, receiver, battery, I2C, and scheduler evidence; inspect the raw CLI output; run commands; and create or restore Configurator-shaped backups. Risky motor and erase commands require confirmation. GNDHOG ZERO runs locally without a network connection or background service.",
+    "summary": "Betaflight CLI and backups, plus Meshtastic mesh chat, on Cardputer Zero.",
+    "description": "A native serial field terminal for the M5Stack Cardputer Zero. Connect a Betaflight flight controller over USB or UART to summarize current arming blockers, gyro, receiver, battery, I2C, and scheduler evidence; inspect the raw CLI output; run commands; and create or restore Configurator-shaped backups. Risky motor and erase commands require confirmation. Connect a Meshtastic radio instead and the same screen lists every node the radio has heard, opens a conversation with any of them or the broadcast channel, shows delivery state from the mesh's own routing replies, and keeps each transcript on the device. With a LoRa Cap fitted, its GNSS receiver adds range and bearing to nodes that reported a position, and a position you can choose to transmit. GNDHOG ZERO runs locally without a network connection or background service.",
     "categories": [
       "Development",
       "Hardware & IoT"
     ],
     "screenshots": [
       "store/screenshots/terminal.png",
+      "store/screenshots/mesh-nodes.png",
+      "store/screenshots/mesh-chat.png",
       "store/screenshots/keymap.png",
       "store/screenshots/safety-confirmation.png"
     ],

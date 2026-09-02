@@ -5,7 +5,10 @@
 #include "diagnostics.h"
 #include "display.h"
 #include "gfx.h"
+#include "gnss.h"
 #include "input.h"
+#include "meshsession.h"
+#include "meshtastic.h"
 #include "serialport.h"
 #include "storage.h"
 #include "term.h"
@@ -36,16 +39,25 @@ enum class Screen {
     Keymap,
     Help,
     About,
+    Nodes,      // mesh: discovered radios and the broadcast channel
+    Chat,       // mesh: one conversation
 };
 
 enum class MenuPage {
     Root,
     FlightController,
     BackupRestore,
+    Mesh,
+    MeshPosition,
     ControlsInfo,
     SoundDisplay,
     ConnectionExit,
 };
+
+// Which protocol the open serial port is speaking. The two are mutually
+// exclusive by construction: one port, one conversation, no guessing halfway
+// through about which peer just answered.
+enum class LinkMode { Betaflight, Meshtastic };
 
 struct MenuItem {
     std::string label;
@@ -73,21 +85,32 @@ public:
         bool headless = false;         // render offscreen only
         bool stdinKeys = false;        // read stdin instead of evdev
         bool simulate = false;         // talk to the built-in fake FC
+        bool simulateMesh = false;     // talk to the built-in fake Meshtastic radio
+        bool forceMesh = false;        // --mesh: open --port as a Meshtastic radio
         bool autoConnect = true;
         bool muteSound = false;        // --mute: session-only audio override
         bool showAbout = false;        // --about: start offline on the credits
         int frameLimit = 0;            // stop after N frames (preview/testing)
         std::string previewDir;        // dump each screen as PPM and exit
+        // The LoRa Cap's GNSS receiver. Empty means "use the configured or
+        // default device"; --no-gnss suppresses the probe entirely.
+        std::string gnssDevice;
+        bool gnssEnabled = true;
     };
 
     int run(const Options& opt);
 
 private:
     friend int runSelfTest();
+    friend void testMeshApp();   // selftest.cpp: drives the mesh screens
     // ---- lifecycle
     bool setup(const Options& opt, std::string& error);
     void teardown();
     void tick(uint64_t now);
+    void tickMesh(uint64_t now);
+    void pollGnss(uint64_t now);
+    // Status-line expiry and the HUD audio watch, which both links need.
+    void tickStatusTail(uint64_t now);
     void render();
 
     // ---- input
@@ -100,6 +123,8 @@ private:
     void onKeymapKey(const KeyEvent& e);
     void onHelpKey(const KeyEvent& e);
     void onAboutKey(const KeyEvent& e);
+    void onNodesKey(const KeyEvent& e);
+    void onChatKey(const KeyEvent& e);
     bool handleModalKey(const KeyEvent& e);
 
     // ---- screens
@@ -114,6 +139,8 @@ private:
     void drawKeymap(Surface& s);
     void drawHelp(Surface& s);
     void drawAbout(Surface& s);
+    void drawNodes(Surface& s);
+    void drawChat(Surface& s);
     void drawModal(Surface& s);
     void drawList(Surface& s, const std::vector<MenuItem>& items, ListState& st,
                   int visibleRows, bool showSelection = true);
@@ -127,7 +154,9 @@ private:
 
     // ---- actions
     void refreshPorts();
+    void syncPortLinkMode();
     void connectSelected();
+    void connectPort(const PortInfo& port, LinkMode mode);
     void beginConnectionSafety(const std::string& device);
     void performThermalTrip(int temperatureC);
     void requestDisconnect(bool exitAfter = false);
@@ -149,6 +178,28 @@ private:
     void toggleSound();
     void refreshSoundMenu();
     void pushLocal(const std::string& text, LineKind kind = LineKind::Local);
+
+    // ---- mesh
+    bool meshMode() const { return linkMode_ == LinkMode::Meshtastic; }
+    bool linkConnected() const;
+    void beginMeshSession();
+    void loadMeshChats();
+    void flushMeshChats();
+    void openChat(uint32_t peer);
+    void submitChatLine();
+    void shareMyPosition();
+    void showRadioInfo();
+    void showGnssStatus();
+    void toggleGnss();
+    void startGnss();
+    void exportConversation();
+    void clearConversation();
+    void rebuildChatRows();
+    void refreshMeshMenus();
+    // Row 0 of the node screen is the broadcast channel; the rest are radios.
+    int nodeRowCount() const;
+    uint32_t peerForNodeRow(int row) const;
+    std::string peerTitle(uint32_t peer) const;
 
     // ---- modal helpers
     void confirm(const std::string& title, const std::string& body,
@@ -175,6 +226,8 @@ private:
     Completer completer_;
     LineEditor editor_;
     Session session_{term_, completer_};
+    MeshSession mesh_{term_};
+    Gnss gnss_;
     ThermalTrip thermalTrip_;
 
     Screen screen_ = Screen::Ports;
@@ -195,6 +248,8 @@ private:
     ListState menuList_;
     std::vector<MenuItem> controllerMenu_;
     std::vector<MenuItem> backupMenu_;
+    std::vector<MenuItem> meshMenu_;
+    std::vector<MenuItem> meshPositionMenu_;
     std::vector<MenuItem> controlsMenu_;
     std::vector<MenuItem> settingsMenu_;
     std::vector<MenuItem> connectionMenu_;
@@ -205,6 +260,38 @@ private:
     ListState keymapList_;
     int helpScroll_ = 0;
     int baudIndex_ = 0;
+
+    // ---- mesh state
+    LinkMode linkMode_ = LinkMode::Betaflight;
+    // The protocol the port picker will use for the highlighted row. It starts
+    // from the port's own USB identity and the operator can override it.
+    LinkMode portLinkMode_ = LinkMode::Betaflight;
+    bool portLinkModeForced_ = false;
+    ListState nodeList_;
+    uint64_t nodeSequenceSeen_ = 0;
+    uint64_t chatSequenceSeen_ = 0;
+    uint64_t meshNoteSeen_ = 0;
+    uint32_t chatPeer_ = kMeshBroadcast;
+    LineEditor chatEditor_;
+    struct ChatRow {
+        std::string text;
+        LineKind kind = LineKind::Fc;
+    };
+    std::vector<ChatRow> chatRows_;
+    uint64_t chatRowsSequence_ = 0;
+    uint32_t chatRowsPeer_ = 0;
+    int chatRowsCols_ = 0;
+    bool chatRowsValid_ = false;
+    int chatScroll_ = 0;
+    bool chatFollow_ = true;
+    std::string gnssDevice_;
+    int gnssBaud_ = 115200;
+    bool gnssWanted_ = true;
+    uint64_t gnssProbeDeadlineMs_ = 0;
+    bool gnssProbeReported_ = false;
+    bool meshFailureReported_ = false;
+    int meshUnreadSeen_ = 0;
+
     int brightness_ = 100;
     int soundVolume_ = 70;
     bool soundEnabled_ = true;

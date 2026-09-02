@@ -118,9 +118,27 @@ bool Storage::init(std::string& error) {
     dataDir_ = envOr("BFCLI_DATA_DIR", xdg + "/bfcli");
     backupDir_ = dataDir_ + "/backups";
     diagnosticDir_ = dataDir_ + "/diagnostics";
+    meshDir_ = dataDir_ + "/mesh";
     if (!makeDirs(backupDir_, error)) return false;
     if (!makeDirs(diagnosticDir_, error)) return false;
+    if (!makeDirs(meshDir_, error)) return false;
     return true;
+}
+
+std::vector<std::string> Storage::listMeshChatFiles() const {
+    std::vector<std::string> out;
+    DIR* d = ::opendir(meshDir_.c_str());
+    if (!d) return out;
+    while (dirent* e = ::readdir(d)) {
+        const std::string name = e->d_name;
+        if (name.size() < 6 || name.compare(name.size() - 5, 5, ".chat") != 0) continue;
+        struct stat st{};
+        if (::stat((meshDir_ + "/" + name).c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        out.push_back(name);
+    }
+    ::closedir(d);
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 std::string Storage::configPath() const { return dataDir_ + "/config.ini"; }
@@ -198,6 +216,20 @@ std::vector<BackupFile> Storage::listBackups() const {
     std::sort(out.begin(), out.end(),
               [](const BackupFile& a, const BackupFile& b) { return a.mtime > b.mtime; });
     return out;
+}
+
+bool Storage::deleteMeshChat(const std::string& path, std::string& error) const {
+    // Same containment rule as a backup: only our own directory, never a path
+    // that walks out of it.
+    if (path.rfind(meshDir_ + "/", 0) != 0 || path.find("..") != std::string::npos) {
+        error = "refusing to delete a path outside the mesh directory";
+        return false;
+    }
+    if (::unlink(path.c_str()) != 0 && errno != ENOENT) {
+        error = std::string("unlink: ") + std::strerror(errno);
+        return false;
+    }
+    return true;
 }
 
 bool Storage::deleteBackup(const std::string& path, std::string& error) const {

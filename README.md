@@ -11,10 +11,17 @@ built-in 320×170 screen, with command history, completion, and SD-card backup
 and restore. No laptop. No browser. No ceremony involving a folding table and
 three adapters that all claim to be data cables.
 
+Plug a **Meshtastic** radio in instead — an M5Stack Unit C6L, say — and the same
+screen becomes a mesh terminal: the nodes the radio has actually heard, a
+conversation with any of them, and a transcript that survives the walk back to
+the car. It speaks the current Meshtastic client API over serial in framed
+protobuf, hand-decoded, with no extra libraries and no phone in the loop.
+
 This is a native ARM64 Linux application. It writes directly to `/dev/fb0`,
-reads the TCA8418 keyboard through evdev, and speaks to the FC over a serial
-port. No Arduino, ESP-IDF, X11, SDL, LVGL, or background service. One `poll()`
-loop at 30 fps runs the whole suspiciously small department.
+reads the TCA8418 keyboard through evdev, and speaks to the flight controller
+or the radio over a serial port. No Arduino, ESP-IDF, X11, SDL, LVGL, protobuf
+runtime, or background service. One `poll()` loop at 30 fps runs the whole
+suspiciously small department.
 
 ```text
 ┌─────────────────────────────────────────────────────┐
@@ -40,7 +47,9 @@ loop at 30 fps runs the whole suspiciously small department.
 4. Put the Cardputer Zero **Host/Slave switch in HOST**, then connect the flight
    controller to **USB-A**.
 5. Launch **GNDHOG ZERO** from APPLaunch. If the port picker appears, choose the
-   CDC-ACM device for the FC, usually `/dev/ttyACM0`.
+   CDC-ACM device for the FC, usually `/dev/ttyACM0`. The picker proposes a
+   protocol from the port's USB identity and **M** overrides it, so a Meshtastic
+   radio on the same hub opens as a mesh link instead of a CLI.
 6. If a controllable VTX is reported, accept the optional bench pit-mode guard.
    GNDHOG verifies the state before it calls the guard active.
 7. Press **Fn+2** for a no-config-write field check. Press **Esc** for the menu. Make
@@ -83,6 +92,16 @@ loop at 30 fps runs the whole suspiciously small department.
   built-in `ES8388Audio`/`ES8389Audio` card through its named PipeWire/Pulse
   sink instead of Linux's HDMI default, and falls back to an exact-card ALSA
   route when the session server is absent.
+- **Meshtastic, over the same wire.** A supported radio opens as a mesh link:
+  the config download, the node database, per-node and broadcast conversations,
+  delivery state read from the mesh's own routing replies, and a transcript kept
+  on disk per node. The framing and the protobuf are decoded here rather than
+  linked in, so the binary still needs nothing but libc.
+- **LoRa Cap GNSS, when there is one.** With a Cap LoRa868 / Cap LoRa-1262
+  fitted, the AT6668 receiver is read as NMEA 0183 and gives range and bearing
+  to any node that reported a position, plus a position you can choose to
+  transmit. With no receiver, or no fix, GNDHOG says so. It does not invent a
+  coordinate to fill a field.
 - **Offline About screen.** Open **Menu → About GNDHOG ZERO**, or press **A**
   on the port picker, for the mascot, author, source commit, and abbreviated
   crash report. Enter or Escape returns to the previous screen. No FC is
@@ -153,6 +172,19 @@ A plain USB keyboard on the hub also works and is decoded from keycodes alone.
 Hold `Fn` and tap a number for the quick rack: **1** help, **2** field check,
 **3** version, **4** diff, **5** backup, **6** backups, **7** tasks, **8** save,
 **9** menu, **0** disconnect.
+
+With a radio attached the screens change and so do the keys:
+
+| Key | Action |
+|-----|--------|
+| `Enter` | open the highlighted conversation, or send the typed message |
+| `I` / `Fn+2` | radio firmware, region, preset, and channel |
+| `G` / `Fn+6` | LoRa Cap GNSS status |
+| `P` / `Fn+5` | transmit this station's own position (asks first) |
+| `L` | the radio's console log |
+| `N` | back to the node list from the log |
+| `Fn+9` / `Esc` | menu |
+| `Fn+0` | disconnect |
 
 ## HUD sounds
 
@@ -234,6 +266,78 @@ Neither result pretends that an attached battery was removed. The cutoff is
 latched with no automatic re-enable; physically disconnect the FC and battery
 before exiting or rebooting because APPLaunch can restore its saved EXT rail
 state when it starts again.
+
+## Meshtastic
+
+Set the **Host/Slave switch to HOST** and plug the radio into **USB-A**, or wire
+one to Grove and pick its baud. An M5Stack Unit C6L enumerates as its own
+ESP32-C6 USB serial device (`303a:1001`), which is enough for the picker to
+propose the mesh protocol; **M** overrides the proposal either way, because a
+board can be flashed with anything.
+
+On connect GNDHOG sends the reference client's resynchronisation burst, asks for
+the configuration, and reads the reply stream: the radio's own node number,
+device metadata, the LoRa and position configuration, the channel list, and the
+node database. Framed protobuf and the firmware's debug console share one wire,
+so bytes that are not part of a frame are kept and shown as the **radio log**
+rather than discarded as noise.
+
+```text
+┌─────────────────────────────────────────────────────┐
+│ GNDHOG ZERO  GNDH mesh nodes                  ready │
+│>ALL  Broadcast - LongFast                           │
+│ GNDH GNDHOG BENCH   (this radio)                now │
+│*HILL HILLTOP RELAY                              12m │
+│ VAN2 VAN 2                                       1h │
+│ !a1b2c3d4  snr 6.2  1 hop  87%  1.4km NE Enter chat │
+└─────────────────────────────────────────────────────┘
+```
+
+The node list is the conversation list. Row one is the broadcast channel; every
+other row is a radio, with an unread marker and **how long ago it was heard**.
+Nothing here says a node is "online", because the mesh does not know that: a
+quiet node and a dead node look identical from here, and only one of them is a
+problem.
+
+Enter opens a conversation. Type and press Enter to send. A direct message goes
+out asking for acknowledgement and is marked `.` while it waits, `+` when the
+mesh returns a routing ACK for that packet id, and `!` with the reason — no
+route, timeout, duty cycle limit — when it does not. A broadcast is marked
+sent, because the mesh does not acknowledge one and a permanent spinner would
+only be a lie with a nicer shape.
+
+Transcripts live under `~/.local/share/bfcli/mesh`, one tab-separated file per
+peer, and reload on the next launch. A message still waiting for an
+acknowledgement when the app closed reloads as unresolved rather than as
+delivered. **Menu → Mesh network** can export a conversation as readable text or
+delete one; deleting removes this device's copy and nothing else.
+
+The radio must be able to transmit before anything is sent. A radio with no LoRa
+region set, or with transmit disabled, is reported as `no TX` in the state chip
+and refuses the message with the reason instead of queueing it into a device
+that is deliberately mute.
+
+## The LoRa Cap and GPS
+
+The Cardputer Zero's **Cap LoRa868 / Cap LoRa-1262** carries an AT6668 GNSS
+receiver alongside its SX1262. On this board that receiver arrives as a plain
+UART speaking NMEA 0183 at 115200 8N1, so GNDHOG reads `/dev/serial0` and parses
+`GGA`, `RMC`, and `GSV`. Change the device with `gnss.device` in `config.ini`,
+or launch with `--gnss DEV`; `--no-gnss` skips it entirely.
+
+Presence is proved by sentences arriving, never by the device node opening: that
+UART exists whether or not a cap is clipped to it. If nothing speaks NMEA within
+a few seconds the port is closed again and the receiver is reported absent,
+which also keeps GNDHOG off the Grove header it shares.
+
+With a fix, the node list shows **range and bearing** to every node that
+reported a position, and **Share my position** transmits this station's own
+coordinate after a confirmation that says what it is about to do. Without a fix
+it says so. It will not send a stale coordinate, and it will not borrow the
+radio's idea of where it is and present that as this station's.
+
+The receiver is read only. GNDHOG never writes to the GNSS UART and never
+configures the receiver.
 
 ## Field check
 
@@ -367,7 +471,7 @@ Inspect available ports before launching:
 ## Backups
 
 Backups live under `~/.local/share/bfcli/backups`, unless `BFCLI_DATA_DIR`
-points elsewhere. Names follow
+points elsewhere. Mesh conversations live beside them in `mesh/`. Names follow
 `BTFL_cli_<craft>_<timestamp>_<board>_backup.txt`, matching Betaflight
 Configurator so files can be copied between them.
 
@@ -404,6 +508,12 @@ Enter harder does not change the storage model.
   capability/readback sequence and one `status` temperature capture. None of
   it writes flash. Pit mode is requested only after operator confirmation and
   must be reported back before success.
+- On a mesh link, **nothing is transmitted that you did not type**. The only
+  automatic traffic is the configuration request and a five-minute heartbeat,
+  and both stay inside the USB cable. Position sharing is a separate, confirmed
+  action; there is no periodic beacon.
+- A mesh conversation is deleted from this device only. The mesh has no recall,
+  and the other station keeps its copy.
 
 Remove propellers before bench work that can arm or drive motors. Software
 confirmation is a guardrail. It is not a small orange force field.
@@ -412,6 +522,10 @@ confirmation is a guardrail. It is not a small orange force field.
 
 ```sh
 ./build/bfcli --sim              # built-in fake flight controller
+./build/bfcli --sim-mesh         # built-in fake Meshtastic radio
+./build/bfcli --mesh --port DEV  # open DEV as a radio, not a Betaflight CLI
+./build/bfcli --gnss /dev/serial0  # LoRa Cap GNSS receiver
+./build/bfcli --no-gnss          # do not open a GNSS receiver at all
 ./build/bfcli --preview out/     # write one PPM per screen
 ./build/bfcli --selftest         # run the check suite
 ./build/bfcli --list-ports       # enumerate visible serial targets
@@ -427,6 +541,12 @@ Betaflight 2026.6.0-alpha, including realistic field-check evidence and a
 `diff all`, plus a ready SmartAudio VTX that acknowledges pit mode. The complete
 connect → guard → diagnose → backup → restore path can
 therefore be exercised without hardware.
+
+`--sim-mesh` does the same for the radio: a three-node database, a primary
+channel, an EU_868 LoRa configuration, routing acknowledgements (and refusals),
+inbound text and position packets, and console log lines deliberately
+interleaved with the framed protobuf, because that is what real firmware does
+and it is the part that breaks a decoder.
 It does not exercise the physical keyboard, framebuffer, USB link, or an actual
 flight controller. Even imaginary hardware has a job description.
 
@@ -436,6 +556,10 @@ flight controller. Even imaginary hardware has a job description.
 |------|------------------|
 | `src/keys.cpp` | v5 46-key matrix and layer decoding |
 | `src/bfsession.cpp` | CLI conversation, prompt detection, backup and restore |
+| `src/protowire.cpp` | protobuf wire format, by hand, with no runtime |
+| `src/meshtastic.cpp` | Meshtastic framing, messages, helpers, transcripts |
+| `src/meshsession.cpp` | radio link, node database, chat, delivery state |
+| `src/gnss.cpp` | NMEA 0183 parser for the LoRa Cap receiver |
 | `src/diagnostics.cpp` | version-tolerant field evidence parser and saved report formatter |
 | `src/term.cpp` | scrollback, wrapping, and line editing |
 | `src/bfcommands.cpp` | command tables, completion, and risk classification |
@@ -445,6 +569,7 @@ flight controller. Even imaginary hardware has a job description.
 | `src/ui.cpp` | screen rendering |
 | `src/brand.h` | project identity, author, and About copy |
 | `src/simfc.cpp` | simulated flight controller |
+| `src/simmesh.cpp` | simulated Meshtastic radio |
 | `src/mascot.cpp` | embedded mascot renderer |
 | `assets/` | approved black/white/transparent mascot masters for each native size |
 | `store/` | AppStore icon and current 320×170 UI screenshots |
@@ -456,7 +581,8 @@ flight controller. Even imaginary hardware has a job description.
 | `tools/validate-app-store.py` | local store metadata and archive policy gate |
 
 That is the whole machine: one terminal, one mascot, one serial wire, and no
-cloud account asking whether the quad is still you.
+cloud account asking whether the quad is still you — or, on the other end of
+that wire, whether the mesh is still yours.
 
 ## License
 

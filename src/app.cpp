@@ -1,10 +1,12 @@
 #include "app.h"
 #include "brand.h"
 #include "simfc.h"
+#include "simmesh.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <sstream>
 #include <poll.h>
 #include <unistd.h>
@@ -29,8 +31,18 @@ enum MenuId {
     MenuBrightUp,
     MenuDisconnect,
     MenuExit,
+    MenuMeshNodes,
+    MenuMeshBroadcast,
+    MenuMeshRadioInfo,
+    MenuMeshExport,
+    MenuMeshClear,
+    MenuGnssToggle,
+    MenuGnssStatus,
+    MenuMeshShare,
     MenuOpenFlightController = 100,
     MenuOpenBackupRestore,
+    MenuOpenMesh,
+    MenuOpenMeshPosition,
     MenuOpenControlsInfo,
     MenuOpenSoundDisplay,
     MenuOpenConnectionExit,
@@ -96,13 +108,6 @@ int App::bodyRows(bool withInput) const {
 }
 
 void App::setupMenus() {
-    menu_ = {
-        {"Flight controller", "checks and common CLI queries", MenuOpenFlightController, true},
-        {"Backup & restore", "save, inspect, or restore configuration", MenuOpenBackupRestore, true},
-        {"Controls & info", "keymap, help, and build identity", MenuOpenControlsInfo, true},
-        {"Sound & display", "HUD audio, volume, and brightness", MenuOpenSoundDisplay, true},
-        {"Connection & exit", "close the FC link or return to launcher", MenuOpenConnectionExit, true},
-    };
     controllerMenu_ = {
         {"Run field check", "no config writes; status, blockers, runtime", MenuFieldCheck, true},
         {"Quick commands", "common CLI queries", MenuQuick, true},
@@ -112,6 +117,18 @@ void App::setupMenus() {
         {"Full dump to file", "runs `dump all`", MenuBackupDump, true},
         {"Restore from backup", "sends a saved file", MenuRestore, true},
         {"Saved backups", "view or delete", MenuFiles, true},
+    };
+    meshMenu_ = {
+        {"Node list", "radios this device has heard", MenuMeshNodes, true},
+        {"Broadcast channel", "message everyone on the channel", MenuMeshBroadcast, true},
+        {"Radio info", "firmware, region, preset, channel", MenuMeshRadioInfo, true},
+        {"Export conversation", "write the open chat to a text file", MenuMeshExport, true},
+        {"Clear conversation", "delete the open chat history", MenuMeshClear, true},
+    };
+    meshPositionMenu_ = {
+        {"LoRa Cap GNSS", "AT6668 NMEA receiver on the cap", MenuGnssToggle, true},
+        {"GNSS status", "fix, satellites, and coordinates", MenuGnssStatus, true},
+        {"Share my position", "transmits this station's own fix", MenuMeshShare, true},
     };
     controlsMenu_ = {
         {"Keymap & key test", "find a symbol key", MenuKeymap, true},
@@ -129,6 +146,7 @@ void App::setupMenus() {
         {"Disconnect", "restore bench VTX state or close link", MenuDisconnect, true},
         {"Exit GNDHOG ZERO", "return to the launcher", MenuExit, true},
     };
+    refreshMeshMenus();
     menuPage_ = MenuPage::Root;
     menuList_ = ListState{};
     submenuList_ = ListState{};
@@ -140,10 +158,54 @@ void App::setupMenus() {
     quickList_ = ListState{};
 }
 
+// The root menu keeps five categories in both link modes. Which five depends on
+// what is actually plugged in: a Betaflight page on a mesh radio would be five
+// dead ends wearing a flight controller's clothes.
+void App::refreshMeshMenus() {
+    if (meshMode()) {
+        menu_ = {
+            {"Mesh network", "nodes, messages, and radio identity", MenuOpenMesh, true},
+            {"Position & GNSS", "LoRa Cap satellite fix and sharing", MenuOpenMeshPosition, true},
+            {"Controls & info", "keymap, help, and build identity", MenuOpenControlsInfo, true},
+            {"Sound & display", "HUD audio, volume, and brightness", MenuOpenSoundDisplay, true},
+            {"Connection & exit", "close the radio link or return to launcher",
+             MenuOpenConnectionExit, true},
+        };
+    } else {
+        menu_ = {
+            {"Flight controller", "checks and common CLI queries", MenuOpenFlightController, true},
+            {"Backup & restore", "save, inspect, or restore configuration",
+             MenuOpenBackupRestore, true},
+            {"Controls & info", "keymap, help, and build identity", MenuOpenControlsInfo, true},
+            {"Sound & display", "HUD audio, volume, and brightness", MenuOpenSoundDisplay, true},
+            {"Connection & exit", "close the FC link or return to launcher",
+             MenuOpenConnectionExit, true},
+        };
+    }
+
+    for (MenuItem& item : meshPositionMenu_) {
+        if (item.id != MenuGnssToggle) continue;
+        item.label = std::string("LoRa Cap GNSS: ") + (gnssWanted_ ? "ON" : "OFF");
+        if (!gnssWanted_) item.hint = "receiver not opened this session";
+        else if (!gnss_.isOpen()) item.hint = "no receiver on " + gnssDevice_;
+        else if (!gnss_.receiverPresent()) item.hint = "open, waiting for NMEA";
+        else if (gnss_.fix().valid) item.hint = gnss_.fix().coordText();
+        else item.hint = "receiver present, searching for a fix";
+    }
+    for (MenuItem& item : meshMenu_) {
+        if (item.id == MenuMeshBroadcast && !mesh_.radio().primaryChannel.empty()) {
+            item.hint = "channel " + mesh_.radio().primaryChannel;
+        }
+    }
+    dirty_ = true;
+}
+
 std::vector<MenuItem>& App::currentMenuItems() {
     switch (menuPage_) {
     case MenuPage::FlightController: return controllerMenu_;
     case MenuPage::BackupRestore:    return backupMenu_;
+    case MenuPage::Mesh:             return meshMenu_;
+    case MenuPage::MeshPosition:     return meshPositionMenu_;
     case MenuPage::ControlsInfo:     return controlsMenu_;
     case MenuPage::SoundDisplay:     return settingsMenu_;
     case MenuPage::ConnectionExit:   return connectionMenu_;
@@ -174,7 +236,10 @@ void App::pushLocal(const std::string& text, LineKind kind) {
 void App::setScreen(Screen s) {
     if (screen_ == s) return;
     screen_ = s;
-    if (screen_ == Screen::Menu) refreshSoundMenu();
+    if (screen_ == Screen::Menu) {
+        refreshSoundMenu();
+        refreshMeshMenus();
+    }
     // A key held across a screen change must not act on the new screen.
     keyboard_.releaseAll();
     dirty_ = true;
@@ -288,6 +353,15 @@ bool App::setup(const Options& opt, std::string& error) {
     term_.setWidth(columns());
     editor_.loadHistory(storage_.loadHistory());
 
+    // The LoRa Cap's AT6668 speaks NMEA on the header UART. On this board that
+    // is /dev/serial0; the config file exists because a different cap revision
+    // or a USB receiver is somebody else's Tuesday.
+    gnssDevice_ = opt_.gnssDevice.empty() ? config_.get("gnss.device", "/dev/serial0")
+                                          : opt_.gnssDevice;
+    gnssBaud_ = config_.getInt("gnss.baud", 115200);
+    if (!isSupportedBaud(gnssBaud_)) gnssBaud_ = 115200;
+    gnssWanted_ = opt_.gnssEnabled && config_.getBool("gnss.enabled", true);
+
     setupMenus();
     refreshSoundMenu();
 
@@ -301,29 +375,43 @@ bool App::setup(const Options& opt, std::string& error) {
     if (opt_.showAbout) {
         openReturnableScreen(Screen::About);
     } else if (!opt_.portOverride.empty()) {
-        std::string cerr;
-        if (session_.connect(opt_.portOverride, opt_.baud, cerr)) {
-            audio_.play(HudCue::LinkUp);
-            beginConnectionSafety(opt_.portOverride);
-            setScreen(Screen::Terminal);
-        } else {
-            pushLocal("connect failed: " + cerr, LineKind::Error);
+        PortInfo forced;
+        forced.device = opt_.portOverride;
+        // Unknown to the scan means the operator named it deliberately, so the
+        // baud they asked for is the baud they get.
+        forced.kind = "uart";
+        for (const PortInfo& p : ports_) {
+            if (p.device == opt_.portOverride) forced = p;
         }
-    } else if (opt_.autoConnect && !ports_.empty() &&
-               ports_.front().looksLikeFlightController()) {
-        portList_.sel = 0;
-        connectSelected();
+        const bool asMesh = opt_.forceMesh || forced.prefersMeshtastic();
+        connectPort(forced, asMesh ? LinkMode::Meshtastic : LinkMode::Betaflight);
+    } else if (opt_.autoConnect && !ports_.empty()) {
+        // Auto-connect only on a strong identity claim. A generic USB bridge
+        // gets the picker, not a protocol guess made on its behalf.
+        const PortInfo& first = ports_.front();
+        if (first.looksLikeFlightController() || first.meshScore >= 90) {
+            portList_.sel = 0;
+            portLinkModeForced_ = false;
+            syncPortLinkMode();
+            connectSelected();
+        }
     }
     return true;
 }
 
 void App::teardown() {
     storage_.saveHistory(editor_.history());
+    flushMeshChats();
     config_.setInt("brightness", brightness_);
     if (!opt_.muteSound) config_.setBool("sound.enabled", soundEnabled_);
     config_.setInt("sound.volume", soundVolume_);
+    config_.setBool("gnss.enabled", gnssWanted_);
+    config_.set("gnss.device", gnssDevice_);
+    config_.setInt("gnss.baud", gnssBaud_);
     std::string err;
     config_.save(storage_, err);
+    mesh_.disconnect();
+    gnss_.close();
     session_.disconnect();
     audio_.shutdown();
     keyboard_.close();
@@ -335,13 +423,307 @@ void App::teardown() {
 void App::refreshPorts() {
     ports_ = enumeratePorts();
     portList_.clamp(static_cast<int>(ports_.size()), bodyRows(false));
+    syncPortLinkMode();
     dirty_ = true;
+}
+
+// The picker proposes the protocol the port's own USB identity argues for. An
+// operator override sticks until the picker is left, because a hand-flashed
+// board can present any identity it likes.
+void App::syncPortLinkMode() {
+    if (portLinkModeForced_) return;
+    if (ports_.empty()) {
+        portLinkMode_ = LinkMode::Betaflight;
+        return;
+    }
+    const PortInfo& port = ports_[static_cast<size_t>(portList_.sel)];
+    portLinkMode_ = port.prefersMeshtastic() ? LinkMode::Meshtastic : LinkMode::Betaflight;
 }
 
 void App::refreshFiles() {
     files_ = storage_.listBackups();
     fileList_.clamp(static_cast<int>(files_.size()), bodyRows(false));
     dirty_ = true;
+}
+
+// ------------------------------------------------------------------- mesh
+
+bool App::linkConnected() const {
+    return meshMode() ? mesh_.connected() : session_.connected();
+}
+
+int App::nodeRowCount() const {
+    return 1 + static_cast<int>(mesh_.nodes().size());
+}
+
+uint32_t App::peerForNodeRow(int row) const {
+    if (row <= 0) return kMeshBroadcast;
+    const std::vector<MeshNode>& nodes = mesh_.nodes();
+    const size_t index = static_cast<size_t>(row - 1);
+    if (index >= nodes.size()) return kMeshBroadcast;
+    return nodes[index].num;
+}
+
+std::string App::peerTitle(uint32_t peer) const {
+    if (peer == kMeshBroadcast) {
+        const std::string& channel = mesh_.radio().primaryChannel;
+        return channel.empty() ? "Broadcast" : "Broadcast / " + channel;
+    }
+    const MeshNode* node = mesh_.findNode(peer);
+    return node ? node->title() : meshNodeIdText(peer);
+}
+
+void App::loadMeshChats() {
+    for (const std::string& name : storage_.listMeshChatFiles()) {
+        uint32_t peer = 0;
+        if (!meshChatPeerFromFileName(name, peer)) continue;
+        std::string text, error;
+        if (!storage_.readFile(storage_.meshDir() + "/" + name, text, error)) continue;
+        mesh_.adoptConversation(peer, parseMeshChat(text));
+    }
+    chatSequenceSeen_ = mesh_.chatSequence();
+}
+
+void App::flushMeshChats() {
+    for (uint32_t peer : mesh_.takeDirtyPeers()) {
+        const std::vector<MeshMessage>* log = mesh_.conversation(peer);
+        const std::string path = storage_.meshDir() + "/" + meshChatFileName(peer);
+        std::string error;
+        if (!log || log->empty()) continue;
+        if (!storage_.writeAtomic(path, formatMeshChat(*log), error)) {
+            // Losing the transcript is worth saying out loud; the message
+            // itself already went out over the air either way.
+            status_ = "chat not saved: " + error;
+            statusUntil_ = nowMs() + 6000;
+        }
+    }
+}
+
+void App::startGnss() {
+    if (!gnssWanted_ || gnss_.isOpen()) return;
+    if (gnssDevice_.empty()) return;
+    // The cap's receiver and a Grove-wired peer can be the same device node.
+    // Whoever the operator deliberately connected keeps it.
+    const std::string linkDevice = meshMode() ? mesh_.device() : session_.device();
+    if (linkConnected() && linkDevice == gnssDevice_) {
+        pushLocal("-- GNSS skipped: " + gnssDevice_ + " is the link port --", LineKind::Warn);
+        return;
+    }
+    std::string error;
+    if (!gnss_.open(gnssDevice_, gnssBaud_, error)) {
+        pushLocal("-- no LoRa Cap GNSS on " + gnssDevice_ + ": " + error + " --",
+                  LineKind::Warn);
+        gnssProbeDeadlineMs_ = 0;
+        return;
+    }
+    gnssProbeDeadlineMs_ = nowMs() + 6000;
+    gnssProbeReported_ = false;
+    pushLocal("-- listening for LoRa Cap GNSS on " + gnssDevice_ + " @ " +
+                  std::to_string(gnssBaud_) + " (NMEA 0183) --",
+              LineKind::Local);
+}
+
+void App::toggleGnss() {
+    gnssWanted_ = !gnssWanted_;
+    config_.setBool("gnss.enabled", gnssWanted_);
+    if (gnssWanted_) {
+        startGnss();
+        status_ = gnss_.isOpen() ? "GNSS receiver opened" : "GNSS receiver unavailable";
+    } else {
+        gnss_.close();
+        gnssProbeDeadlineMs_ = 0;
+        status_ = "GNSS receiver closed";
+    }
+    statusUntil_ = nowMs() + 4000;
+    refreshMeshMenus();
+}
+
+void App::showGnssStatus() {
+    const GnssFix& fix = gnss_.fix();
+    std::string body;
+    if (!gnssWanted_) {
+        body = "The LoRa Cap GNSS is switched off for this session.";
+    } else if (!gnss_.isOpen()) {
+        body = "No receiver is open on " + gnssDevice_ + ".\n\n" +
+               (gnss_.lastError().empty() ? std::string("Fit a Cap LoRa868 / Cap LoRa-1262 "
+                                                        "and restart the probe from this menu.")
+                                          : gnss_.lastError());
+    } else if (!gnss_.receiverPresent()) {
+        body = gnssDevice_ + " opened but has sent no NMEA.\n\n"
+               "That port exists whether or not a cap is fitted, so this is "
+               "reported as absent rather than as a receiver with no fix.";
+    } else {
+        body = "Receiver: " + gnssDevice_ + " @ " + std::to_string(gnssBaud_) + "\n" +
+               "Sentences: " + std::to_string(gnss_.sentenceCount()) + "\n" +
+               "Fix: " + (fix.valid ? "yes" : (fix.everValid ? "lost" : "searching")) + "\n" +
+               "Position: " + fix.coordText() + "\n" +
+               "Satellites: " + std::to_string(fix.satellitesUsed) + " used, " +
+               std::to_string(fix.satellitesInView) + " in view";
+        if (fix.haveAltitude) {
+            body += "\nAltitude: " + std::to_string(static_cast<int>(fix.altitudeM)) + " m";
+        }
+        if (!fix.utc.empty()) body += "\nUTC: " + fix.utc;
+    }
+    notice("LoRa Cap GNSS", body, HudCue::Select);
+}
+
+void App::showRadioInfo() {
+    const MeshRadioInfo& radio = mesh_.radio();
+    if (!meshMode() || !mesh_.connected()) {
+        notice("No radio", "Connect a Meshtastic radio first.");
+        return;
+    }
+    std::string body =
+        "Node: " + meshNodeIdText(radio.myNodeNum) + "\n" +
+        "Firmware: " + (radio.firmwareVersion.empty() ? "not reported" : radio.firmwareVersion) +
+        "\nRole: " + meshRoleName(radio.role) + "\n" +
+        "LoRa: " + radio.loraSummary() + "\n" +
+        "Channel: " + (radio.primaryChannel.empty() ? "not reported" : radio.primaryChannel) +
+        "\nNodes heard: " + std::to_string(mesh_.nodes().size()) + "\n" +
+        "Radio GNSS: " + (radio.havePositionConfig ? meshGpsModeName(radio.gpsMode)
+                                                   : "not reported");
+    notice("Meshtastic radio", body, HudCue::Select);
+}
+
+void App::openChat(uint32_t peer) {
+    chatPeer_ = peer;
+    chatEditor_.clear();
+    chatRowsValid_ = false;
+    chatFollow_ = true;
+    chatScroll_ = 0;
+    mesh_.markRead(peer);
+    meshUnreadSeen_ = mesh_.totalUnread();
+    openReturnableScreen(Screen::Chat);
+}
+
+void App::submitChatLine() {
+    const std::string text = chatEditor_.text();
+    if (text.empty()) return;
+    std::string error;
+    if (!mesh_.sendText(chatPeer_, text, error)) {
+        notice("Not sent", error, HudCue::Error);
+        return;
+    }
+    chatEditor_.commit();
+    chatFollow_ = true;
+    chatRowsValid_ = false;
+    dirty_ = true;
+}
+
+void App::shareMyPosition() {
+    if (!meshMode() || !mesh_.ready()) {
+        notice("Not ready", "Connect a Meshtastic radio first.");
+        return;
+    }
+    if (!gnss_.receiverPresent()) {
+        notice("No LoRa Cap GNSS",
+               "This station has no GNSS receiver reporting on " + gnssDevice_ + ".\n\n"
+               "Position sharing needs the Cap LoRa868 / Cap LoRa-1262 fitted; the "
+               "radio's own position is its business, not this application's.");
+        return;
+    }
+    if (!gnss_.fix().valid) {
+        notice("No fix yet",
+               "The receiver is present but has no current fix.\n\n" +
+                   gnss_.statusText(nowMs()) +
+                   "\n\nGNDHOG will not transmit a stale or invented coordinate.");
+        return;
+    }
+    const uint32_t peer = chatPeer_;
+    confirm("Transmit position?",
+            "Send this station's own GNSS fix to " + peerTitle(peer) + "?\n\n" +
+                gnss_.fix().coordText() + "\n\n"
+                "This keys the radio. Everyone who can decrypt the channel can read it.",
+            "Send", [this, peer]() {
+                std::string error;
+                if (!mesh_.sendPosition(peer, gnss_.fix(), error)) {
+                    notice("Not sent", error, HudCue::Error);
+                    return;
+                }
+                status_ = "position transmitted";
+                statusUntil_ = nowMs() + 4000;
+            });
+}
+
+void App::exportConversation() {
+    const std::vector<MeshMessage>* log = mesh_.conversation(chatPeer_);
+    if (!log || log->empty()) {
+        notice("Nothing to export", "That conversation has no messages yet.");
+        return;
+    }
+    std::ostringstream out;
+    out << "GNDHOG ZERO mesh conversation\n"
+        << "peer: " << peerTitle(chatPeer_) << " (" << meshNodeIdText(chatPeer_) << ")\n"
+        << "radio: " << meshNodeIdText(mesh_.radio().myNodeNum) << "  "
+        << mesh_.radio().loraSummary() << "\n"
+        << "exported: " << timestampCompact() << "\n\n";
+    for (const MeshMessage& message : *log) {
+        const std::time_t stamp = static_cast<std::time_t>(message.stampUtc);
+        std::tm tmv{};
+        ::localtime_r(&stamp, &tmv);
+        char when[32];
+        std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tmv);
+        const MeshNode* from = mesh_.findNode(message.from);
+        out << when << "  "
+            << (message.outgoing ? "this station"
+                                 : (from ? from->title() : meshNodeIdText(message.from)))
+            << ": " << message.text;
+        if (!message.note.empty()) out << "   [" << message.note << "]";
+        out << "\n";
+    }
+    const std::string name = "chat_" +
+                             (chatPeer_ == kMeshBroadcast ? std::string("broadcast")
+                                                          : meshNodeIdText(chatPeer_).substr(1)) +
+                             "_" + timestampCompact() + ".txt";
+    const std::string path = storage_.meshDir() + "/" + name;
+    std::string error;
+    if (!storage_.writeAtomic(path, out.str(), error)) {
+        notice("Could not save", error);
+        return;
+    }
+    notice("Conversation exported", name + "\n\n" + storage_.meshDir(), HudCue::Success);
+}
+
+void App::clearConversation() {
+    const std::vector<MeshMessage>* log = mesh_.conversation(chatPeer_);
+    if (!log || log->empty()) {
+        notice("Nothing to clear", "That conversation has no messages yet.");
+        return;
+    }
+    const uint32_t peer = chatPeer_;
+    const std::string title = peerTitle(peer);
+    confirm("Clear conversation",
+            title + "\n\n" + std::to_string(log->size()) +
+                " message(s) are deleted from this device. Nothing is recalled from "
+                "the mesh, and the other station keeps its own copy.",
+            "Delete", [this, peer]() {
+                mesh_.clearConversation(peer);
+                std::string error;
+                const std::string path = storage_.meshDir() + "/" + meshChatFileName(peer);
+                storage_.deleteMeshChat(path, error);
+                // The dirty list is deliberately left alone: another peer may
+                // have an unwritten message in it, and this is not its problem.
+                chatRowsValid_ = false;
+                chatSequenceSeen_ = mesh_.chatSequence();
+                status_ = "conversation cleared";
+                statusUntil_ = nowMs() + 3000;
+            });
+}
+
+void App::beginMeshSession() {
+    mesh_.clearConversations();
+    mesh_.takeDirtyPeers();
+    loadMeshChats();
+    nodeList_ = ListState{};
+    chatPeer_ = kMeshBroadcast;
+    chatRowsValid_ = false;
+    chatEditor_.clear();
+    nodeSequenceSeen_ = mesh_.nodeSequence();
+    meshNoteSeen_ = mesh_.noteSequence();
+    meshUnreadSeen_ = mesh_.totalUnread();
+    meshFailureReported_ = false;
+    startGnss();
+    refreshMeshMenus();
 }
 
 void App::beginConnectionSafety(const std::string& device) {
@@ -365,26 +747,52 @@ void App::beginConnectionSafety(const std::string& device) {
 
 void App::connectSelected() {
     if (ports_.empty()) return;
-    const PortInfo& p = ports_[static_cast<size_t>(portList_.sel)];
-    if (isDfuId(p.vendorId, p.productId)) {
+    // A copy: connecting can rescan and reorder the vector under us.
+    const PortInfo port = ports_[static_cast<size_t>(portList_.sel)];
+    if (isDfuId(port.vendorId, port.productId)) {
         notice("DFU mode",
                "This device is in the bootloader, not the CLI. Power-cycle the "
                "flight controller and reconnect.");
         return;
     }
+    connectPort(port, portLinkMode_);
+}
+
+void App::connectPort(const PortInfo& port, LinkMode mode) {
     const int baud = kBaudChoices[baudIndex_];
-    std::string err;
-    pushLocal("connecting to " + p.device + (p.kind == "uart"
-                                                 ? " @ " + std::to_string(baud)
-                                                 : ""),
-              LineKind::Local);
-    if (!session_.connect(p.device, baud, err)) {
-        pushLocal("connect failed: " + err, LineKind::Error);
-        notice("Could not open port", err, HudCue::Error);
+    std::string error;
+
+    if (mode == LinkMode::Meshtastic) {
+        // USB CDC ignores the line rate; a cap or Grove-wired radio does not.
+        const int meshBaud = port.kind == "uart" ? baud : 115200;
+        pushLocal("connecting to " + port.device + " as a Meshtastic radio" +
+                      (port.kind == "uart" ? " @ " + std::to_string(meshBaud) : ""),
+                  LineKind::Local);
+        if (!mesh_.connect(port.device, meshBaud, error)) {
+            pushLocal("connect failed: " + error, LineKind::Error);
+            notice("Could not open port", error, HudCue::Error);
+            return;
+        }
+        linkMode_ = LinkMode::Meshtastic;
+        audio_.play(HudCue::LinkUp);
+        beginMeshSession();
+        setScreen(Screen::Nodes);
         return;
     }
+
+    pushLocal("connecting to " + port.device + (port.kind == "uart"
+                                                    ? " @ " + std::to_string(baud)
+                                                    : ""),
+              LineKind::Local);
+    if (!session_.connect(port.device, baud, error)) {
+        pushLocal("connect failed: " + error, LineKind::Error);
+        notice("Could not open port", error, HudCue::Error);
+        return;
+    }
+    linkMode_ = LinkMode::Betaflight;
+    refreshMeshMenus();
     audio_.play(HudCue::LinkUp);
-    beginConnectionSafety(p.device);
+    beginConnectionSafety(port.device);
     setScreen(Screen::Terminal);
 }
 
@@ -482,6 +890,15 @@ void App::performThermalTrip(int temperatureC) {
 
 void App::finishDisconnect(bool exitAfter) {
     diagnosticRunning_ = false;
+    if (meshMode()) {
+        // The transcript on disk has to match what was on screen, so the last
+        // change is written before the link and its node table go away.
+        flushMeshChats();
+        mesh_.disconnect();
+        linkMode_ = LinkMode::Betaflight;
+        portLinkModeForced_ = false;
+        refreshMeshMenus();
+    }
     session_.disconnect();
     pushLocal("-- disconnected --", LineKind::Warn);
     nextTemperatureCheckMs_ = 0;
@@ -498,6 +915,12 @@ void App::finishDisconnect(bool exitAfter) {
 }
 
 void App::requestDisconnect(bool exitAfter) {
+    // A mesh radio has no bench guard to unwind: nothing was changed on it, so
+    // closing the port is the whole of the operation.
+    if (meshMode()) {
+        finishDisconnect(exitAfter);
+        return;
+    }
     if (!session_.connected()) {
         finishDisconnect(exitAfter);
         return;
@@ -881,6 +1304,37 @@ void App::applyMenu(int id) {
     case MenuOpenBackupRestore:
         openMenuPage(MenuPage::BackupRestore);
         break;
+    case MenuOpenMesh:
+        openMenuPage(MenuPage::Mesh);
+        break;
+    case MenuOpenMeshPosition:
+        refreshMeshMenus();
+        openMenuPage(MenuPage::MeshPosition);
+        break;
+    case MenuMeshNodes:
+        openReturnableScreen(Screen::Nodes);
+        break;
+    case MenuMeshBroadcast:
+        openChat(kMeshBroadcast);
+        break;
+    case MenuMeshRadioInfo:
+        showRadioInfo();
+        break;
+    case MenuMeshExport:
+        exportConversation();
+        break;
+    case MenuMeshClear:
+        clearConversation();
+        break;
+    case MenuGnssToggle:
+        toggleGnss();
+        break;
+    case MenuGnssStatus:
+        showGnssStatus();
+        break;
+    case MenuMeshShare:
+        shareMyPosition();
+        break;
     case MenuOpenControlsInfo:
         openMenuPage(MenuPage::ControlsInfo);
         break;
@@ -963,8 +1417,20 @@ void App::onPortsKey(const KeyEvent& e) {
     const int rows = bodyRows(false);
     const int n = static_cast<int>(ports_.size());
     switch (e.key) {
-    case Key::Up:   portList_.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::Down: portList_.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Up:
+        portList_.move(-1, n, rows);
+        portLinkModeForced_ = false;
+        syncPortLinkMode();
+        audio_.play(HudCue::Navigate);
+        dirty_ = true;
+        break;
+    case Key::Down:
+        portList_.move(+1, n, rows);
+        portLinkModeForced_ = false;
+        syncPortLinkMode();
+        audio_.play(HudCue::Navigate);
+        dirty_ = true;
+        break;
     case Key::Enter: audio_.play(HudCue::Select); connectSelected(); break;
     case Key::Escape: audio_.play(HudCue::Back); running_ = false; break;
     case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); break;
@@ -975,6 +1441,18 @@ void App::onPortsKey(const KeyEvent& e) {
             statusUntil_ = nowMs() + 2000;
         } else if (e.ch == 'b' || e.ch == 'B') {
             baudIndex_ = (baudIndex_ + 1) % kBaudChoiceCount;
+            dirty_ = true;
+        } else if (e.ch == 'm' || e.ch == 'M') {
+            // The identity is a strong hint, not a verdict. A radio flashed
+            // onto an FC-shaped board is still a radio.
+            portLinkMode_ = portLinkMode_ == LinkMode::Meshtastic ? LinkMode::Betaflight
+                                                                 : LinkMode::Meshtastic;
+            portLinkModeForced_ = true;
+            audio_.play(HudCue::Select);
+            status_ = portLinkMode_ == LinkMode::Meshtastic
+                          ? "Enter opens this port as a Meshtastic radio"
+                          : "Enter opens this port as a Betaflight CLI";
+            statusUntil_ = nowMs() + 3000;
             dirty_ = true;
         } else if (e.ch == 'f' || e.ch == 'F') {
             refreshFiles();
@@ -993,7 +1471,41 @@ void App::onPortsKey(const KeyEvent& e) {
 }
 
 void App::onTerminalKey(const KeyEvent& e) {
-    const int rows = bodyRows(true);
+    const int rows = bodyRows(!meshMode());
+
+    // With a radio attached there is no prompt to type at: this screen is the
+    // firmware's own console, so it scrolls and gets out of the way.
+    if (meshMode()) {
+        switch (e.key) {
+        case Key::Up:       term_.scrollBy(-1, rows); dirty_ = true; return;
+        case Key::Down:     term_.scrollBy(+1, rows); dirty_ = true; return;
+        case Key::PageUp:   term_.scrollBy(-(rows - 1), rows); dirty_ = true; return;
+        case Key::PageDown: term_.scrollBy(rows - 1, rows); dirty_ = true; return;
+        case Key::Escape:
+        case Key::F9:
+            audio_.play(HudCue::Back);
+            openMenuPage(MenuPage::Root);
+            menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
+            setScreen(Screen::Menu);
+            return;
+        case Key::Help:
+        case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
+        case Key::F2: showRadioInfo(); return;
+        case Key::F3:
+        case Key::Enter: setScreen(Screen::Nodes); return;
+        case Key::F6: showGnssStatus(); return;
+        case Key::F10: requestDisconnect(false); return;
+        case Key::BrightUp:   adjustBrightness(+10); return;
+        case Key::BrightDown: adjustBrightness(-10); return;
+        case Key::Char:
+            if (e.ch == 'n' || e.ch == 'N') setScreen(Screen::Nodes);
+            else if (e.ch == 'i' || e.ch == 'I') showRadioInfo();
+            else if (e.ch == 'g' || e.ch == 'G') showGnssStatus();
+            else if (e.ch == 'c' || e.ch == 'C') { term_.clear(); dirty_ = true; }
+            return;
+        default: return;
+        }
+    }
 
     if (e.ctrl && e.key == Key::Char) {
         switch (e.ch) {
@@ -1205,6 +1717,126 @@ void App::onHelpKey(const KeyEvent& e) {
     }
 }
 
+void App::onNodesKey(const KeyEvent& e) {
+    const int rows = bodyRows(false);
+    const int n = nodeRowCount();
+
+    switch (e.key) {
+    case Key::Up:   nodeList_.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Down: nodeList_.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageUp:   nodeList_.move(-rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageDown: nodeList_.move(+rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Enter:
+        audio_.play(HudCue::Select);
+        openChat(peerForNodeRow(nodeList_.sel));
+        break;
+    case Key::Escape:
+        audio_.play(HudCue::Back);
+        // Opened from a menu category, Escape goes back to that category, the
+        // way every other menu-owned screen behaves. Reached as the mesh home
+        // screen, it opens the menu instead.
+        if (returnScreen_ == Screen::Menu) {
+            setScreen(Screen::Menu);
+        } else {
+            openMenuPage(MenuPage::Root);
+            menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
+            setScreen(Screen::Menu);
+        }
+        break;
+    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); break;
+    case Key::F2: showRadioInfo(); break;
+    case Key::F5:
+        chatPeer_ = peerForNodeRow(nodeList_.sel);
+        shareMyPosition();
+        break;
+    case Key::F6: showGnssStatus(); break;
+    case Key::F9:
+        openMenuPage(MenuPage::Root);
+        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
+        setScreen(Screen::Menu);
+        break;
+    case Key::F10: requestDisconnect(false); break;
+    case Key::Char:
+        if (e.ch == 'i' || e.ch == 'I') showRadioInfo();
+        else if (e.ch == 'g' || e.ch == 'G') showGnssStatus();
+        else if (e.ch == 'l' || e.ch == 'L') {
+            term_.scrollToBottom(bodyRows(false));
+            openReturnableScreen(Screen::Terminal);
+        } else if (e.ch == 'p' || e.ch == 'P') {
+            chatPeer_ = peerForNodeRow(nodeList_.sel);
+            shareMyPosition();
+        }
+        break;
+    default: break;
+    }
+}
+
+void App::onChatKey(const KeyEvent& e) {
+    const int rows = bodyRows(true);
+
+    if (e.ctrl && e.key == Key::Char) {
+        switch (e.ch) {
+        case 'u': chatEditor_.killToStart(); dirty_ = true; return;
+        case 'k': chatEditor_.killToEnd(); dirty_ = true; return;
+        case 'w': chatEditor_.killWordBack(); dirty_ = true; return;
+        case 'a': chatEditor_.home(); dirty_ = true; return;
+        case 'e': chatEditor_.end(); dirty_ = true; return;
+        case 'c': chatEditor_.clear(); dirty_ = true; return;
+        default: break;
+        }
+    }
+
+    switch (e.key) {
+    case Key::Enter:
+        audio_.play(HudCue::Command);
+        submitChatLine();
+        dirty_ = true;
+        return;
+    case Key::Backspace: chatEditor_.backspace(); dirty_ = true; return;
+    case Key::Delete:    chatEditor_.del(); dirty_ = true; return;
+    case Key::Left:      chatEditor_.left(e.ctrl); dirty_ = true; return;
+    case Key::Right:     chatEditor_.right(e.ctrl); dirty_ = true; return;
+    case Key::Home:      chatEditor_.home(); dirty_ = true; return;
+    case Key::End:       chatEditor_.end(); dirty_ = true; return;
+    case Key::Up:        chatEditor_.historyPrev(); dirty_ = true; return;
+    case Key::Down:      chatEditor_.historyNext(); dirty_ = true; return;
+    case Key::PageUp:
+        chatScroll_ = std::max(0, chatScroll_ - (rows - 1));
+        chatFollow_ = false;
+        dirty_ = true;
+        return;
+    case Key::PageDown: {
+        const int total = static_cast<int>(chatRows_.size());
+        chatScroll_ = std::min(std::max(0, total - rows), chatScroll_ + (rows - 1));
+        if (chatScroll_ >= std::max(0, total - rows)) chatFollow_ = true;
+        dirty_ = true;
+        return;
+    }
+    case Key::Escape:
+        audio_.play(HudCue::Back);
+        setScreen(returnScreen_ == Screen::Chat ? Screen::Nodes : returnScreen_);
+        return;
+    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
+    case Key::F2: showRadioInfo(); return;
+    case Key::F3: openReturnableScreen(Screen::Nodes); return;
+    case Key::F5: shareMyPosition(); return;
+    case Key::F6: showGnssStatus(); return;
+    case Key::F9:
+        openMenuPage(MenuPage::Root);
+        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
+        setScreen(Screen::Menu);
+        return;
+    case Key::F10: requestDisconnect(false); return;
+    case Key::BrightUp:   adjustBrightness(+10); return;
+    case Key::BrightDown: adjustBrightness(-10); return;
+    case Key::Char:
+        chatEditor_.insert(e.ch);
+        dirty_ = true;
+        return;
+    default: return;
+    }
+}
+
 void App::handleKey(const KeyEvent& e) {
     lastKey_ = e;
     haveLastKey_ = true;
@@ -1222,6 +1854,8 @@ void App::handleKey(const KeyEvent& e) {
     case Screen::Keymap:   onKeymapKey(e); break;
     case Screen::Help:     onHelpKey(e); break;
     case Screen::About:    onAboutKey(e); break;
+    case Screen::Nodes:    onNodesKey(e); break;
+    case Screen::Chat:     onChatKey(e); break;
     }
 }
 
@@ -1235,6 +1869,12 @@ void App::onAboutKey(const KeyEvent& e) {
 // --------------------------------------------------------------- main loop
 
 void App::tick(uint64_t now) {
+    pollGnss(now);
+    if (meshMode()) {
+        tickMesh(now);
+        return;
+    }
+
     const uint64_t arrivalsBefore = term_.linesEver();
     session_.poll(now);
     if (term_.linesEver() != arrivalsBefore || session_.busy()) {
@@ -1404,6 +2044,10 @@ void App::tick(uint64_t now) {
     } else {
         linkLossHandled_ = false;
     }
+    tickStatusTail(now);
+}
+
+void App::tickStatusTail(uint64_t now) {
     const std::string audioError = audio_.lastError();
     if (audioError != lastAudioError_) {
         lastAudioError_ = audioError;
@@ -1417,6 +2061,91 @@ void App::tick(uint64_t now) {
         status_.clear();
         dirty_ = true;
     }
+}
+
+// The cap's receiver is independent of whichever radio or flight controller is
+// on the other port, so it is polled in both link modes.
+void App::pollGnss(uint64_t now) {
+    if (!gnss_.isOpen()) return;
+    const bool hadFix = gnss_.fix().valid;
+    const int before = gnss_.sentenceCount();
+    gnss_.poll(now);
+    if (gnss_.sentenceCount() != before || gnss_.fix().valid != hadFix) dirty_ = true;
+
+    if (gnssProbeDeadlineMs_ == 0 || gnssProbeReported_ || now < gnssProbeDeadlineMs_) return;
+    gnssProbeReported_ = true;
+    if (gnss_.receiverPresent()) {
+        pushLocal("-- LoRa Cap GNSS present: " + std::to_string(gnss_.sentenceCount()) +
+                      " NMEA sentences --",
+                  LineKind::Good);
+    } else {
+        // Holding a UART nothing is talking on helps nobody, and on this board
+        // that node is also the Grove header.
+        gnss_.close();
+        pushLocal("-- no NMEA on " + gnssDevice_ + "; treating the LoRa Cap GNSS as absent --",
+                  LineKind::Warn);
+    }
+    refreshMeshMenus();
+}
+
+void App::tickMesh(uint64_t now) {
+    const uint64_t arrivalsBefore = term_.linesEver();
+    mesh_.poll(now);
+    if (term_.linesEver() != arrivalsBefore) {
+        if (term_.following()) term_.scrollToBottom(bodyRows(false));
+        dirty_ = true;
+    }
+
+    if (mesh_.nodeSequence() != nodeSequenceSeen_) {
+        nodeSequenceSeen_ = mesh_.nodeSequence();
+        dirty_ = true;
+    }
+
+    if (mesh_.chatSequence() != chatSequenceSeen_) {
+        chatSequenceSeen_ = mesh_.chatSequence();
+        chatRowsValid_ = false;
+        dirty_ = true;
+        if (screen_ == Screen::Chat) mesh_.markRead(chatPeer_);
+        flushMeshChats();
+    }
+
+    const int unread = mesh_.totalUnread();
+    if (unread > meshUnreadSeen_) audio_.play(HudCue::Prompt);
+    meshUnreadSeen_ = unread;
+
+    if (mesh_.noteSequence() != meshNoteSeen_) {
+        meshNoteSeen_ = mesh_.noteSequence();
+        status_ = mesh_.note();
+        statusUntil_ = now + 5000;
+        dirty_ = true;
+    }
+
+    if (mesh_.state() == MeshState::Failed && !meshFailureReported_ && !modal_) {
+        meshFailureReported_ = true;
+        audio_.play(HudCue::Error);
+        notice("No Meshtastic radio",
+               "The device on " + mesh_.device() +
+                   " did not answer the client API.\n\n"
+                   "Check that this is the radio's port, that the firmware is running, "
+                   "and that nothing else already holds the connection.",
+               HudCue::Error);
+    }
+
+    if (mesh_.linkLost()) {
+        if (!linkLossHandled_) {
+            linkLossHandled_ = true;
+            audio_.play(HudCue::LinkDown);
+            flushMeshChats();
+            refreshPorts();
+            status_ = "radio link lost - Esc for the menu to reconnect";
+            statusUntil_ = now + 6000;
+            dirty_ = true;
+        }
+    } else {
+        linkLossHandled_ = false;
+    }
+
+    tickStatusTail(now);
 }
 
 int App::run(const Options& opt) {
@@ -1501,6 +2230,62 @@ int App::run(const Options& opt) {
         render();
         if (display_.canvas().writePpm(opt.previewDir + "/18-vtx-restore.ppm")) ++written;
         closeModal();
+
+        // The mesh screens are worth seeing with real traffic in them, so the
+        // preview drives the simulated radio rather than painting invented
+        // node rows that no decoder ever produced.
+        SimMesh previewMesh;
+        std::string previewError;
+        if (previewMesh.start(previewError) &&
+            mesh_.connect(previewMesh.devicePath(), 115200, previewError)) {
+            const uint64_t ready = nowMs() + 4000;
+            while (nowMs() < ready && !mesh_.ready()) {
+                previewMesh.pump();
+                mesh_.poll(nowMs());
+                sleepMs(4);
+            }
+        }
+        if (mesh_.ready()) {
+            linkMode_ = LinkMode::Meshtastic;
+            refreshMeshMenus();
+            // The Betaflight fixture lines above belong to the other shots.
+            term_.clear();
+            chatPeer_ = previewMesh.hilltopNodeNum();
+            previewMesh.injectText(previewMesh.hilltopNodeNum(), mesh_.radio().myNodeNum,
+                                   "gate is open, road is clear past the ford");
+            std::string sendError;
+            mesh_.sendText(chatPeer_, "rolling in ten, keep the channel", sendError);
+            const uint64_t settle = nowMs() + 1200;
+            while (nowMs() < settle) {
+                previewMesh.pump();
+                mesh_.poll(nowMs());
+                sleepMs(4);
+            }
+            chatRowsValid_ = false;
+            chatFollow_ = true;
+
+            const struct { Screen screen; MenuPage page; const char* name; } kMeshShots[] = {
+                {Screen::Nodes, MenuPage::Root, "19-mesh-nodes"},
+                {Screen::Chat, MenuPage::Root, "20-mesh-chat"},
+                {Screen::Menu, MenuPage::Root, "21-mesh-menu"},
+                {Screen::Menu, MenuPage::Mesh, "22-mesh-network"},
+                {Screen::Menu, MenuPage::MeshPosition, "23-mesh-position-gnss"},
+                {Screen::Terminal, MenuPage::Root, "24-mesh-radio-log"},
+            };
+            for (const auto& shot : kMeshShots) {
+                screen_ = shot.screen;
+                menuPage_ = shot.page;
+                render();
+                if (display_.canvas().writePpm(opt.previewDir + "/" + shot.name + ".ppm")) {
+                    ++written;
+                }
+            }
+            menuPage_ = MenuPage::Root;
+            mesh_.disconnect();
+        } else if (!previewError.empty()) {
+            std::printf("mesh preview skipped: %s\n", previewError.c_str());
+        }
+
         std::printf("wrote %d previews to %s\n", written, opt.previewDir.c_str());
         teardown();
         return written > 0 ? 0 : 1;
@@ -1524,6 +2309,26 @@ int App::run(const Options& opt) {
         setScreen(Screen::Terminal);
     }
 
+    SimMesh simMesh;
+    if (opt.simulateMesh && !opt.showAbout) {
+        std::string simErr;
+        if (!simMesh.start(simErr)) {
+            std::fprintf(stderr, "%s: mesh simulator: %s\n", kAppName, simErr.c_str());
+            teardown();
+            return 1;
+        }
+        std::string cerr;
+        pushLocal("simulated Meshtastic radio on " + simMesh.devicePath(), LineKind::Local);
+        if (mesh_.connect(simMesh.devicePath(), 115200, cerr)) {
+            linkMode_ = LinkMode::Meshtastic;
+            audio_.play(HudCue::LinkUp);
+            beginMeshSession();
+            setScreen(Screen::Nodes);
+        } else {
+            pushLocal("mesh connect failed: " + cerr, LineKind::Error);
+        }
+    }
+
     RawTerminalMode rawTty(opt.stdinKeys || !keyboard_.anyOpen());
 
     const uint64_t frameMs = 33;   // ~30 fps, matching the reference UI target
@@ -1537,11 +2342,14 @@ int App::run(const Options& opt) {
         std::vector<pollfd> pfds;
         for (int fd : keyboard_.fds()) pfds.push_back(pollfd{fd, POLLIN, 0});
         if (session_.connected()) pfds.push_back(pollfd{session_.fd(), POLLIN, 0});
+        if (mesh_.connected()) pfds.push_back(pollfd{mesh_.fd(), POLLIN, 0});
+        if (gnss_.isOpen()) pfds.push_back(pollfd{gnss_.fd(), POLLIN, 0});
         if (!keyboard_.anyOpen() || opt.stdinKeys) {
             pfds.push_back(pollfd{STDIN_FILENO, POLLIN, 0});
         }
         int waitMs = static_cast<int>(nextFrame > now ? nextFrame - now : 0);
         if (session_.busy() || session_.job().active()) waitMs = std::min(waitMs, 10);
+        if (mesh_.connected() && !mesh_.ready()) waitMs = std::min(waitMs, 10);
         if (!pfds.empty()) ::poll(pfds.data(), pfds.size(), waitMs);
         else sleepMs(waitMs);
 
@@ -1555,6 +2363,7 @@ int App::run(const Options& opt) {
         }
 
         if (opt.simulate) sim.pump();
+        if (opt.simulateMesh) simMesh.pump();
         tick(nowMs());
 
         if (nowMs() >= nextFrame) {

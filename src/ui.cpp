@@ -4,9 +4,21 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <ctime>
 
 namespace bf {
 namespace {
+
+std::string meshStateText(MeshState s) {
+    switch (s) {
+    case MeshState::Disconnected: return "offline";
+    case MeshState::Waking:       return "waking";
+    case MeshState::Configuring:  return "node sync";
+    case MeshState::Ready:        return "ready";
+    case MeshState::Failed:       return "failed";
+    }
+    return "?";
+}
 
 std::string stateText(SessionState s) {
     switch (s) {
@@ -118,28 +130,65 @@ const char* const kHelpText[] = {
     "  FC configuration. It separates CLI/MSP blockers",
     "  from current arming faults and keeps raw output.",
     "  MCU temperature is watched every 30s while idle;",
-    "  closing the serial link does not remove USB power.",
+    "  closing the serial link does not cut USB power.",
     "  It is a snapshot, not an airworthiness verdict.",
     "",
     "BACKUP AND RESTORE",
-    "  Backup runs `diff all` and writes a file named the",
-    "  way Betaflight Configurator names it, so the two",
-    "  are interchangeable.",
+    "  Backup runs `diff all` and writes a file named",
+    "  the way Betaflight Configurator names it, so the",
+    "  two are interchangeable.",
     "  Restore sends the file line by line and waits for",
-    "  each prompt. Nothing is kept until you run `save`.",
+    "  each prompt. Nothing is kept until you `save`.",
     "",
     "SAFETY",
     "  A command that can spin a motor or wipe settings",
-    "  asks first. A ready VTX can enter verified pit mode",
-    "  before CLI. Disconnect can reboot the FC to restore",
-    "  its saved flight state; cancel leaves pit mode active",
-    "  until the FC is rebooted or power-cycled.",
+    "  asks first. A ready VTX can enter verified pit",
+    "  mode before CLI. Disconnect can reboot the FC to",
+    "  restore its saved flight state. Cancel leaves pit",
+    "  mode active until the FC reboots or loses power.",
     "",
     "CONNECTION",
     "  Set the Host/Slave switch to HOST and plug the FC",
     "  into the USB-A port. It appears as ttyACM0.",
     "  A spare FC UART can be wired to Grove instead;",
     "  pick the port and baud on the connect screen.",
+    "  The picker proposes a protocol from the USB",
+    "  identity. Press M to override it before Enter.",
+    "",
+    "MESHTASTIC",
+    "  A Meshtastic radio (M5Stack Unit C6L and friends)",
+    "  opens as a mesh link instead of a CLI. GNDHOG",
+    "  downloads the node database, then lists every",
+    "  radio it has heard, and how long ago it was.",
+    "  Enter opens a conversation; type and press Enter",
+    "  to send. A direct message waits for the mesh",
+    "  routing ACK: + delivered, . waiting, ! rejected.",
+    "  A broadcast is marked sent, because the mesh does",
+    "  not acknowledge one.",
+    "  Transcripts are kept per node under the data dir",
+    "  and reload on the next launch.",
+    "  Nothing is transmitted that you did not type. The",
+    "  only automatic traffic is a config request and a",
+    "  five-minute heartbeat, and neither leaves the USB",
+    "  cable.",
+    "",
+    "MESH KEYS",
+    "  Enter        open the highlighted conversation",
+    "  I            radio firmware, region, and preset",
+    "  G            LoRa Cap GNSS status",
+    "  P / Fn+5     transmit this station's own position",
+    "  L            the radio's console log",
+    "  N            back to the node list from the log",
+    "",
+    "LORA CAP GNSS",
+    "  If a Cap LoRa868 / Cap LoRa-1262 is fitted, its",
+    "  AT6668 receiver is read as NMEA 0183 on",
+    "  /dev/serial0 at 115200. A fix gives range and",
+    "  bearing to any node that reported a position, and",
+    "  can be transmitted on request. With no receiver",
+    "  or no fix, GNDHOG says so instead of inventing a",
+    "  coordinate. Set gnss.device in config.ini to move",
+    "  it, or launch with --no-gnss.",
 };
 constexpr int kHelpLines = static_cast<int>(sizeof(kHelpText) / sizeof(kHelpText[0]));
 
@@ -163,8 +212,17 @@ void App::drawTopBar(Surface& s) {
     case Screen::Keymap: mid = "keymap"; break;
     case Screen::Help:   mid = "help"; break;
     case Screen::About:  mid = "about"; break;
+    case Screen::Nodes:  mid = "mesh nodes"; break;
+    case Screen::Chat:
+        mid = peerTitle(chatPeer_);
+        break;
     case Screen::Terminal:
-        if (!session_.connected()) {
+        if (meshMode()) {
+            mid = mesh_.connected()
+                      ? mesh_.device().substr(mesh_.device().find_last_of('/') + 1) +
+                            " radio log"
+                      : "radio log";
+        } else if (!session_.connected()) {
             // The state chip already says "offline". Keep the middle label as
             // screen context instead of printing the same state twice.
             mid = "terminal";
@@ -175,15 +233,36 @@ void App::drawTopBar(Surface& s) {
         }
         break;
     }
+    if (meshMode() && (screen_ == Screen::Nodes || screen_ == Screen::Chat) &&
+        mesh_.radio().myNodeNum != 0) {
+        const MeshNode* self = mesh_.findNode(mesh_.radio().myNodeNum);
+        if (self && screen_ == Screen::Nodes) mid = self->label() + "  mesh nodes";
+    }
+
     // Right-hand state chip.
-    const std::string st = stateText(session_.state());
+    std::string st;
     Color chip = theme::textDim;
-    if (session_.state() == SessionState::Ready) chip = theme::ok;
-    else if (session_.state() == SessionState::Busy ||
-             session_.state() == SessionState::AwaitingVtxChoice ||
-             session_.state() == SessionState::ApplyingVtxGuard ||
-             session_.state() == SessionState::Rebooting) chip = theme::warn;
-    else if (session_.state() == SessionState::Failed) chip = theme::err;
+    if (meshMode()) {
+        st = meshStateText(mesh_.state());
+        if (mesh_.state() == MeshState::Ready) {
+            // Ready but muted is not the same as ready. The chip is the only
+            // place an operator looks before typing a message.
+            chip = mesh_.radio().loraReady() ? theme::ok : theme::warn;
+            if (!mesh_.radio().loraReady()) st = "no TX";
+        } else if (mesh_.state() == MeshState::Failed) {
+            chip = theme::err;
+        } else if (mesh_.state() != MeshState::Disconnected) {
+            chip = theme::warn;
+        }
+    } else {
+        st = stateText(session_.state());
+        if (session_.state() == SessionState::Ready) chip = theme::ok;
+        else if (session_.state() == SessionState::Busy ||
+                 session_.state() == SessionState::AwaitingVtxChoice ||
+                 session_.state() == SessionState::ApplyingVtxGuard ||
+                 session_.state() == SessionState::Rebooting) chip = theme::warn;
+        else if (session_.state() == SessionState::Failed) chip = theme::err;
+    }
     const int chipW = textWidth(st) + 8;
     const int chipX = s.w - chipW;
     fillRect(s, chipX, 0, chipW, kTopH, theme::panelHi);
@@ -305,16 +384,17 @@ void App::drawPorts(Surface& s) {
                 fillRect(s, 0, y, 2, kGlyphH, theme::accent);
             }
             drawText(s, 2, y, selected ? ">" : " ", theme::accent);
-            const Color fg = p.looksLikeFlightController()
-                                 ? theme::ok
-                                 : (isDfuId(p.vendorId, p.productId) ? theme::warn : theme::text);
+            Color fg = theme::text;
+            if (isDfuId(p.vendorId, p.productId)) fg = theme::warn;
+            else if (p.prefersMeshtastic() && p.looksLikeMeshtastic()) fg = theme::echo;
+            else if (p.looksLikeFlightController()) fg = theme::ok;
             drawTextClipped(s, 2 + kGlyphW, y, p.label(), cols - 3, fg);
         }
         drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, portList_.top, rows,
                       static_cast<int>(ports_.size()));
     }
 
-    std::string hint = "R scan  F files  H help  A about";
+    std::string hint = "R scan  M protocol  F files  H help  A about";
     if (!ports_.empty()) {
         const PortInfo& p = ports_[static_cast<size_t>(portList_.sel)];
         std::string detail = p.detail();
@@ -323,14 +403,20 @@ void App::drawPorts(Surface& s) {
                       std::string("baud ") + std::to_string(kBaudChoices[baudIndex_]) +
                       "  B changes";
         }
-        if (!detail.empty()) hint = detail + "  A about";
+        if (!detail.empty()) hint = detail + "  M protocol";
     }
-    drawHintBar(s, hint, ports_.empty() ? "Esc quit" : "Enter link  Esc quit");
+    const std::string action =
+        ports_.empty() ? "Esc quit"
+                       : (portLinkMode_ == LinkMode::Meshtastic ? "Enter mesh" : "Enter CLI");
+    drawHintBar(s, hint, action);
 }
 
 void App::drawTerminal(Surface& s) {
     const int cols = columns();
-    const int rows = bodyRows(true);
+    // A radio has no prompt, so its console gets the whole body instead of
+    // leaving a row for an input line that could not do anything.
+    const bool withInput = !meshMode();
+    const int rows = bodyRows(withInput);
     term_.setWidth(cols - 1);   // leave a column for the scrollbar
 
     const int total = static_cast<int>(term_.rowCount());
@@ -342,6 +428,13 @@ void App::drawTerminal(Surface& s) {
                  colorFor(term_.rowKind(static_cast<size_t>(idx))));
     }
     drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, first, rows, total);
+
+    if (!withInput) {
+        std::string hints = term_.following() ? "N nodes  I radio  G GNSS  C clear"
+                                              : "scrolled back - Fn+M returns to live";
+        drawHintBar(s, hints, "Esc menu");
+        return;
+    }
 
     // A running job replaces the input line with a progress bar.
     const int inputY = s.h - kHintH - kInputH;
@@ -423,6 +516,8 @@ void App::drawMenu(Surface& s) {
             switch (menuPage_) {
             case MenuPage::FlightController: title = "Flight controller"; break;
             case MenuPage::BackupRestore:    title = "Backup & restore"; break;
+            case MenuPage::Mesh:             title = "Mesh network"; break;
+            case MenuPage::MeshPosition:     title = "Position & GNSS"; break;
             case MenuPage::ControlsInfo:     title = "Controls & info"; break;
             case MenuPage::SoundDisplay:     title = "Sound & display"; break;
             case MenuPage::ConnectionExit:   title = "Connection & exit"; break;
@@ -667,6 +762,253 @@ void App::drawAbout(Surface& s) {
     drawHintBar(s, "Enter returns", "Esc back");
 }
 
+void App::drawNodes(Surface& s) {
+    const int rows = bodyRows(false);
+    const int count = nodeRowCount();
+    nodeList_.clamp(count, rows);
+
+    const std::vector<MeshNode>& nodes = mesh_.nodes();
+    const uint64_t now = nowMs();
+    const GnssFix& fix = gnss_.fix();
+
+    for (int i = 0; i < rows; ++i) {
+        const int index = nodeList_.top + i;
+        if (index >= count) break;
+        const int y = kBodyY + i * kGlyphH;
+        const bool selected = index == nodeList_.sel;
+        if (selected) {
+            fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
+            fillRect(s, 0, y, 2, kGlyphH, theme::accent);
+        }
+
+        const uint32_t peer = peerForNodeRow(index);
+        const int unread = mesh_.unread(peer);
+        drawText(s, 2, y, unread > 0 ? "*" : (selected ? ">" : " "),
+                 unread > 0 ? theme::warn : theme::accent);
+
+        std::string tag, title, right;
+        Color fg = theme::text;
+        if (index == 0) {
+            tag = "ALL ";
+            const std::string& channel = mesh_.radio().primaryChannel;
+            title = channel.empty() ? "Broadcast" : "Broadcast - " + channel;
+            const std::vector<MeshMessage>* log = mesh_.conversation(kMeshBroadcast);
+            if (log && !log->empty()) right = std::to_string(log->size()) + " msg";
+            fg = theme::accent;
+        } else {
+            const MeshNode& node = nodes[static_cast<size_t>(index - 1)];
+            tag = node.label();
+            if (tag.size() > 4) tag.resize(4);
+            while (tag.size() < 4) tag.push_back(' ');
+            title = node.title();
+            if (node.isSelf) {
+                title += "  (this radio)";
+                fg = theme::ok;
+            } else if (node.heardLocalMs == 0 && node.lastHeard == 0) {
+                // In the database because the radio listed it, not because we
+                // have heard it ourselves.
+                fg = theme::textDim;
+            }
+            // "Heard N ago" is a fact. "Online" would be a guess about a radio
+            // that may simply have nothing to say.
+            if (node.heardLocalMs != 0) {
+                right = meshAgeText((now - node.heardLocalMs) / 1000);
+            } else if (node.lastHeard != 0) {
+                const int64_t age = static_cast<int64_t>(::time(nullptr)) -
+                                    static_cast<int64_t>(node.lastHeard);
+                right = age > 0 ? meshAgeText(static_cast<uint64_t>(age)) : "now";
+            } else {
+                right = "-";
+            }
+        }
+
+        drawText(s, 2 + kGlyphW, y, tag, selected ? theme::accent : theme::textDim);
+        const int titleX = 2 + 6 * kGlyphW;
+        const int rightW = static_cast<int>(right.size());
+        const int titleMax = std::max(1, (s.w - 6 - titleX) / kGlyphW - rightW - 1);
+        drawTextClipped(s, titleX, y, title, titleMax, fg);
+        if (!right.empty()) {
+            drawText(s, s.w - 6 - textWidth(right), y, right, theme::textDim);
+        }
+    }
+    drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, nodeList_.top, rows, count);
+
+    // While the database is still arriving, say so rather than presenting a
+    // one-row list as if that were the whole mesh.
+    if (!mesh_.ready() && count < rows) {
+        const int y = kBodyY + count * kGlyphH;
+        const char* note = mesh_.state() == MeshState::Failed
+                               ? "(the radio did not answer)"
+                               : "(downloading the node database...)";
+        drawText(s, 2 + 6 * kGlyphW, y, note,
+                 mesh_.state() == MeshState::Failed ? theme::err : theme::textDim);
+    }
+
+    // The hint bar carries the evidence for the highlighted row.
+    std::string hint;
+    const uint32_t peer = peerForNodeRow(nodeList_.sel);
+    if (nodeList_.sel == 0) {
+        hint = mesh_.radio().loraSummary();
+    } else {
+        const MeshNode* node = mesh_.findNode(peer);
+        if (node) {
+            hint = node->idText();
+            if (node->haveSnr) {
+                char buf[24];
+                std::snprintf(buf, sizeof(buf), "  snr %.1f", static_cast<double>(node->snr));
+                hint += buf;
+            }
+            if (node->haveHops) {
+                hint += "  " + std::to_string(node->hopsAway) +
+                        (node->hopsAway == 1 ? " hop" : " hops");
+            }
+            if (node->haveBattery) hint += "  " + std::to_string(node->batteryLevel) + "%";
+            if (node->viaMqtt) hint += "  mqtt";
+            // Range needs two real fixes: ours from the cap, theirs from the mesh.
+            if (fix.valid && node->position.valid) {
+                const double metres = meshDistanceM(fix.latitude, fix.longitude,
+                                                    node->position.latitude,
+                                                    node->position.longitude);
+                const double bearing = meshBearingDeg(fix.latitude, fix.longitude,
+                                                      node->position.latitude,
+                                                      node->position.longitude);
+                hint += "  " + meshRangeText(metres) + " " + meshCompassPoint(bearing);
+            } else if (node->position.valid) {
+                hint += "  " + node->position.coordText();
+            }
+        }
+    }
+    if (hint.empty()) hint = gnss_.statusText(now);
+    drawHintBar(s, hint, count > 1 || nodeList_.sel == 0 ? "Enter chat" : "Esc menu");
+}
+
+void App::rebuildChatRows() {
+    const int cols = columns();
+    const int width = std::max(8, cols - 6);
+    chatRows_.clear();
+    chatRowsPeer_ = chatPeer_;
+    chatRowsCols_ = cols;
+    chatRowsSequence_ = mesh_.chatSequence();
+    chatRowsValid_ = true;
+
+    const std::vector<MeshMessage>* log = mesh_.conversation(chatPeer_);
+    if (!log || log->empty()) {
+        chatRows_.push_back({"No messages yet.", LineKind::Local});
+        chatRows_.push_back({"", LineKind::Local});
+        chatRows_.push_back({"Type below and press Enter. Nothing is sent", LineKind::Fc});
+        chatRows_.push_back({"until you do, and nothing is stored on the", LineKind::Fc});
+        chatRows_.push_back({"radio: this transcript lives on the SD card.", LineKind::Fc});
+        return;
+    }
+
+    int64_t previousStamp = 0;
+    for (const MeshMessage& message : *log) {
+        // A time separator only where the conversation actually paused, so a
+        // fast exchange stays dense on an eighteen-row screen.
+        if (message.stampUtc > 0 && message.stampUtc - previousStamp > 300) {
+            const std::time_t stamp = static_cast<std::time_t>(message.stampUtc);
+            std::tm tmv{};
+            ::localtime_r(&stamp, &tmv);
+            char when[32];
+            std::strftime(when, sizeof(when), "%a %H:%M", &tmv);
+            chatRows_.push_back({std::string("-- ") + when + " --", LineKind::Local});
+        }
+        if (message.stampUtc > 0) previousStamp = message.stampUtc;
+
+        std::string tag;
+        LineKind kind = LineKind::Fc;
+        if (message.outgoing) {
+            char marker = '.';
+            switch (message.state) {
+            case MeshMessageState::Delivered: marker = '+'; kind = LineKind::Echo; break;
+            case MeshMessageState::Sent:      marker = '>'; kind = LineKind::Echo; break;
+            case MeshMessageState::Failed:    marker = '!'; kind = LineKind::Error; break;
+            case MeshMessageState::Queued:    marker = '.'; kind = LineKind::Warn; break;
+            case MeshMessageState::Received:  marker = ' '; kind = LineKind::Echo; break;
+            }
+            tag = std::string("me") + marker + " ";
+        } else {
+            const MeshNode* from = mesh_.findNode(message.from);
+            tag = from ? from->label() : meshNodeIdText(message.from).substr(1, 4);
+            if (tag.size() > 4) tag.resize(4);
+            while (tag.size() < 4) tag.push_back(' ');
+            kind = LineKind::Fc;
+        }
+
+        const std::vector<std::string> wrapped = wrapText(message.text, width);
+        bool first = true;
+        for (const std::string& piece : wrapped) {
+            chatRows_.push_back({(first ? tag + " " : std::string(5, ' ')) + piece, kind});
+            first = false;
+        }
+        if (wrapped.empty()) chatRows_.push_back({tag + " ", kind});
+        if (!message.note.empty() && message.state == MeshMessageState::Failed) {
+            for (const std::string& piece : wrapText("! " + message.note, width)) {
+                chatRows_.push_back({std::string(5, ' ') + piece, LineKind::Error});
+            }
+        }
+    }
+}
+
+void App::drawChat(Surface& s) {
+    const int cols = columns();
+    const int rows = bodyRows(true);
+    if (!chatRowsValid_ || chatRowsPeer_ != chatPeer_ || chatRowsCols_ != cols ||
+        chatRowsSequence_ != mesh_.chatSequence()) {
+        rebuildChatRows();
+    }
+
+    const int total = static_cast<int>(chatRows_.size());
+    const int maxScroll = std::max(0, total - rows);
+    if (chatFollow_) chatScroll_ = maxScroll;
+    chatScroll_ = std::max(0, std::min(chatScroll_, maxScroll));
+
+    for (int i = 0; i < rows; ++i) {
+        const int index = chatScroll_ + i;
+        if (index >= total) break;
+        const ChatRow& row = chatRows_[static_cast<size_t>(index)];
+        drawTextClipped(s, 1, kBodyY + i * kGlyphH, row.text, cols - 1, colorFor(row.kind));
+    }
+    drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, chatScroll_, rows, total);
+
+    const int inputY = s.h - kHintH - kInputH;
+    hLine(s, 0, inputY, s.w, theme::rule);
+
+    const std::string& text = chatEditor_.text();
+    const int avail = cols - 3;
+    int scroll = 0;
+    if (chatEditor_.cursor() >= avail) scroll = chatEditor_.cursor() - avail + 1;
+    const std::string shown = text.substr(static_cast<size_t>(scroll),
+                                          static_cast<size_t>(avail));
+    const bool sendable = mesh_.ready() && mesh_.radio().loraReady();
+    drawText(s, 2, inputY + 2, ">", sendable ? theme::accent : theme::textDim);
+    drawText(s, 2 + 2 * kGlyphW, inputY + 2, shown, theme::text);
+
+    const int cx = 2 + (2 + chatEditor_.cursor() - scroll) * kGlyphW;
+    if (frame_ % 30 < 20) {
+        const int ci = chatEditor_.cursor();
+        const char under = ci < static_cast<int>(text.size()) ? text[static_cast<size_t>(ci)] : ' ';
+        fillRect(s, cx, inputY + 1, kGlyphW, kGlyphH + 1, theme::accent);
+        drawChar(s, cx, inputY + 2, under, theme::bg);
+    }
+
+    std::string hints;
+    if (!mesh_.connected()) {
+        hints = "radio disconnected - this is the saved transcript";
+    } else if (!mesh_.ready()) {
+        hints = "radio still syncing";
+    } else if (!mesh_.radio().loraReady()) {
+        hints = mesh_.radio().region == 0 ? "no LoRa region set - the radio will not transmit"
+                                          : "transmit is disabled on this radio";
+    } else {
+        hints = std::to_string(text.size()) + "/" + std::to_string(kMeshMaxTextBytes);
+        if (chatPeer_ == kMeshBroadcast) hints += "  broadcast, no ack";
+        // Only offer the key that can actually do something right now.
+        if (gnss_.receiverPresent()) hints += "  Fn+5 position";
+    }
+    drawHintBar(s, hints, "Esc back");
+}
+
 void App::drawModal(Surface& s) {
     if (!modal_) return;
     const int cols = columns();
@@ -720,6 +1062,8 @@ void App::render() {
     case Screen::Keymap:   drawKeymap(s); break;
     case Screen::Help:     drawHelp(s); break;
     case Screen::About:    drawAbout(s); break;
+    case Screen::Nodes:    drawNodes(s); break;
+    case Screen::Chat:     drawChat(s); break;
     }
     drawModal(s);
 }

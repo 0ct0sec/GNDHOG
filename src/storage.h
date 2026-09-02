@@ -26,6 +26,9 @@ public:
     const std::string& dataDir() const { return dataDir_; }
     const std::string& backupDir() const { return backupDir_; }
     const std::string& diagnosticDir() const { return diagnosticDir_; }
+    // Mesh conversations, one plain-text file per peer.
+    const std::string& meshDir() const { return meshDir_; }
+    std::vector<std::string> listMeshChatFiles() const;
     std::string configPath() const;
     std::string historyPath() const;
 
@@ -36,6 +39,7 @@ public:
 
     std::vector<BackupFile> listBackups() const;
     bool deleteBackup(const std::string& path, std::string& error) const;
+    bool deleteMeshChat(const std::string& path, std::string& error) const;
 
     // Configurator-compatible name: BTFL_cli_<craft>_<stamp>_<board>_backup.txt
     std::string makeBackupName(const std::string& craft, const std::string& board) const;
@@ -52,6 +56,7 @@ private:
     std::string dataDir_;
     std::string backupDir_;
     std::string diagnosticDir_;
+    std::string meshDir_;
 };
 
 // A tiny `key = value` config file. Unknown keys are preserved on rewrite so a

@@ -17,11 +17,18 @@ struct PortInfo {
     std::string manufacturer;
     std::string kind;        // "usb" | "uart"
     int score = 0;           // higher = more likely to be a flight controller
+    int meshScore = 0;       // higher = more likely to be a Meshtastic radio
 
     std::string vidPid() const;
     std::string label() const;        // short line for the picker
     std::string detail() const;       // second line for the picker
     bool looksLikeFlightController() const { return score >= 60; }
+    bool looksLikeMeshtastic() const { return meshScore >= 60; }
+    // The picker ranks on whichever identity is the stronger claim, so a mesh
+    // radio is not buried under a generic CDC device that scored as an FC.
+    int rank() const { return score > meshScore ? score : meshScore; }
+    // True when this port is more likely a radio than a flight controller.
+    bool prefersMeshtastic() const { return meshScore > score; }
 };
 
 // Enumerates /dev/serial/by-id, /dev/ttyACM*, /dev/ttyUSB* and the Grove UART.
@@ -30,6 +37,11 @@ std::vector<PortInfo> enumeratePorts();
 
 // True for USB IDs known to be Betaflight-capable flight controllers.
 bool isKnownFcId(const std::string& vid, const std::string& pid);
+// True for the USB identities a Meshtastic radio arrives with: an ESP32's own
+// USB-serial-JTAG, or one of the common bridge chips. A bridge is a weaker
+// claim than a native Espressif device, because everything uses those.
+bool isKnownMeshId(const std::string& vid, const std::string& pid);
+bool isSerialBridgeId(const std::string& vid, const std::string& pid);
 // True for the DFU/bootloader IDs -- reachable, but not a CLI.
 bool isDfuId(const std::string& vid, const std::string& pid);
 

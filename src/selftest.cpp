@@ -7,13 +7,19 @@
 #include "font6x8.h"
 #include "gfx.h"
 #include "input.h"
+#include "gnss.h"
 #include "keys.h"
+#include "meshsession.h"
+#include "meshtastic.h"
+#include "protowire.h"
 #include "simfc.h"
+#include "simmesh.h"
 #include "storage.h"
 #include "term.h"
 #include "thermaltrip.h"
 
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1002,7 +1008,693 @@ void testFullScrollback() {
     s.disconnect();
 }
 
+// ---------------------------------------------------------------- protobuf
+
+void testProtobufWire() {
+    section("protobuf wire format");
+
+    pb::Writer w;
+    w.varint(1, 300);
+    w.boolean(2, true);
+    w.i32(3, -7);
+    w.fixed32(4, 0xDEADBEEFu);
+    w.sfixed32(5, -1234567);
+    w.f32(6, 2.5f);
+    w.bytes(7, "hello");
+    pb::Writer inner;
+    inner.varint(1, 42);
+    w.message(8, inner);
+    w.emptyMessage(9);
+
+    int seen = 0;
+    bool ok = true;
+    pb::Reader r(w.data());
+    while (r.next()) {
+        ++seen;
+        switch (r.field()) {
+        case 1: ok &= r.varint() == 300; break;
+        case 2: ok &= r.boolean(); break;
+        case 3: ok &= r.i32() == -7; break;
+        case 4: ok &= r.fixed32() == 0xDEADBEEFu; break;
+        case 5: ok &= r.sfixed32() == -1234567; break;
+        case 6: ok &= r.f32() == 2.5f; break;
+        case 7: ok &= r.bytes() == "hello"; break;
+        case 8: {
+            pb::Reader sub = r.sub();
+            ok &= sub.next() && sub.varint() == 42;
+            break;
+        }
+        case 9: ok &= r.bytes().empty(); break;
+        default: ok = false; break;
+        }
+    }
+    check(seen == 9 && ok && r.ok(), "every wire type survives an encode/decode round trip");
+
+    // A negative int32 is sign extended to ten groups; truncating it to four
+    // makes the peer read an enormous positive number instead.
+    pb::Writer negative;
+    negative.i32(1, -1);
+    check(negative.data().size() == 11, "a negative int32 is encoded sign extended");
+
+    // Truncation must stop the reader, not read past the buffer. The reader
+    // borrows its bytes, so the truncated copy has to outlive it.
+    for (size_t cut = 1; cut < w.data().size(); ++cut) {
+        const std::string truncated = w.data().substr(0, cut);
+        pb::Reader partial(truncated);
+        while (partial.next()) {
+        }
+    }
+    check(true, "every truncation of a message is parsed without reading past the end");
+
+    const std::string endless("\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF", 11);
+    pb::Reader bogus(endless);
+    check(!bogus.next() && !bogus.ok(), "an over-long varint is rejected instead of wrapping");
+
+    // Unknown fields, which is how this survives a firmware newer than itself.
+    pb::Writer future;
+    future.varint(1, 5);
+    future.bytes(4242, "a field this build has never heard of");
+    future.varint(2, 9);
+    pb::Reader forward(future.data());
+    int known = 0;
+    while (forward.next()) {
+        if (forward.field() == 1 || forward.field() == 2) ++known;
+    }
+    check(known == 2 && forward.ok(), "unknown fields are skipped, not fatal");
+
+    const std::string groupTag("\x0B", 1);      // start-group tag
+    pb::Reader group(groupTag);
+    check(!group.next() && !group.ok(), "a group tag stops the reader rather than guessing");
+}
+
+// ----------------------------------------------------------- mesh framing
+
+void testMeshFraming() {
+    section("meshtastic serial framing");
+
+    const std::string frame = frameToRadio("payload");
+    check(frame.size() == 11 && static_cast<uint8_t>(frame[0]) == 0x94 &&
+              static_cast<uint8_t>(frame[1]) == 0xC3 && frame[2] == 0 && frame[3] == 7,
+          "a frame is 0x94 0xC3 then a big-endian length");
+
+    // Real firmware writes its console log down the same wire.
+    std::string buf = "INFO | booted\r\n" + frameToRadio("one") + "DEBUG | noise" +
+                      frameToRadio("two");
+    std::vector<std::string> frames;
+    std::string log;
+    extractMeshFrames(buf, frames, log);
+    check(frames.size() == 2 && frames[0] == "one" && frames[1] == "two",
+          "frames are recovered from between console lines");
+    check(log == "INFO | booted\r\nDEBUG | noise",
+          "text that was never part of a frame is preserved as log output");
+    check(buf.empty(), "a fully consumed buffer is left empty");
+
+    // A frame split across two reads must not be lost or half-delivered.
+    const std::string whole = frameToRadio("split me");
+    std::string partial = whole.substr(0, 6);
+    frames.clear();
+    log.clear();
+    extractMeshFrames(partial, frames, log);
+    check(frames.empty() && log.empty() && partial.size() == 6,
+          "an incomplete frame is held, not guessed at");
+    partial += whole.substr(6);
+    extractMeshFrames(partial, frames, log);
+    check(frames.size() == 1 && frames[0] == "split me",
+          "the held fragment completes on the next read");
+
+    // 0x94 0xC3 can occur in log text. A length the protocol cannot produce is
+    // the tell, and the parser has to resynchronise rather than stall forever.
+    std::string bogus;
+    bogus.push_back(static_cast<char>(0x94));
+    bogus.push_back(static_cast<char>(0xC3));
+    bogus.push_back(static_cast<char>(0xFF));
+    bogus.push_back(static_cast<char>(0xFF));
+    bogus += frameToRadio("after");
+    frames.clear();
+    log.clear();
+    extractMeshFrames(bogus, frames, log);
+    check(frames.size() == 1 && frames[0] == "after",
+          "an impossible length resynchronises to the next real frame");
+
+    std::string lone;
+    lone.push_back(static_cast<char>(0x94));
+    lone += "not a frame";
+    frames.clear();
+    log.clear();
+    extractMeshFrames(lone, frames, log);
+    check(frames.empty() && log.size() == 12,
+          "a stray magic byte in log text is delivered as log text");
+
+    check(kMeshMaxFrame == 512, "the frame cap matches the client API's maximum");
+}
+
+// ------------------------------------------------------------- mesh codec
+
+void testMeshCodec() {
+    section("meshtastic protobuf messages");
+
+    // want_config_id is field 3, a varint.
+    const std::string want = encodeWantConfig(0x1234u);
+    pb::Reader wantReader(want);
+    check(wantReader.next() && wantReader.field() == 3 && wantReader.varint() == 0x1234u,
+          "want_config_id is encoded on field 3");
+    check(kMeshNodelessConfigId == 69420u,
+          "the nodeless config id is known so it can be avoided");
+
+    const std::string beat = encodeHeartbeat();
+    pb::Reader beatReader(beat);
+    check(beatReader.next() && beatReader.field() == 7 && beatReader.bytes().empty(),
+          "a heartbeat is an empty submessage on field 7");
+
+    // A text packet, read back the way the firmware would.
+    const std::string packet = encodeTextPacket(0xA1B2C3D4u, 0, 0x55667788u, "hello mesh", true);
+    uint32_t to = 0, id = 0, port = 0;
+    bool wantAck = false, sawFrom = false;
+    std::string payload;
+    pb::Reader toRadio(packet);
+    check(toRadio.next() && toRadio.field() == 1, "a packet rides on ToRadio field 1");
+    pb::Reader meshPacket = toRadio.sub();
+    while (meshPacket.next()) {
+        switch (meshPacket.field()) {
+        case 1: sawFrom = true; break;
+        case 2: to = meshPacket.fixed32(); break;
+        case 6: id = meshPacket.fixed32(); break;
+        case 10: wantAck = meshPacket.boolean(); break;
+        case 4: {
+            pb::Reader data = meshPacket.sub();
+            while (data.next()) {
+                if (data.field() == 1) port = data.u32();
+                else if (data.field() == 2) payload = data.bytes();
+            }
+            break;
+        }
+        default: break;
+        }
+    }
+    check(to == 0xA1B2C3D4u && id == 0x55667788u && wantAck && port == 1 &&
+              payload == "hello mesh",
+          "a text packet carries destination, id, ack request and TEXT_MESSAGE_APP");
+    check(!sawFrom, "the client never stamps `from`; the radio owns its own node number");
+
+    const std::string overlong(kMeshMaxTextBytes + 50, 'x');
+    const std::string clipped = encodeTextPacket(1, 0, 2, overlong, false);
+    check(clipped.find(std::string(kMeshMaxTextBytes + 1, 'x')) == std::string::npos,
+          "an over-long message is clipped to the LoRa payload limit");
+
+    // Position, through the encoder and back out of the decoder.
+    const std::string positionPacket =
+        encodePositionPacket(kMeshBroadcast, 0, 3, 51.50722, -0.12750, true, 35, 1700000000u, 9);
+    std::string positionPayload;
+    pb::Reader positionRadio(positionPacket);
+    positionRadio.next();
+    pb::Reader positionMesh = positionRadio.sub();
+    while (positionMesh.next()) {
+        if (positionMesh.field() != 4) continue;
+        pb::Reader data = positionMesh.sub();
+        while (data.next()) {
+            if (data.field() == 2) positionPayload = data.bytes();
+        }
+    }
+    MeshPosition position;
+    check(decodeMeshPosition(positionPayload, position) && position.valid,
+          "an encoded position decodes back");
+    check(std::abs(position.latitude - 51.50722) < 1e-6 &&
+              std::abs(position.longitude + 0.12750) < 1e-6,
+          "latitude and longitude survive the 1e7 fixed-point round trip");
+    check(position.haveAltitude && position.altitudeM == 35 && position.satsInView == 9,
+          "altitude and satellite count survive with them");
+
+    MeshPosition absent;
+    check(decodeMeshPosition(std::string(), absent) && !absent.valid,
+          "a position with no coordinates is absent, not a fix at the equator");
+
+    bool haveError = false;
+    uint32_t reason = 0;
+    pb::Writer routing;
+    routing.varint(3, 0);
+    check(decodeMeshRouting(routing.data(), haveError, reason) && haveError && reason == 0,
+          "a routing ACK is an error_reason of NONE that is actually present");
+    haveError = true;
+    check(decodeMeshRouting(std::string(), haveError, reason) && !haveError,
+          "a routing message with no error field is not a delivery report");
+
+    checkEq(meshNodeIdText(0x0BADF00Du), "!0badf00d", "node ids render the Meshtastic way");
+    checkEq(meshAgeText(10), "now", "a fresh contact reads as now");
+    checkEq(meshAgeText(3700), "1h", "an hour-old contact reads in hours");
+    checkEq(std::string(meshCompassPoint(91.0)), "E", "bearings map onto compass points");
+    checkEq(std::string(meshCompassPoint(359.0)), "N", "the compass wraps at north");
+
+    // Greenwich to a point due north of it.
+    const double metres = meshDistanceM(51.4779, 0.0, 51.4869, 0.0);
+    check(metres > 990.0 && metres < 1010.0, "great-circle distance is metres, not degrees");
+    const double bearing = meshBearingDeg(51.4779, 0.0, 51.4869, 0.0);
+    check(bearing < 1.0 || bearing > 359.0, "due north reads as a bearing of zero");
+    checkEq(meshRangeText(1400.0), "1.4km", "ranges over a kilometre are shown in kilometres");
+}
+
+void testMeshChatFiles() {
+    section("mesh conversation files");
+
+    std::vector<MeshMessage> messages;
+    MeshMessage in;
+    in.peer = 0xA1B2C3D4u;
+    in.from = 0xA1B2C3D4u;
+    in.to = kMeshBroadcast;
+    in.id = 0x11223344u;
+    in.stampUtc = 1700000000;
+    in.text = "line one\nline two\twith a tab";
+    in.state = MeshMessageState::Received;
+    messages.push_back(in);
+
+    MeshMessage out;
+    out.outgoing = true;
+    out.peer = 0xA1B2C3D4u;
+    out.from = 0x33445566u;
+    out.to = 0xA1B2C3D4u;
+    out.id = 0x55667788u;
+    out.stampUtc = 1700000060;
+    out.text = "understood";
+    out.state = MeshMessageState::Delivered;
+    messages.push_back(out);
+
+    MeshMessage pending = out;
+    pending.id = 0x99AABBCCu;
+    pending.text = "still going";
+    pending.state = MeshMessageState::Queued;
+    messages.push_back(pending);
+
+    const std::vector<MeshMessage> back = parseMeshChat(formatMeshChat(messages));
+    check(back.size() == 3, "every record survives the transcript round trip");
+    if (back.size() == 3) {
+        checkEq(back[0].text, in.text, "embedded newlines and tabs are escaped, not split");
+        check(!back[0].outgoing && back[0].from == in.from && back[0].id == in.id,
+              "direction and identifiers survive");
+        check(back[1].outgoing && back[1].state == MeshMessageState::Delivered,
+              "a delivered message stays delivered");
+        check(back[2].state == MeshMessageState::Failed &&
+                  back[2].note.find("unresolved") != std::string::npos,
+              "a message still awaiting an ack at shutdown is not reloaded as delivered");
+    }
+
+    checkEq(meshChatFileName(kMeshBroadcast), "broadcast.chat", "the broadcast log has a name");
+    checkEq(meshChatFileName(0x0BADF00Du), "node-0badf00d.chat", "per-node logs are named by id");
+    uint32_t peer = 0;
+    check(meshChatPeerFromFileName("node-0badf00d.chat", peer) && peer == 0x0BADF00Du,
+          "a conversation file names the peer it belongs to");
+    check(meshChatPeerFromFileName("broadcast.chat", peer) && peer == kMeshBroadcast,
+          "the broadcast file maps back to the broadcast address");
+    check(!meshChatPeerFromFileName("node-nothex.chat", peer) &&
+              !meshChatPeerFromFileName("notes.txt", peer) &&
+              !meshChatPeerFromFileName("node-0badf00d.chat.bak", peer),
+          "anything that is not a conversation file is refused");
+}
+
+// -------------------------------------------------------------------- GNSS
+
+void testGnss() {
+    section("LoRa Cap GNSS (NMEA 0183)");
+
+    GnssFix fix;
+    const std::string gga =
+        "$GNGGA,123519.00,5130.4332,N,00007.6500,W,1,09,0.9,45.4,M,46.9,M,,*56";
+    check(nmeaChecksumOk(gga), "a well-formed GGA passes its checksum");
+    check(parseNmeaSentence(gga, fix, 1000) && fix.valid,
+          "a GGA with a fix quality above zero is a fix");
+    check(std::abs(fix.latitude - 51.507220) < 1e-5 &&
+              std::abs(fix.longitude + 0.1275) < 1e-5,
+          "ddmm.mmmm degrees and minutes are converted, not read as decimal degrees");
+    check(fix.satellitesUsed == 9 && fix.haveAltitude &&
+              std::abs(fix.altitudeM - 45.4) < 0.01,
+          "satellites and altitude come across");
+
+    // A corrupted line must be dropped rather than believed.
+    std::string corrupt = gga;
+    corrupt[20] = '9';
+    GnssFix untouched;
+    check(!parseNmeaSentence(corrupt, untouched, 1000) && !untouched.valid,
+          "a sentence that fails its checksum is discarded");
+
+    GnssFix rmcFix;
+    const std::string rmc =
+        "$GNRMC,123519.00,A,5130.4332,N,00007.6500,W,0.5,54.7,230326,,,A*6F";
+    check(nmeaChecksumOk(rmc), "the RMC fixture checksum is right");
+    check(parseNmeaSentence(rmc, rmcFix, 2000) && rmcFix.valid,
+          "an active RMC is a fix");
+    check(rmcFix.utcSeconds > 1774000000u && rmcFix.utcSeconds < 1900000000u,
+          "date and time combine into a UTC timestamp without touching the local zone");
+    checkEq(rmcFix.utc, "12:35:19", "the receiver's own clock is reported as it arrived");
+
+    // A void RMC clears the fix but keeps the evidence that one existed.
+    GnssFix lost = rmcFix;
+    std::string built = "GNRMC,123529.00,V,,,,,,,230326,,,N";
+    uint8_t sum = 0;
+    for (char c : built) sum ^= static_cast<uint8_t>(c);
+    char tail[8];
+    std::snprintf(tail, sizeof(tail), "*%02X", sum);
+    check(parseNmeaSentence("$" + built + tail, lost, 3000),
+          "a void RMC is a well-formed sentence");
+    check(!lost.valid && lost.everValid,
+          "losing the fix is reported as lost, not as never having had one");
+
+    GnssFix view;
+    std::string gsvBody = "GPGSV,3,1,11,01,45,090,32";
+    sum = 0;
+    for (char c : gsvBody) sum ^= static_cast<uint8_t>(c);
+    std::snprintf(tail, sizeof(tail), "*%02X", sum);
+    check(parseNmeaSentence("$" + gsvBody + tail, view, 4000) && view.satellitesInView == 11,
+          "GSV supplies the satellites-in-view count while searching");
+
+    check(!parseNmeaSentence("garbage", view, 5000) &&
+              !parseNmeaSentence("$", view, 5000),
+          "non-NMEA input is rejected without reading past the end");
+}
+
+// --------------------------------------------------------- mesh session
+
+bool spinMesh(SimMesh& sim, MeshSession& mesh, int timeoutMs,
+              const std::function<bool()>& until) {
+    const uint64_t deadline = nowMs() + static_cast<uint64_t>(timeoutMs);
+    while (nowMs() < deadline) {
+        sim.pump();
+        mesh.poll(nowMs());
+        if (until()) return true;
+        sleepMs(4);
+    }
+    return false;
+}
+
+void testMeshSession() {
+    section("meshtastic session (simulated radio over a pty)");
+    SimMesh sim;
+    std::string error;
+    if (!sim.start(error)) {
+        std::printf("  SKIP  mesh simulator unavailable: %s\n", error.c_str());
+        return;
+    }
+
+    Terminal term;
+    term.setWidth(53);
+    MeshSession mesh(term);
+
+    check(mesh.connect(sim.devicePath(), 115200, error), "connect to the pty radio: " + error);
+    check(spinMesh(sim, mesh, 5000, [&] { return mesh.ready(); }),
+          "the config download runs to config_complete_id");
+    check(mesh.radio().myNodeNum == sim.selfNodeNum(),
+          "my_info supplies the attached radio node number");
+    checkEq(mesh.radio().firmwareVersion, "2.7.11.abcdef1",
+            "device metadata carries the firmware version");
+    check(mesh.radio().loraReady() && mesh.radio().region == 3,
+          "the LoRa config is read back and reports a region it can transmit in");
+    checkEq(mesh.radio().primaryChannel, "LongFast",
+            "the primary channel name comes from the channel record");
+    check(mesh.nodes().size() == 3, "all three fixture nodes reach the node database");
+    check(!mesh.nodes().empty() && mesh.nodes().front().isSelf,
+          "the attached radio sorts to the top of its own node list");
+
+    const MeshNode* hilltop = mesh.findNode(sim.hilltopNodeNum());
+    check(hilltop != nullptr && hilltop->user.shortName == "HILL" &&
+              hilltop->user.longName == "HILLTOP RELAY",
+          "a node user record is decoded");
+    check(hilltop != nullptr && hilltop->position.valid &&
+              hilltop->position.latitude > 51.4 && hilltop->position.latitude < 51.5,
+          "a node position is decoded from its node info");
+    check(hilltop != nullptr && hilltop->haveBattery && hilltop->batteryLevel == 87,
+          "device metrics are decoded alongside it");
+    check(hilltop != nullptr && hilltop->haveHops && hilltop->hopsAway == 1,
+          "hops away is reported when the radio supplies it");
+
+    bool sawConsole = false;
+    for (size_t i = 0; i < term.lineCount(); ++i) {
+        if (term.line(i).text.find("Sending our nodeinfo") != std::string::npos) sawConsole = true;
+    }
+    check(sawConsole, "console text interleaved with frames still reaches the terminal");
+
+    // A direct message stays queued until the mesh answers for it.
+    check(mesh.sendText(sim.hilltopNodeNum(), "on my way", error),
+          "a direct message is accepted: " + error);
+    const std::vector<MeshMessage>* direct = mesh.conversation(sim.hilltopNodeNum());
+    check(direct != nullptr && direct->size() == 1 &&
+              direct->back().state == MeshMessageState::Queued,
+          "a direct message starts queued, never pre-emptively delivered");
+    check(spinMesh(sim, mesh, 4000,
+                   [&] {
+                       const std::vector<MeshMessage>* log =
+                           mesh.conversation(sim.hilltopNodeNum());
+                       return log && !log->empty() &&
+                              log->back().state == MeshMessageState::Delivered;
+                   }),
+          "a routing ACK for that packet id marks it delivered");
+    checkEq(sim.lastTextReceived(), "on my way", "the radio received what was typed");
+
+    // A rejection has to say so out loud.
+    sim.setAckError(1);   // NO_ROUTE
+    check(mesh.sendText(sim.vanNodeNum(), "anyone there", error),
+          "a second direct message is accepted");
+    check(spinMesh(sim, mesh, 4000,
+                   [&] {
+                       const std::vector<MeshMessage>* log = mesh.conversation(sim.vanNodeNum());
+                       return log && !log->empty() &&
+                              log->back().state == MeshMessageState::Failed;
+                   }),
+          "a routing error marks the message failed");
+    const std::vector<MeshMessage>* rejected = mesh.conversation(sim.vanNodeNum());
+    check(rejected != nullptr && !rejected->empty() &&
+              rejected->back().note.find("no route") != std::string::npos,
+          "the failure carries the reason the mesh gave");
+
+    // Broadcasts are not acknowledged, and must not claim to be.
+    sim.setAckError(0);
+    check(mesh.sendText(kMeshBroadcast, "net check", error), "a broadcast is accepted");
+    const std::vector<MeshMessage>* broadcast = mesh.conversation(kMeshBroadcast);
+    check(broadcast != nullptr && !broadcast->empty() &&
+              broadcast->back().state == MeshMessageState::Sent &&
+              broadcast->back().note.find("does not acknowledge") != std::string::npos,
+          "a broadcast is recorded as sent, never as delivered");
+
+    sim.injectText(sim.hilltopNodeNum(), sim.selfNodeNum(), "roger, gate is open");
+    check(spinMesh(sim, mesh, 3000,
+                   [&] {
+                       const std::vector<MeshMessage>* log =
+                           mesh.conversation(sim.hilltopNodeNum());
+                       return log && log->size() >= 2 && !log->back().outgoing;
+                   }),
+          "an inbound direct message lands in that node conversation");
+    check(mesh.unread(sim.hilltopNodeNum()) > 0,
+          "an unread count is kept until the conversation is opened");
+    mesh.markRead(sim.hilltopNodeNum());
+    check(mesh.unread(sim.hilltopNodeNum()) == 0 && mesh.totalUnread() == 0,
+          "opening a conversation clears its unread count");
+
+    const size_t broadcastBefore = broadcast ? broadcast->size() : 0;
+    sim.injectText(sim.vanNodeNum(), kMeshBroadcast, "van 2 rolling");
+    check(spinMesh(sim, mesh, 3000,
+                   [&] {
+                       const std::vector<MeshMessage>* log = mesh.conversation(kMeshBroadcast);
+                       return log && log->size() > broadcastBefore;
+                   }),
+          "a message addressed to everyone lands in the broadcast conversation");
+
+    sim.injectPosition(sim.vanNodeNum(), 51.5007, -0.1246);
+    check(spinMesh(sim, mesh, 3000,
+                   [&] {
+                       const MeshNode* van = mesh.findNode(sim.vanNodeNum());
+                       return van && van->position.valid;
+                   }),
+          "a position packet updates the sender entry in the node table");
+
+    // A dead peer has to surface as a lost link, not a silent session.
+    sim.stop();
+    mesh.sendText(kMeshBroadcast, "still there?", error);
+    const uint64_t lossDeadline = nowMs() + 1000;
+    while (nowMs() < lossDeadline && mesh.connected()) {
+        mesh.poll(nowMs());
+        sleepMs(4);
+    }
+    check(mesh.linkLost() && !mesh.connected(),
+          "a failed write to a vanished radio reports link loss and closes the port");
+    mesh.disconnect();
+
+    // A radio with no region cannot legally transmit, and must refuse.
+    SimMesh mute;
+    if (mute.start(error)) {
+        mute.setRegionUnset(true);
+        Terminal muteTerm;
+        muteTerm.setWidth(53);
+        MeshSession muteSession(muteTerm);
+        check(muteSession.connect(mute.devicePath(), 115200, error),
+              "connect to a region-less radio: " + error);
+        check(spinMesh(mute, muteSession, 5000, [&] { return muteSession.ready(); }),
+              "a region-less radio still completes its config download");
+        check(!muteSession.radio().loraReady(),
+              "a radio with no region is not reported as ready to transmit");
+        std::string why;
+        check(!muteSession.sendText(kMeshBroadcast, "hello", why) &&
+                  why.find("region") != std::string::npos,
+              "sending is refused with the reason instead of queued into a mute radio");
+        check(muteSession.conversation(kMeshBroadcast) == nullptr,
+              "a refused message is not written into the transcript");
+        muteSession.disconnect();
+    }
+}
+
 } // namespace
+
+// ------------------------------------------------------------- mesh app
+
+void testMeshApp() {
+    section("mesh screens, menus and saved conversations");
+    SimMesh sim;
+    std::string error;
+    if (!sim.start(error)) {
+        std::printf("  SKIP  mesh simulator unavailable: %s\n", error.c_str());
+        return;
+    }
+
+    const std::string dataDir = "/tmp/bfcli-mesh-selftest-" + std::to_string(::getpid());
+    const char* previous = ::getenv("BFCLI_DATA_DIR");
+    const std::string saved = previous ? previous : "";
+    ::setenv("BFCLI_DATA_DIR", dataDir.c_str(), 1);
+    uint32_t chatPeer = 0;
+
+    {
+        App app;
+        app.display_.setHeadlessSize(kScreenW, kScreenH);
+        check(app.storage_.init(error), "mesh app storage initializes: " + error);
+        app.setupMenus();
+        check(app.menu_.size() == 5 && app.menu_.front().label == "Flight controller",
+              "the root menu is flight-controller shaped until a radio is opened");
+
+        check(app.mesh_.connect(sim.devicePath(), 115200, error),
+              "the app opens the radio: " + error);
+        app.linkMode_ = LinkMode::Meshtastic;
+        app.beginMeshSession();
+        app.setScreen(Screen::Nodes);
+        const uint64_t ready = nowMs() + 6000;
+        while (nowMs() < ready && !app.mesh_.ready()) {
+            sim.pump();
+            app.tick(nowMs());
+            sleepMs(4);
+        }
+        check(app.mesh_.ready(), "the app drives the config download through to ready");
+
+        // The five-category contract holds in both link modes; only the first
+        // two categories change to match what is actually plugged in.
+        check(app.menu_.size() == 5 && app.menu_.front().label == "Mesh network",
+              "the mesh root keeps five categories and leads with the radio");
+        const MenuPage pages[] = {
+            MenuPage::Mesh,         MenuPage::MeshPosition,  MenuPage::ControlsInfo,
+            MenuPage::SoundDisplay, MenuPage::ConnectionExit,
+        };
+        std::set<int> ids;
+        int actions = 0;
+        bool labelsFit = true;
+        const int labelColumns = (kScreenW - 48) / kGlyphW;
+        for (MenuPage page : pages) {
+            app.openMenuPage(page);
+            for (const MenuItem& item : app.currentMenuItems()) {
+                ++actions;
+                ids.insert(item.id);
+                labelsFit &= static_cast<int>(item.label.size()) <= labelColumns;
+            }
+        }
+        check(actions == 18 && ids.size() == 18,
+              "every mesh action has exactly one category owner");
+        check(labelsFit, "every mesh menu label fits the 6x8 grid");
+        app.openMenuPage(MenuPage::Root);
+
+        app.setScreen(Screen::Nodes);
+        check(app.nodeRowCount() == 4,
+              "the node screen lists the broadcast channel plus every radio heard");
+        check(app.peerForNodeRow(0) == kMeshBroadcast, "row zero is the broadcast channel");
+        app.render();
+        check(app.display_.surface().valid(), "the node list renders offscreen");
+
+        KeyEvent down;
+        down.key = Key::Down;
+        app.handleKey(down);
+        KeyEvent enter;
+        enter.key = Key::Enter;
+        app.handleKey(enter);
+        check(app.screen_ == Screen::Chat, "Enter on a node row opens its conversation");
+        chatPeer = app.chatPeer_;
+        check(chatPeer != kMeshBroadcast, "the second row is a radio, not the broadcast channel");
+
+        for (char c : std::string("ping")) {
+            KeyEvent key;
+            key.key = Key::Char;
+            key.ch = c;
+            app.handleKey(key);
+        }
+        app.handleKey(enter);
+        const uint64_t sent = nowMs() + 4000;
+        while (nowMs() < sent) {
+            sim.pump();
+            app.tick(nowMs());
+            const std::vector<MeshMessage>* log = app.mesh_.conversation(chatPeer);
+            if (log && !log->empty() && log->back().state == MeshMessageState::Delivered) break;
+            sleepMs(4);
+        }
+        const std::vector<MeshMessage>* log = app.mesh_.conversation(chatPeer);
+        check(log != nullptr && !log->empty() && log->back().text == "ping" &&
+                  log->back().state == MeshMessageState::Delivered,
+              "typing into the chat screen sends the message and then confirms it");
+        app.render();
+        check(app.display_.surface().valid(), "the conversation renders offscreen");
+        check(!app.chatRows_.empty(), "the conversation produced wrapped display rows");
+
+        // The transcript is written as it happens, not only at shutdown.
+        const std::string path = app.storage_.meshDir() + "/" + meshChatFileName(chatPeer);
+        std::string text, readError;
+        check(app.storage_.readFile(path, text, readError),
+              "the conversation is written to the data directory: " + readError);
+        const std::vector<MeshMessage> reloaded = parseMeshChat(text);
+        check(!reloaded.empty() && reloaded.back().text == "ping",
+              "the saved transcript reads back as the same conversation");
+
+        KeyEvent escape;
+        escape.key = Key::Escape;
+        app.handleKey(escape);
+        check(app.screen_ == Screen::Nodes,
+              "Escape leaves a conversation for the node list it came from");
+
+        // The radio log stays reachable and keeps the firmware own output.
+        app.setScreen(Screen::Terminal);
+        app.render();
+        check(app.display_.surface().valid(), "the radio log renders offscreen");
+        KeyEvent nodesKey;
+        nodesKey.key = Key::Char;
+        nodesKey.ch = 'n';
+        app.handleKey(nodesKey);
+        check(app.screen_ == Screen::Nodes, "N returns from the radio log to the node list");
+
+        // Disconnecting hands the menus back to the flight controller.
+        app.requestDisconnect(false);
+        check(!app.mesh_.connected() && app.screen_ == Screen::Ports,
+              "disconnecting a radio returns to the port picker");
+        check(app.menu_.front().label == "Flight controller",
+              "the root menu goes back to its flight-controller shape");
+    }
+
+    // A second launch has to find the conversation where the first left it.
+    {
+        App app;
+        app.display_.setHeadlessSize(kScreenW, kScreenH);
+        check(app.storage_.init(error), "a second app instance initializes storage");
+        app.loadMeshChats();
+        const std::vector<MeshMessage>* log = app.mesh_.conversation(chatPeer);
+        bool foundPing = false;
+        if (log) {
+            for (const MeshMessage& message : *log) {
+                if (message.text == "ping") foundPing = true;
+            }
+        }
+        check(foundPing, "a saved conversation is reloaded on the next launch");
+    }
+
+    if (saved.empty()) ::unsetenv("BFCLI_DATA_DIR");
+    else ::setenv("BFCLI_DATA_DIR", saved.c_str(), 1);
+}
+
 
 int runSelfTest() {
     std::printf("%s self-test (commit %s)\n\n", kAppName, kBuildCommit);
@@ -1367,6 +2059,13 @@ int runSelfTest() {
     testSession();
     testVtxGuardFailurePaths();
     testFullScrollback();
+    testProtobufWire();
+    testMeshFraming();
+    testMeshCodec();
+    testMeshChatFiles();
+    testGnss();
+    testMeshSession();
+    testMeshApp();
     std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;
 }

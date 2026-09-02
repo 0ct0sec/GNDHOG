@@ -48,6 +48,10 @@ void usage() {
         "  --headless        render offscreen only, no framebuffer\n"
         "  --stdin           read keys from stdin instead of evdev\n"
         "  --sim             talk to a built-in simulated flight controller\n"
+        "  --sim-mesh        talk to a built-in simulated Meshtastic radio\n"
+        "  --mesh            open --port as a Meshtastic radio, not a Betaflight CLI\n"
+        "  --gnss DEV        LoRa Cap GNSS receiver (default /dev/serial0, NMEA 0183)\n"
+        "  --no-gnss         do not open the LoRa Cap GNSS receiver at all\n"
         "  --mute            disable HUD sounds for this launch\n"
         "  --sound-test      play one bounded HUD startup cue and exit\n"
         "  --no-autoconnect  always show the port picker at startup\n"
@@ -113,6 +117,10 @@ int main(int argc, char** argv) {
         else if (a == "--headless") opt.headless = true;
         else if (a == "--stdin") opt.stdinKeys = true;
         else if (a == "--sim") opt.simulate = true;
+        else if (a == "--sim-mesh") opt.simulateMesh = true;
+        else if (a == "--mesh") opt.forceMesh = true;
+        else if (a == "--gnss") opt.gnssDevice = next("--gnss");
+        else if (a == "--no-gnss") opt.gnssEnabled = false;
         else if (a == "--mute") opt.muteSound = true;
         else if (a == "--sound-test") soundTest = true;
         else if (a == "--no-autoconnect") opt.autoConnect = false;
@@ -128,6 +136,13 @@ int main(int argc, char** argv) {
                          bf::kAppName, a.c_str());
             return 2;
         }
+    }
+
+    // One port, one protocol. Starting both simulators would open two links and
+    // leave only one of them being driven, which is a confusing way to test.
+    if (opt.simulate && opt.simulateMesh) {
+        std::fprintf(stderr, "%s: --sim and --sim-mesh cannot both be used\n", bf::kAppName);
+        return 2;
     }
 
     if (soundTest) {

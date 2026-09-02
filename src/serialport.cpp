@@ -129,7 +129,9 @@ std::string PortInfo::detail() const {
     if (!vp.empty()) d += vp;
     if (!manufacturer.empty()) d += (d.empty() ? "" : "  ") + manufacturer;
     if (isDfuId(vendorId, productId)) d += "  [DFU - no CLI]";
+    else if (looksLikeMeshtastic() && prefersMeshtastic()) d += "  [mesh radio]";
     else if (looksLikeFlightController()) d += "  [flight controller]";
+    else if (looksLikeMeshtastic()) d += "  [serial bridge]";
     return d;
 }
 
@@ -147,6 +149,28 @@ bool isKnownFcId(const std::string& vid, const std::string& pid) {
 bool isDfuId(const std::string& vid, const std::string& pid) {
     const std::string v = lower(vid), p = lower(pid);
     return (v == "0483" && p == "df11") || (v == "2e3c" && p == "df11");
+}
+
+bool isKnownMeshId(const std::string& vid, const std::string& pid) {
+    const std::string v = lower(vid), p = lower(pid);
+    // Espressif's own USB stack. The M5Stack Unit C6L is an ESP32-C6 with a
+    // USB-C socket wired straight to the SoC, so this is the identity it
+    // presents with no bridge chip in the path at all.
+    if (v == "303a") {
+        return p == "1001" ||   // USB Serial/JTAG (C3, C6, S3, H2)
+               p == "0002" ||   // S2 CDC
+               p == "4001" ||   // S3 CDC
+               p == "1000";     // vendor CDC on some boards
+    }
+    return false;
+}
+
+bool isSerialBridgeId(const std::string& vid, const std::string& pid) {
+    const std::string v = lower(vid), p = lower(pid);
+    if (v == "1a86") return p == "7523" || p == "55d4" || p == "55d3";  // CH340/CH9102
+    if (v == "10c4") return p == "ea60" || p == "ea70";                 // CP210x
+    if (v == "0403") return p == "6001" || p == "6015";                 // FTDI
+    return false;
 }
 
 std::vector<PortInfo> enumeratePorts() {
@@ -202,9 +226,21 @@ std::vector<PortInfo> enumeratePorts() {
         else if (p.device.rfind("/dev/ttyACM", 0) == 0) p.score = 70;
         else if (p.kind == "usb") p.score = 40;
         else p.score = 10;
+
+        const std::string productText = lower(p.product) + " " + lower(p.manufacturer) +
+                                        " " + lower(p.byId);
+        if (productText.find("meshtastic") != std::string::npos) p.meshScore = 100;
+        else if (isKnownMeshId(p.vendorId, p.productId)) p.meshScore = 90;
+        else if (isSerialBridgeId(p.vendorId, p.productId)) p.meshScore = 60;
+        else if (p.kind == "uart") p.meshScore = 10;
+        else p.meshScore = 0;
+        // A device that answered as a flight controller is not also a radio.
+        if (isKnownFcId(p.vendorId, p.productId) || isDfuId(p.vendorId, p.productId)) {
+            p.meshScore = 0;
+        }
     }
     std::stable_sort(out.begin(), out.end(),
-                     [](const PortInfo& a, const PortInfo& b) { return a.score > b.score; });
+                     [](const PortInfo& a, const PortInfo& b) { return a.rank() > b.rank(); });
 #endif
     return out;
 }
