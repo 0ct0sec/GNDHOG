@@ -173,13 +173,16 @@ const char* const kHelpText[] = {
     "",
     "BAUD RATES",
     "  The flight controller, the Meshtastic radio and",
-    "  the LoRa Cap GNSS each keep their own rate, as",
+    "  the GNSS receiver each keep their own rate, as",
     "  fc.baud, mesh.baud and gnss.baud in config.ini.",
     "  Set them in Menu > Connection & exit > Baud",
     "  rates, or with B on the port picker. USB CDC",
     "  negotiates its own rate and ignores these; a",
     "  wired UART does not, and a wrong rate is a port",
     "  that opens perfectly and then says nothing.",
+    "  The receiver is the exception: a wire that talks",
+    "  but not in NMEA is reopened at each rate in the",
+    "  table, and the rate that answers is saved.",
     "",
     "BATTERY",
     "  The top bar draws this device's own pack: a",
@@ -210,7 +213,7 @@ const char* const kHelpText[] = {
     "  F / Fn+4     locate: range, bearing, compass rose",
     "  M            saved marks",
     "  I            radio firmware, region, and preset",
-    "  G            LoRa Cap GNSS status",
+    "  G            GNSS receiver status",
     "  P / Fn+5     transmit this station's own position",
     "  L            the radio's console log",
     "  N            back to the node list from the log",
@@ -258,15 +261,16 @@ const char* const kHelpText[] = {
     "  2, 5 or 15 minutes for this session only; it is",
     "  never saved, and the next launch starts off.",
     "",
-    "LORA CAP GNSS",
-    "  If a Cap LoRa868 / Cap LoRa-1262 is fitted, its",
-    "  AT6668 receiver is read as NMEA 0183 on",
-    "  /dev/serial0 at 115200. A fix gives range and",
-    "  bearing to any node that reported a position, and",
-    "  can be transmitted on request. With no receiver",
-    "  or no fix, GNDHOG says so instead of inventing a",
-    "  coordinate. Set gnss.device in config.ini to move",
-    "  it, or launch with --no-gnss.",
+    "GNSS RECEIVER",
+    "  The Cap LoRa-1262 GPS's AT6668, or any NMEA GPS",
+    "  unit on the Grove socket, is read as NMEA 0183 on",
+    "  /dev/serial0, 115200 by default. A fix gives range",
+    "  and bearing to any node that reported a position,",
+    "  and can be transmitted on request. With no",
+    "  receiver or no fix, GNDHOG says so instead of",
+    "  inventing a coordinate. Set gnss.device in",
+    "  config.ini to move it, --gnss DEV to name it for",
+    "  one launch, or --no-gnss to leave it closed.",
 };
 constexpr int kHelpLines = static_cast<int>(sizeof(kHelpText) / sizeof(kHelpText[0]));
 
@@ -479,7 +483,7 @@ void App::drawPorts(Surface& s) {
     if (ports_.empty()) {
         drawText(s, 4, kBodyY, "No serial ports found.", theme::warn);
         drawText(s, 4, kBodyY + 2 * kGlyphH, "Set the Host/Slave switch to HOST,", theme::textDim);
-        drawText(s, 4, kBodyY + 3 * kGlyphH, "plug the FC into USB-A, power it on,", theme::textDim);
+        drawText(s, 4, kBodyY + 3 * kGlyphH, "plug the FC or radio into USB-A,", theme::textDim);
         drawText(s, 4, kBodyY + 4 * kGlyphH, "then press R to rescan.", theme::textDim);
     } else {
         for (int i = 0; i < rows; ++i) {
@@ -500,9 +504,16 @@ void App::drawPorts(Surface& s) {
                 // open a link on it while it keeps proving itself.
                 text += gnss_.receiverPresent() ? "  GNSS live" : "  GNSS probe";
                 fg = gnss_.receiverPresent() ? theme::accent : theme::textDim;
-            } else if (isDfuId(p.vendorId, p.productId)) fg = theme::warn;
-            else if (p.prefersMeshtastic() && p.looksLikeMeshtastic()) fg = theme::echo;
-            else if (p.looksLikeFlightController()) fg = theme::ok;
+            } else {
+                // A radio on USB and a receiver on the UART are listed
+                // together, and "USB JTAG/serial debug unit" says nothing
+                // about which of them is the radio. The role goes on the row.
+                const std::string role = p.roleTag();
+                if (!role.empty()) text += "  " + role;
+                if (isDfuId(p.vendorId, p.productId)) fg = theme::warn;
+                else if (p.prefersMeshtastic() && p.looksLikeMeshtastic()) fg = theme::echo;
+                else if (p.looksLikeFlightController()) fg = theme::ok;
+            }
             drawTextClipped(s, 2 + kGlyphW, y, text, cols - 3, fg);
         }
         drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, portList_.top, rows,

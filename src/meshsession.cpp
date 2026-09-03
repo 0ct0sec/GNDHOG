@@ -263,7 +263,7 @@ bool MeshSession::sendPosition(uint32_t peer, const GnssFix& fix, std::string& e
         return false;
     }
     if (!fix.valid) {
-        error = "the LoRa Cap GNSS has no current fix";
+        error = "the GNSS receiver has no current fix";
         return false;
     }
     if (!radio_.loraReady()) {

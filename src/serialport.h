@@ -22,6 +22,11 @@ struct PortInfo {
     std::string vidPid() const;
     std::string label() const;        // short line for the picker
     std::string detail() const;       // second line for the picker
+    // What the identity says this port is -- "[mesh radio]", "[flight
+    // controller]", "[serial bridge]", "[DFU - no CLI]" -- or empty. On the
+    // picker row itself as well as in the detail line, so that a radio and a
+    // receiver listed together read as what they are, not as two device nodes.
+    std::string roleTag() const;
     bool looksLikeFlightController() const { return score >= 60; }
     bool looksLikeMeshtastic() const { return meshScore >= 60; }
     // The picker ranks on whichever identity is the stronger claim, so a mesh

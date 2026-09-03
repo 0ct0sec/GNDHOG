@@ -131,15 +131,24 @@ std::string PortInfo::label() const {
     return base;
 }
 
+std::string PortInfo::roleTag() const {
+    if (isDfuId(vendorId, productId)) return "[DFU - no CLI]";
+    // A radio by name, or Espressif's own USB stack. A bare bridge chip is
+    // not called a radio even when the picker proposes mesh for it: everything
+    // uses those chips, and the tag is a claim about identity, not a proposal.
+    if (meshScore >= 90) return "[mesh radio]";
+    if (looksLikeFlightController()) return "[flight controller]";
+    if (looksLikeMeshtastic()) return "[serial bridge]";
+    return {};
+}
+
 std::string PortInfo::detail() const {
     std::string d;
     const std::string vp = vidPid();
     if (!vp.empty()) d += vp;
     if (!manufacturer.empty()) d += (d.empty() ? "" : "  ") + manufacturer;
-    if (isDfuId(vendorId, productId)) d += "  [DFU - no CLI]";
-    else if (looksLikeMeshtastic() && prefersMeshtastic()) d += "  [mesh radio]";
-    else if (looksLikeFlightController()) d += "  [flight controller]";
-    else if (looksLikeMeshtastic()) d += "  [serial bridge]";
+    const std::string role = roleTag();
+    if (!role.empty()) d += "  " + role;
     return d;
 }
 

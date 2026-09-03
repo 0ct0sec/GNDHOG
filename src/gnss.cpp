@@ -15,6 +15,16 @@ namespace {
 constexpr size_t kMaxLineBytes = 512;
 constexpr size_t kMaxBufferBytes = 4096;
 
+// Eight or more characters, all printable ASCII: a line a person could read.
+bool legibleText(const std::string& line) {
+    if (line.size() < 8) return false;
+    for (char c : line) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (u != '\t' && (u < 0x20 || u > 0x7e)) return false;
+    }
+    return true;
+}
+
 std::vector<std::string> splitFields(const std::string& body) {
     std::vector<std::string> out;
     size_t start = 0;
@@ -247,6 +257,9 @@ bool Gnss::open(const std::string& device, int baud, std::string& error) {
     lastError_.clear();
     buf_.clear();
     fix_ = GnssFix{};
+    baud_ = baud;
+    bytes_ = 0;
+    legibleLines_ = 0;
     sentences_ = 0;
     lastSentenceMs_ = 0;
     openedMs_ = nowMs();
@@ -256,6 +269,7 @@ bool Gnss::open(const std::string& device, int baud, std::string& error) {
 void Gnss::close() {
     port_.close();
     buf_.clear();
+    baud_ = 0;
     openedMs_ = 0;
 }
 
@@ -270,8 +284,16 @@ void Gnss::adoptFix(const GnssFix& fix, uint64_t nowMs) {
 }
 
 void Gnss::consumeLine(const std::string& line, uint64_t nowMs) {
-    if (line.empty() || line[0] != '$') return;
+    if (line.empty() || line[0] != '$') {
+        if (legibleText(line)) ++legibleLines_;
+        return;
+    }
     if (!parseNmeaSentence(line, fix_, nowMs)) return;
+    // Presence is proved by a sentence that carried a checksum and passed it.
+    // parseNmeaSentence tolerates a missing one for the receivers that omit
+    // it, but a wire sampled at the wrong rate throws up the odd '$' followed
+    // by whatever, and that must not count as a receiver.
+    if (line.rfind('*') == std::string::npos) return;
     ++sentences_;
     lastSentenceMs_ = nowMs;
 }
@@ -287,6 +309,7 @@ void Gnss::poll(uint64_t nowMs) {
         return;
     }
     if (n == 0) return;
+    bytes_ += static_cast<size_t>(n);
     buf_ += incoming;
     if (buf_.size() > kMaxBufferBytes) {
         // Not NMEA. Keep the tail so a real sentence can still resynchronise.

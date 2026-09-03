@@ -91,6 +91,13 @@ constexpr int kQuickCount = static_cast<int>(sizeof(kQuick) / sizeof(kQuick[0]))
 // idle. The raw response remains visible instead of hiding safety evidence.
 constexpr uint64_t kTemperatureCheckIntervalMs = 30000;
 constexpr uint64_t kTemperatureCheckRetryMs = 1000;
+// How long the receiver probe listens at the saved rate before deciding, and
+// at each further rate once the wire has proved it carries something.
+constexpr uint64_t kGnssProbeWindowMs = 6000;
+constexpr uint64_t kGnssRetryWindowMs = 3000;
+// A wire that produced this much readable non-NMEA text is a console, not a
+// receiver at the wrong rate, and the rate table is not walked for it.
+constexpr int kGnssConsoleLines = 3;
 
 } // namespace
 
@@ -139,7 +146,8 @@ void App::setupMenus() {
         {"Clear conversation", "delete the open chat history", MenuMeshClear, true},
     };
     meshPositionMenu_ = {
-        {"LoRa Cap GNSS", "AT6668 NMEA receiver on the cap", MenuGnssToggle, true},
+        {"GNSS receiver", "NMEA on the Grove/EXT UART: the cap's, or a GPS unit",
+         MenuGnssToggle, true},
         {"GNSS status", "fix, satellites, and coordinates", MenuGnssStatus, true},
         {"Compass", "BMM150 heading, calibration, alignment", MenuCompass, true},
         {"Share my position", "transmits this station's own fix", MenuMeshShare, true},
@@ -172,7 +180,7 @@ void App::setupMenus() {
     linkSpeedMenu_ = {
         {"Flight controller", "", MenuFcBaud, true},
         {"Meshtastic radio", "", MenuMeshBaud, true},
-        {"LoRa Cap GNSS", "", MenuGnssBaud, true},
+        {"GNSS receiver", "", MenuGnssBaud, true},
     };
     refreshLinkSpeedMenu();
     refreshMeshMenus();
@@ -215,8 +223,8 @@ void App::refreshMeshMenus() {
     for (MenuItem& item : meshPositionMenu_) {
         if (item.id == MenuGnssToggle) {
             item.label = opt_.gnssEnabled
-                             ? std::string("LoRa Cap GNSS: ") + (gnssWanted_ ? "ON" : "OFF")
-                             : std::string("LoRa Cap GNSS: OFF (--no-gnss)");
+                             ? std::string("GNSS receiver: ") + (gnssWanted_ ? "ON" : "OFF")
+                             : std::string("GNSS receiver: OFF (--no-gnss)");
             if (!opt_.gnssEnabled) item.hint = "session override; restart without --no-gnss";
             else if (!gnssWanted_) item.hint = "receiver not opened this session";
             else if (!gnss_.isOpen()) item.hint = "no receiver on " + gnssDevice_;
@@ -446,9 +454,10 @@ bool App::setup(const Options& opt, std::string& error) {
     term_.setWidth(columns());
     editor_.loadHistory(storage_.loadHistory());
 
-    // The LoRa Cap's AT6668 speaks NMEA on the header UART. On this board that
-    // is /dev/serial0; the config file exists because a different cap revision
-    // or a USB receiver is somebody else's Tuesday.
+    // The receiver speaks NMEA on the Grove/EXT UART, which on this board is
+    // /dev/serial0 whether the cap's AT6668 or a GPS unit on the Grove socket
+    // is driving it; the config key exists because a USB receiver is somebody
+    // else's Tuesday.
     gnssDevice_ = opt_.gnssDevice.empty() ? config_.get("gnss.device", "/dev/serial0")
                                           : opt_.gnssDevice;
     // A rate on the command line wins for this launch; otherwise the saved one
@@ -461,7 +470,12 @@ bool App::setup(const Options& opt, std::string& error) {
     if (!isSupportedBaud(fcBaud_)) fcBaud_ = 115200;
     meshBaud_ = opt_.meshBaudSet ? opt_.meshBaud : config_.getInt("mesh.baud", 115200);
     if (!isSupportedBaud(meshBaud_)) meshBaud_ = 115200;
-    gnssWanted_ = opt_.gnssEnabled && config_.getBool("gnss.enabled", true);
+    // --gnss DEV names a receiver on purpose, so it is opened this launch even
+    // if the saved switch is off: on the bench that switch was off, and the
+    // flag was found doing nothing at all. Like --no-gnss it never rewrites
+    // the saved choice; teardown knows.
+    gnssWanted_ = opt_.gnssEnabled &&
+                  (!opt_.gnssDevice.empty() || config_.getBool("gnss.enabled", true));
 
     // The pack is the operator's own clock in the field, so the indicator is
     // wired up before anything is connected. No gauge is a normal outcome.
@@ -517,8 +531,12 @@ void App::teardown() {
     config_.setInt("sound.volume", soundVolume_);
     // --no-gnss and --gnss DEV are launch-wide overrides, exactly like --mute:
     // they change this session and must not rewrite the saved choice. One
-    // smoke test with --no-gnss should not disable the receiver forever.
-    if (opt_.gnssEnabled) config_.setBool("gnss.enabled", gnssWanted_);
+    // smoke test with --no-gnss should not disable the receiver forever, and
+    // one launch that named a receiver should not switch it on forever. A
+    // deliberate menu toggle saves itself as it happens, so nothing is lost.
+    if (opt_.gnssEnabled && opt_.gnssDevice.empty()) {
+        config_.setBool("gnss.enabled", gnssWanted_);
+    }
     if (opt_.gnssDevice.empty()) config_.set("gnss.device", gnssDevice_);
     // Same contract as --mute and --no-gnss: a rate handed in on the command
     // line is this launch's business and never becomes the saved default.
@@ -631,15 +649,17 @@ void App::startGnss(bool quiet) {
         // A node that is not there is a development host. A node that is there
         // and would not open is worth a line even at launch.
         if (!quiet || ::access(gnssDevice_.c_str(), F_OK) == 0) {
-            pushLocal("-- no LoRa Cap GNSS on " + gnssDevice_ + ": " + error + " --",
+            pushLocal("-- no GNSS receiver on " + gnssDevice_ + ": " + error + " --",
                       LineKind::Warn);
         }
         gnssProbeDeadlineMs_ = 0;
         return;
     }
-    gnssProbeDeadlineMs_ = nowMs() + 6000;
+    gnssProbeDeadlineMs_ = nowMs() + kGnssProbeWindowMs;
     gnssProbeReported_ = false;
-    pushLocal("-- listening for LoRa Cap GNSS on " + gnssDevice_ + " @ " +
+    gnssProbeFirstBaud_ = gnssBaud_;
+    gnssProbeTried_.assign(1, gnssBaud_);
+    pushLocal("-- listening for a GNSS receiver on " + gnssDevice_ + " @ " +
                   std::to_string(gnssBaud_) + " (NMEA 0183) --",
               LineKind::Local);
 }
@@ -677,16 +697,18 @@ void App::showGnssStatus() {
     const GnssFix& fix = gnss_.fix();
     std::string body;
     if (!gnssWanted_) {
-        body = "The LoRa Cap GNSS is switched off for this session.";
+        body = "The GNSS receiver is switched off for this session.";
     } else if (!gnss_.isOpen()) {
         body = "No receiver is open on " + gnssDevice_ + ".\n\n" +
-               (gnss_.lastError().empty() ? std::string("Fit a Cap LoRa868 / Cap LoRa-1262 "
-                                                        "and restart the probe from this menu.")
-                                          : gnss_.lastError());
+               (gnss_.lastError().empty()
+                    ? std::string("Fit a Cap LoRa-1262 GPS, or a GPS unit on the Grove "
+                                  "socket, and restart the probe from this menu.")
+                    : gnss_.lastError());
     } else if (!gnss_.receiverPresent()) {
-        body = gnssDevice_ + " opened but has sent no NMEA.\n\n"
-               "That port exists whether or not a cap is fitted, so this is "
-               "reported as absent rather than as a receiver with no fix.";
+        body = gnssDevice_ + " opened at " + std::to_string(gnssBaud_) +
+               " but has sent no NMEA.\n\n"
+               "That UART exists whether or not a receiver is wired to it, so this "
+               "is reported as absent rather than as a receiver with no fix.";
     } else {
         body = "Receiver: " + gnssDevice_ + " @ " + std::to_string(gnssBaud_) + "\n" +
                "Sentences: " + std::to_string(gnss_.sentenceCount()) + "\n" +
@@ -700,7 +722,7 @@ void App::showGnssStatus() {
         if (!fix.utc.empty()) body += "\nUTC: " + fix.utc;
         if (!fix.receiverText.empty()) body += "\nReceiver says: " + fix.receiverText;
     }
-    notice("LoRa Cap GNSS", body, HudCue::Select);
+    notice("GNSS receiver", body, HudCue::Select);
 }
 
 void App::showRadioInfo() {
@@ -752,10 +774,11 @@ void App::shareMyPosition(uint32_t peer) {
         return;
     }
     if (!gnss_.receiverPresent()) {
-        notice("No LoRa Cap GNSS",
+        notice("No GNSS receiver",
                "This station has no GNSS receiver reporting on " + gnssDevice_ + ".\n\n"
-               "Position sharing needs the Cap LoRa868 / Cap LoRa-1262 fitted; the "
-               "radio's own position is its business, not this application's.");
+               "Position sharing needs a receiver of its own: the Cap LoRa-1262 GPS, "
+               "or a GPS unit on the Grove socket. The radio's own position is its "
+               "business, not this application's.");
         return;
     }
     if (!gnss_.fix().valid) {
@@ -903,7 +926,7 @@ void App::connectPort(const PortInfo& port, LinkMode mode) {
     // config request had timed out three times. Show the receiver instead.
     if (isGnssPort(port.device)) {
         if (gnss_.receiverPresent()) {
-            pushLocal("-- " + port.device + " is the LoRa Cap GNSS receiver (" +
+            pushLocal("-- " + port.device + " is the GNSS receiver (" +
                           std::to_string(gnss_.sentenceCount()) +
                           " NMEA sentences); not opening it as a link --",
                       LineKind::Warn);
@@ -1446,6 +1469,20 @@ void App::cycleGnssBaud() {
     dirty_ = true;
 }
 
+// 9600 first: it is what most receivers that are not at 115200 ship at, and
+// the table's own order would only reach it fourth.
+int App::nextGnssProbeBaud() const {
+    const auto tried = [this](int baud) {
+        return std::find(gnssProbeTried_.begin(), gnssProbeTried_.end(), baud) !=
+               gnssProbeTried_.end();
+    };
+    if (!tried(9600)) return 9600;
+    for (int i = 0; i < kBaudChoiceCount; ++i) {
+        if (!tried(kBaudChoices[i])) return kBaudChoices[i];
+    }
+    return 0;
+}
+
 void App::refreshLinkSpeedMenu() {
     for (MenuItem& item : linkSpeedMenu_) {
         switch (item.id) {
@@ -1458,9 +1495,9 @@ void App::refreshLinkSpeedMenu() {
             item.hint = "used when the radio is wired, not on USB";
             break;
         case MenuGnssBaud:
-            item.label = "LoRa Cap GNSS: " + std::to_string(gnssBaud_);
+            item.label = "GNSS receiver: " + std::to_string(gnssBaud_);
             item.hint = gnss_.isOpen() ? "Enter reopens the receiver at the next rate"
-                                       : "AT6668 ships at 115200 NMEA 0183";
+                                       : "a wrong rate is probed and corrected";
             break;
         default: break;
         }
@@ -1714,7 +1751,7 @@ void App::addMark(Mark mark) {
 void App::markHere() {
     const GnssFix fix = gnss_.fix();
     if (!gnss_.receiverPresent()) {
-        notice("No LoRa Cap GNSS",
+        notice("No GNSS receiver",
                "A mark is this station's own fix, and there is no receiver reporting on " +
                    gnssDevice_ + ".");
         return;
@@ -1888,7 +1925,7 @@ void App::cycleAutoShare() {
     }
     if (autoShareMinutes_ == 0) {
         if (!gnss_.receiverPresent()) {
-            notice("No LoRa Cap GNSS",
+            notice("No GNSS receiver",
                    "Auto-share transmits this station's own fix, and there is no receiver "
                    "reporting on " + gnssDevice_ + ".");
             return;
@@ -2911,8 +2948,13 @@ void App::tickStatusTail(uint64_t now) {
     }
 }
 
-// The cap's receiver is independent of whichever radio or flight controller is
-// on the other port, so it is polled in both link modes.
+// The receiver is independent of whichever radio or flight controller is on
+// the other port, so it is polled in both link modes. The probe that follows
+// the read decides whether the UART carries a receiver at all, and at which
+// rate: a wire that talks but never in NMEA is reopened at the next rate in
+// the table, a rate that answers is kept as gnss.baud, and a silent wire is
+// given back at the first deadline, because on this board that node is also
+// the Grove header and a flight controller may be waiting on it.
 void App::pollGnss(uint64_t now) {
     if (!gnss_.isOpen()) return;
     const bool hadFix = gnss_.fix().valid;
@@ -2921,17 +2963,64 @@ void App::pollGnss(uint64_t now) {
     if (gnss_.sentenceCount() != before || gnss_.fix().valid != hadFix) dirty_ = true;
 
     if (gnssProbeDeadlineMs_ == 0 || gnssProbeReported_ || now < gnssProbeDeadlineMs_) return;
-    gnssProbeReported_ = true;
+    const std::string rate = std::to_string(gnssBaud_);
     if (gnss_.receiverPresent()) {
-        pushLocal("-- LoRa Cap GNSS present: " + std::to_string(gnss_.sentenceCount()) +
-                      " NMEA sentences --",
+        gnssProbeReported_ = true;
+        if (gnssBaud_ != gnssProbeFirstBaud_) {
+            pushLocal("-- " + gnssDevice_ + " answers at " + rate + ", not " +
+                          std::to_string(gnssProbeFirstBaud_) +
+                          (opt_.gnssBaudSet ? "; using it for this launch --"
+                                            : "; gnss.baud follows the wire --"),
+                      LineKind::Good);
+            refreshLinkSpeedMenu();
+        }
+        pushLocal("-- GNSS receiver present on " + gnssDevice_ + " @ " + rate + ": " +
+                      std::to_string(gnss_.sentenceCount()) + " NMEA sentences --",
                   LineKind::Good);
-    } else {
-        // Holding a UART nothing is talking on helps nobody, and on this board
-        // that node is also the Grove header.
+    } else if (gnss_.bytesSeen() > 0 && gnss_.legibleLines() < kGnssConsoleLines &&
+               nextGnssProbeBaud() != 0) {
+        // Bytes and no sentence: a receiver at some other rate. Readable text
+        // would have meant a console, which no rate change turns into NMEA.
+        const int next = nextGnssProbeBaud();
+        pushLocal("-- " + gnssDevice_ + " @ " + rate + ": " +
+                      std::to_string(gnss_.bytesSeen()) + " bytes, no NMEA; trying " +
+                      std::to_string(next) + " --",
+                  LineKind::Local);
         gnss_.close();
-        pushLocal("-- no NMEA on " + gnssDevice_ + "; treating the LoRa Cap GNSS as absent --",
-                  LineKind::Warn);
+        gnssBaud_ = next;
+        gnssProbeTried_.push_back(next);
+        std::string error;
+        if (gnss_.open(gnssDevice_, gnssBaud_, error)) {
+            gnssProbeDeadlineMs_ = now + kGnssRetryWindowMs;
+        } else {
+            gnssProbeReported_ = true;
+            gnssProbeDeadlineMs_ = 0;
+            gnssBaud_ = gnssProbeFirstBaud_;
+            pushLocal("-- GNSS receiver did not reopen: " + error + " --", LineKind::Warn);
+        }
+        refreshLinkSpeedMenu();
+    } else {
+        gnssProbeReported_ = true;
+        const size_t bytes = gnss_.bytesSeen();
+        const bool console = gnss_.legibleLines() >= kGnssConsoleLines;
+        gnss_.close();
+        if (console) {
+            pushLocal("-- " + gnssDevice_ + " is sending text, not NMEA: a console, not a "
+                      "receiver; treating the GNSS receiver as absent --",
+                      LineKind::Warn);
+        } else if (bytes > 0) {
+            pushLocal("-- " + gnssDevice_ + ": bytes but no NMEA at any rate in the table; "
+                      "treating the GNSS receiver as absent --",
+                      LineKind::Warn);
+        } else {
+            pushLocal("-- no NMEA on " + gnssDevice_ +
+                          "; treating the GNSS receiver as absent --",
+                      LineKind::Warn);
+        }
+        if (gnssBaud_ != gnssProbeFirstBaud_) {
+            gnssBaud_ = gnssProbeFirstBaud_;
+            refreshLinkSpeedMenu();
+        }
     }
     refreshMeshMenus();
 }
@@ -2992,11 +3081,11 @@ void App::tickMesh(uint64_t now) {
             const std::string device = mesh_.device();
             const bool ownDevice = sameDeviceNode(device, gnssDevice_);
             pushLocal("-- " + device + " answered with NMEA 0183, not the client API: "
-                      "that is the LoRa Cap GNSS receiver --",
+                      "that is a GNSS receiver --",
                       LineKind::Warn);
             finishDisconnect(false);
             notice("GNSS receiver, not a radio",
-                   device + " is speaking NMEA 0183: that is the LoRa Cap's "
+                   device + " is speaking NMEA 0183: that is a GNSS "
                    "receiver, and the radio link on it has been closed.\n\n" +
                        (ownDevice
                             ? std::string("The receiver is being read again; "

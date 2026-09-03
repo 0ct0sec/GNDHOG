@@ -109,8 +109,10 @@ public:
         bool showAbout = false;        // --about: start offline on the credits
         int frameLimit = 0;            // stop after N frames (preview/testing)
         std::string previewDir;        // dump each screen as PPM and exit
-        // The LoRa Cap's GNSS receiver. Empty means "use the configured or
-        // default device"; --no-gnss suppresses the probe entirely.
+        // The GNSS receiver's UART: the cap's, or a GPS unit on the Grove
+        // socket. Empty means "use the configured or default device"; a named
+        // one is opened for this launch whatever the saved switch says.
+        // --no-gnss suppresses the probe entirely.
         std::string gnssDevice;
         bool gnssEnabled = true;
     };
@@ -123,6 +125,7 @@ private:
     friend void testFieldTools(); // selftest.cpp: locate, marks, quick messages, SOS
     friend void testBattery();   // selftest.cpp: paints the gauge indicator
     friend void testLinkBaud();  // selftest.cpp: drives the saved link rates
+    friend void testGnssBaudProbe(); // selftest.cpp: a receiver at the wrong rate
     // ---- lifecycle
     bool setup(const Options& opt, std::string& error);
     void teardown();
@@ -216,6 +219,8 @@ private:
     int linkBaud(LinkMode mode) const;
     void cycleLinkBaud(LinkMode mode);
     void cycleGnssBaud();
+    // The rate the receiver probe tries next, or 0 once the table is spent.
+    int nextGnssProbeBaud() const;
     void refreshLinkSpeedMenu();
     void adjustSoundVolume(int delta);
     void toggleSound();
@@ -378,6 +383,8 @@ private:
     bool gnssWanted_ = true;
     uint64_t gnssProbeDeadlineMs_ = 0;
     bool gnssProbeReported_ = false;
+    int gnssProbeFirstBaud_ = 0;         // the rate the probe started from
+    std::vector<int> gnssProbeTried_;    // rates tried so far in this probe
     bool meshFailureReported_ = false;
     int meshUnreadSeen_ = 0;
 

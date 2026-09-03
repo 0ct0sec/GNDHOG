@@ -7,10 +7,11 @@
 
 namespace bf {
 
-// The M5Stack Cap LoRa868 / Cap LoRa-1262 carries an AT6668 GNSS receiver
-// alongside its SX1262. On a Cardputer Zero the receiver reaches Linux as a
-// plain UART speaking NMEA 0183 at 115200 8N1, so this is a line parser and a
-// serial reader, not a driver.
+// A GNSS receiver on the Grove/EXT UART: the AT6668 that M5Stack's Cap
+// LoRa-1262 GPS carries beside its SX1262, a GPS Unit on the Grove socket, or
+// anything else that speaks NMEA 0183 over a plain UART. This is a line
+// parser and a serial reader, not a driver, and it does not care which of
+// them is on the far end.
 struct GnssFix {
     bool valid = false;              // the receiver currently claims a fix
     bool everValid = false;          // it claimed one at least once this session
@@ -53,6 +54,7 @@ public:
     void close();
     bool isOpen() const { return port_.isOpen(); }
     int fd() const { return port_.fd(); }
+    int baud() const { return baud_; }   // the rate the port was opened at
     const std::string& device() const { return port_.device(); }
 
     void poll(uint64_t nowMs);
@@ -66,6 +68,14 @@ public:
     // UART exists on this board whether or not a cap is clipped to it.
     bool receiverPresent() const { return sentences_ > 0; }
     int sentenceCount() const { return sentences_; }
+    // Raw bytes since open, sentences or not. A wire carrying bytes and no
+    // sentence is a receiver at some other rate; a wire carrying nothing is a
+    // bare UART. The probe in App tells the two apart with this.
+    size_t bytesSeen() const { return bytes_; }
+    // Complete lines of readable text that were not sentences. A UART sampled
+    // at the wrong rate yields framing garbage, never prose; prose that is not
+    // NMEA is another device talking, most likely a radio's console.
+    int legibleLines() const { return legibleLines_; }
     uint64_t lastSentenceMs() const { return lastSentenceMs_; }
     uint64_t openedMs() const { return openedMs_; }
     const std::string& lastError() const { return lastError_; }
@@ -78,6 +88,9 @@ private:
     SerialPort port_;
     std::string buf_;
     GnssFix fix_;
+    int baud_ = 0;
+    size_t bytes_ = 0;
+    int legibleLines_ = 0;
     int sentences_ = 0;
     uint64_t lastSentenceMs_ = 0;
     uint64_t openedMs_ = 0;

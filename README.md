@@ -363,46 +363,71 @@ region set, or with transmit disabled, is reported as `no TX` in the state chip
 and refuses the message with the reason instead of queueing it into a device
 that is deliberately mute.
 
-## The LoRa Cap and GPS
+## GNSS: the cap's receiver, or a GPS unit on Grove
 
-The Cardputer Zero's **Cap LoRa868 / Cap LoRa-1262** carries an AT6668 GNSS
-receiver alongside its SX1262. On this board the receiver is the header UART,
-`/dev/serial0` (a symlink to `/dev/ttyS0`), speaking NMEA 0183 at 115200 8N1,
-so GNDHOG reads it and parses `GGA`, `RMC`, `GSV` and the receiver's own `TXT`
-remarks (the bench unit says `ANTENNA OPEN` indoors; the status page repeats
-it without judging it). The SX1262 is on the SPI bus as `/dev/spidev0.1`, and
-nothing on the stock image drives it: M5Stack's own cap application reads the
-GPS and leaves the radio alone. So the mesh screens need a real Meshtastic
-radio on USB or the Grove UART; the cap's LoRa half would be a `meshtasticd`
-on the Zero and a TCP transport here, not a serial port, and neither exists
-yet. Change the device with `gnss.device` in `config.ini`,
-or launch with `--gnss DEV`; `--no-gnss` skips it entirely. A receiver that was
-reconfigured to another rate gets `gnss.baud`, which the **Baud rates** page
-changes and applies at once by reopening the port — this is the one peer whose
-port GNDHOG owns outright, so the setting can be proved instead of promised. Both switches are
-launch-wide session overrides in the way `--mute` is: they do not rewrite the
-saved choice, and the menu toggle says so rather than appearing to do nothing.
+GNDHOG wants a position of its own, and it reads one from whatever NMEA 0183
+receiver is on the header UART, `/dev/serial0` (a symlink to `/dev/ttyS0`).
+On the bench that has been two different things: the AT6668 on the **Cap
+LoRa-1262 GPS**, and an M5Stack **GPS Unit** plugged into the Grove socket.
+Both talk 115200 8N1 out of the box, and the app parses `GGA`, `RMC`, `GSV`
+and the receiver's own `TXT` remarks (the cap's unit says `ANTENNA OPEN`
+indoors; the status page repeats it without judging it). Change the device
+with `gnss.device` in `config.ini`, name one for a single launch with
+`--gnss DEV` — which opens it even if the saved switch is off — or skip it
+with `--no-gnss`. Both switches are launch-wide session overrides in the way
+`--mute` is: they do not rewrite the saved choice, and the menu toggle says so
+rather than appearing to do nothing.
+
+The Grove socket has two controls of its own on this board and GNDHOG touches
+neither: its 5 V is switched (`/sys/class/leds/grove_5v_out`, the launcher's
+GROVE5V setting), and its signal pins are a mux between I2C and the UART
+(`grove_fun`, GPIO4, UART when off, which is the default). The cap's receiver
+reaches the same UART through the EXT header, whose 5 V is the separate
+`ext_5v_out` that M5Stack's cap application switches on. A receiver that is
+powered and wired to the UART is all GNDHOG asks for.
+
+**The rate is probed, not promised.** The receiver is the one peer whose port
+GNDHOG owns outright, so `gnss.baud` can be checked against the wire. A UART
+that carries bytes but no checksummed sentence within six seconds is a
+receiver at some other rate: the port is reopened at each rate in the table —
+9600 first, because that is what most receivers that are not at 115200 ship at
+— for three seconds each, and the rate that answers becomes `gnss.baud`
+(unless `--gnss-baud` named one for this launch, in which case it is used and
+not saved). A UART that carries nothing is released at the first deadline
+without walking the table, because on this board that node is also the Grove
+header and holding it keeps a Grove-wired flight controller waiting; a UART
+that carries readable text that is not NMEA is a radio's console, not a
+receiver, and is released too. The **Baud rates** page still sets the rate by
+hand and applies it at once by reopening the port.
 
 Presence is proved by sentences arriving, never by the device node opening: that
-UART exists whether or not a cap is clipped to it. If nothing speaks NMEA within
-a few seconds the port is closed again and the receiver is reported absent,
-which also keeps GNDHOG off the Grove header it shares.
+UART exists whether or not anything is wired to it. A sentence counts only
+with its checksum, because a wire sampled at the wrong rate throws up the odd
+`$` followed by debris.
+
+**Mesh radio and receiver together.** The radio is a USB device — an M5Stack
+Unit C6L on the USB-A hub, say — and the receiver is the UART, so they are
+different device nodes and never contend. The port picker lists both, tags the
+radio's row `[mesh radio]` from its USB identity, and marks the receiver's row
+`GNSS live` once sentences have arrived (`GNSS probe` while it is still
+listening); **Enter** on a live receiver shows its status instead of opening a
+link, and **G** shows it from the picker at any time. The cap's SX1262 is not
+part of this: nothing on the stock image drives it, M5Stack's own cap
+application reads the GPS and leaves the radio alone, and GNDHOG does the
+same. The cap's GNSS and a Grove GPS are the same UART, so only one of them is
+present at a time.
 
 The receiver is opened at launch and belongs to GNDHOG, not to a radio session.
 It used to wait for a Meshtastic link, and on the bench there was never going
 to be one: the only UART on the board was the AT6668, and the app was found
 scrolling its sentences through a "radio log" as console chatter while a
-config request timed out three times. Now the port picker marks the node the
-receiver holds (`GNSS live` once sentences have arrived, `GNSS probe` while it
-is still listening), **Enter** on a live receiver shows its status instead of
-opening a link, and **G** shows it from the picker at any time. A link opened
-on the receiver's node some other way (a saved port, a hand-edited config) is
-closed by the client itself as soon as three checksummed sentences and no
-frame have arrived, and the receiver is reopened on the wire it gave back.
-Nothing takes an exclusive lock on a tty, and two readers on one UART is a
-link that drops characters and never says why, so a link may borrow the node
-only while the probe is still silent, and the probe starts over when the link
-closes.
+config request timed out three times. A link opened on the receiver's node
+some other way (a saved port, a hand-edited config) is closed by the client
+itself as soon as three checksummed sentences and no frame have arrived, and
+the receiver is reopened on the wire it gave back. Nothing takes an exclusive
+lock on a tty, and two readers on one UART is a link that drops characters and
+never says why, so a link may borrow the node only while the probe is still
+silent, and the probe starts over when the link closes.
 
 With a fix, the node list shows **range and bearing** to every node that
 reported a position, and **Share my position** transmits this station's own

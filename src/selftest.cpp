@@ -1317,7 +1317,7 @@ void testMeshChatFiles() {
 // -------------------------------------------------------------------- GNSS
 
 void testGnss() {
-    section("LoRa Cap GNSS (NMEA 0183)");
+    section("GNSS receiver (NMEA 0183)");
 
     GnssFix fix;
     const std::string gga =
@@ -2152,6 +2152,58 @@ void testBattery() {
     }
 }
 
+// A radio on USB and a receiver on the UART are listed together, and the
+// C6L's product string, "USB JTAG/serial debug unit", is no help at all. The
+// row carries the role its USB identity implies.
+void testPortRoles() {
+    section("what the picker calls a port");
+    check(isKnownMeshId("303a", "1001") && !isKnownFcId("303a", "1001"),
+          "the ESP32-C6's own USB serial is a radio identity, not a flight controller");
+    PortInfo radio;
+    radio.device = "/dev/ttyACM0";
+    radio.kind = "usb";
+    radio.vendorId = "303a";
+    radio.productId = "1001";
+    radio.product = "USB JTAG/serial debug unit";
+    radio.manufacturer = "Espressif";
+    radio.score = 70;       // what enumeratePorts gives any ttyACM
+    radio.meshScore = 90;   // and what it gives a known radio identity
+    checkEq(radio.roleTag(), "[mesh radio]", "a Unit C6L's row says what it is");
+    check(radio.prefersMeshtastic() && radio.rank() == 90,
+          "and the radio claim outranks the generic CDC claim");
+    check(radio.detail().find("303a:1001") != std::string::npos &&
+              radio.detail().find("[mesh radio]") != std::string::npos,
+          "the detail line keeps the identity and the role");
+
+    PortInfo fc;
+    fc.device = "/dev/ttyACM1";
+    fc.kind = "usb";
+    fc.vendorId = "0483";
+    fc.productId = "5740";
+    fc.product = "STM32 Virtual ComPort";
+    fc.score = 100;
+    fc.meshScore = 0;
+    checkEq(fc.roleTag(), "[flight controller]", "an STM32 VCP row says flight controller");
+
+    PortInfo bridge;
+    bridge.device = "/dev/ttyUSB0";
+    bridge.kind = "usb";
+    bridge.vendorId = "1a86";
+    bridge.productId = "7523";
+    bridge.score = 40;
+    bridge.meshScore = 60;
+    checkEq(bridge.roleTag(), "[serial bridge]",
+            "a bare CH340 is a bridge to something, and the row says only that");
+
+    PortInfo uart;
+    uart.device = "/dev/serial0";
+    uart.kind = "uart";
+    uart.score = 10;
+    uart.meshScore = 10;
+    check(uart.roleTag().empty(), "the Grove/EXT UART claims no role until something talks");
+    checkEq(uart.label(), "serial0  Grove/EXT UART", "and is named for the header it is");
+}
+
 void testLinkBaud() {
     section("one baud rate per peer");
     check(nextBaudChoice(115200) == kBaudChoices[1], "the default cycles to the next choice");
@@ -2242,6 +2294,259 @@ void testLinkBaud() {
 
     if (saved.empty()) ::unsetenv("BFCLI_DATA_DIR");
     else ::setenv("BFCLI_DATA_DIR", saved.c_str(), 1);
+}
+
+// A receiver at one fixed rate on the master end of a pty. TCGETS on a pty
+// master reports the slave's termios, so the rate the reader configured is
+// visible from here: at the receiver's own rate it sends sentences, at any
+// other it sends what a UART sampled at the wrong rate hands over, which is
+// bytes but never prose.
+struct RatePty : RawPty {
+    speed_t rate = B9600;
+    bool silent = false;
+    bool console = false;   // a radio's debug console, not a receiver at all
+
+    speed_t readerRate() const {
+        termios tio{};
+        if (::tcgetattr(master, &tio) != 0) return 0;
+        return ::cfgetospeed(&tio);
+    }
+    static std::string debris() {
+        // Framing noise with the two traps in it that used to pass for a
+        // receiver: a '$' that starts nothing, and a sentence-shaped line
+        // with no checksum.
+        std::string g;
+        uint32_t x = 0x9e3779b9u;
+        for (int i = 0; i < 64; ++i) {
+            x = x * 1664525u + 1013904223u;
+            g.push_back(static_cast<char>((x >> 24) & 0xffu));
+            if (i % 16 == 15) g += "\r\n";
+        }
+        g.push_back('\0');
+        g.push_back('$');
+        g.push_back('\0');
+        g += "\r\n$GNGGA,020211.00,,,,,0,00,5.9,,,,,,\r\n";
+        return g;
+    }
+    void pump() {
+        if (silent) {
+            char sink[256];
+            while (::read(master, sink, sizeof(sink)) > 0) {
+            }
+            return;
+        }
+        if (console) {
+            write("INFO  | 12:00:01 42 [Router] Received packet from 0x1443fdf3, hop 1\r\n");
+            return;
+        }
+        write(readerRate() == rate ? std::string(kBenchNmea) : debris());
+    }
+};
+
+// The bench had a GPS Unit on the Grove socket and a saved rate that was the
+// cap's. The receiver is the one peer whose port the app owns outright, so a
+// wrong rate is something the app can find out for itself.
+void testGnssBaudProbe() {
+    section("a receiver at the wrong rate");
+    const std::string dataDir = "/tmp/bfcli-gnssprobe-selftest-" + std::to_string(::getpid());
+    const char* previous = ::getenv("BFCLI_DATA_DIR");
+    const std::string saved = previous ? previous : "";
+    ::setenv("BFCLI_DATA_DIR", dataDir.c_str(), 1);
+    const auto restoreEnv = [&]() {
+        if (saved.empty()) ::unsetenv("BFCLI_DATA_DIR");
+        else ::setenv("BFCLI_DATA_DIR", saved.c_str(), 1);
+    };
+
+    App::Options opt;
+    opt.headless = true;
+    opt.autoConnect = false;
+    opt.muteSound = true;
+    std::string error;
+
+    RatePty receiver;
+    if (!receiver.start(error)) {
+        std::printf("  SKIP  pty unavailable: %s\n", error.c_str());
+        restoreEnv();
+        return;
+    }
+
+    // Each round is one probe window: a burst of traffic, then the deadline
+    // is declared reached, the way six seconds of it would.
+    const auto drive = [](App& app, RatePty& pty, int maxRounds) {
+        int rounds = 0;
+        while (rounds < maxRounds && app.gnss_.isOpen() && !app.gnssProbeReported_) {
+            const uint64_t until = nowMs() + 120;
+            while (nowMs() < until) {
+                pty.pump();
+                app.pollGnss(nowMs());
+                sleepMs(10);
+            }
+            app.gnssProbeDeadlineMs_ = nowMs();
+            app.pollGnss(nowMs());
+            ++rounds;
+        }
+        return rounds;
+    };
+    // Whatever the host's own /dev/serial0 did at setup is not the test.
+    const auto aim = [](App& app, const std::string& device, int baud) {
+        app.gnss_.close();
+        app.gnssProbeDeadlineMs_ = 0;
+        app.gnssDevice_ = device;
+        app.gnssBaud_ = baud;
+        app.startGnss();
+    };
+    const auto told = [](const App& app, const std::string& phrase) {
+        for (size_t i = 0; i < app.term_.lineCount(); ++i) {
+            if (app.term_.line(i).text.find(phrase) != std::string::npos) return true;
+        }
+        return false;
+    };
+    const auto configText = []() {
+        Storage storage;
+        std::string ini;
+        std::string err;
+        if (!storage.init(err) || !storage.readFile(storage.configPath(), ini, err)) {
+            return std::string();
+        }
+        return ini;
+    };
+
+    // --gnss-baud named a rate that is wrong. The wire wins for this launch
+    // and the file is not told, the contract every --*-baud switch has.
+    {
+        App::Options named = opt;
+        named.gnssBaud = 57600;
+        named.gnssBaudSet = true;
+        App app;
+        check(app.setup(named, error), "the probe app starts with a named rate: " + error);
+        aim(app, receiver.slave, 57600);
+        check(app.gnss_.isOpen() && app.gnss_.baud() == 57600,
+              "the probe opens at the rate it was given first");
+        const int rounds = drive(app, receiver, 12);
+        check(app.gnss_.isOpen() && app.gnss_.receiverPresent() && app.gnssBaud_ == 9600 &&
+                  app.gnss_.baud() == 9600,
+              "a receiver at 9600 is found from a named rate of 57600");
+        check(rounds == 2 && app.gnssProbeTried_.size() == 2,
+              "9600 is the first rate tried after the given one, so one retry finds it");
+        check(told(app, "answers at 9600, not 57600") && told(app, "for this launch"),
+              "the terminal says which rate answered, and that the file is not told");
+        app.teardown();
+    }
+    check(configText().find("gnss.baud") == std::string::npos,
+          "a rate found under --gnss-baud is not written to config.ini");
+
+    // The saved rate is wrong. The wire wins and the file follows.
+    {
+        App app;
+        check(app.setup(opt, error), "the probe app starts on the saved rate: " + error);
+        check(app.gnssBaud_ == 115200, "with nothing saved the receiver starts at 115200");
+        aim(app, receiver.slave, 115200);
+        const int rounds = drive(app, receiver, 12);
+        check(app.gnss_.receiverPresent() && app.gnssBaud_ == 9600 && rounds == 2,
+              "a receiver at 9600 is found from a saved rate of 115200");
+        check(told(app, "gnss.baud follows the wire") && told(app, "GNSS receiver present"),
+              "the verdict names the rate that answered and calls the receiver present");
+        app.teardown();
+    }
+    check(configText().find("gnss.baud = 9600") != std::string::npos,
+          "the rate that answered is the saved rate now");
+    {
+        App app;
+        check(app.setup(opt, error), "the app restarts after the probe: " + error);
+        check(app.gnssBaud_ == 9600, "and the next launch opens the receiver at it");
+        app.teardown();
+    }
+
+    // Silence is not a rate problem. On this board the node is also the
+    // Grove header, and walking the table would hold it for half a minute
+    // against a flight controller waiting to be picked.
+    {
+        RatePty mute;
+        mute.silent = true;
+        if (mute.start(error)) {
+            App app;
+            check(app.setup(opt, error), "the probe app starts for a silent UART: " + error);
+            aim(app, mute.slave, 115200);
+            const int rounds = drive(app, mute, 12);
+            check(!app.gnss_.isOpen() && rounds == 1 && app.gnssProbeTried_.size() == 1 &&
+                      app.gnssBaud_ == 115200,
+                  "a silent UART is released at the first deadline, no other rate tried");
+            check(told(app, "no NMEA on"), "and reported as absent, not as the wrong rate");
+            app.teardown();
+        }
+    }
+
+    // A wire full of readable text is a console -- a Grove-wired radio's
+    // debug log, say -- and no rate change turns that into NMEA.
+    {
+        RatePty radio;
+        radio.console = true;
+        if (radio.start(error)) {
+            App app;
+            check(app.setup(opt, error), "the probe app starts for a console: " + error);
+            aim(app, radio.slave, 115200);
+            const int rounds = drive(app, radio, 12);
+            check(!app.gnss_.isOpen() && rounds == 1 && app.gnssProbeTried_.size() == 1,
+                  "readable text that is not NMEA is released at the first deadline");
+            check(told(app, "a console, not a receiver"),
+                  "and the verdict says what was on the wire");
+            app.teardown();
+        }
+    }
+
+    // Noise at every rate walks the whole table once, then gives the wire
+    // back at the rate it started from rather than wherever it ended up.
+    {
+        RatePty noise;
+        noise.rate = B4800;   // not in the table, so never the right answer
+        if (noise.start(error)) {
+            App app;
+            check(app.setup(opt, error), "the probe app starts for noise: " + error);
+            aim(app, noise.slave, 115200);
+            const int rounds = drive(app, noise, kBaudChoiceCount + 3);
+            check(rounds == kBaudChoiceCount &&
+                      static_cast<int>(app.gnssProbeTried_.size()) == kBaudChoiceCount,
+                  "every rate in the table is tried exactly once");
+            check(!app.gnss_.isOpen() && app.gnssBaud_ == 115200,
+                  "then the wire is released and the saved rate stands");
+            check(told(app, "no NMEA at any rate"),
+                  "and the verdict says the table was walked");
+            app.teardown();
+        }
+    }
+
+    // --gnss DEV is the mirror image of --no-gnss: it names a receiver on
+    // purpose, so the saved switch being off cannot make the flag do nothing
+    // (on the bench it did), and the switch it forced on is not saved.
+    {
+        App app;
+        check(app.setup(opt, error), "the app starts to switch the receiver off: " + error);
+        app.gnssWanted_ = false;
+        app.config_.setBool("gnss.enabled", false);
+        app.teardown();
+    }
+    check(configText().find("gnss.enabled = 0") != std::string::npos, "the saved switch is off");
+    {
+        App::Options named = opt;
+        named.gnssDevice = receiver.slave;
+        App app;
+        check(app.setup(named, error), "the app starts with --gnss DEV: " + error);
+        check(app.gnssWanted_ && app.gnss_.isOpen() &&
+                  sameDeviceNode(app.gnss_.device(), receiver.slave),
+              "--gnss DEV opens the receiver it names although the saved switch is off");
+        app.teardown();
+    }
+    check(configText().find("gnss.enabled = 0") != std::string::npos,
+          "the switch --gnss DEV forced on for its launch is not saved");
+    {
+        App app;
+        check(app.setup(opt, error), "the app restarts without --gnss: " + error);
+        check(!app.gnssWanted_ && !app.gnss_.isOpen(),
+              "and a plain launch still honours the saved switch");
+        app.teardown();
+    }
+
+    restoreEnv();
 }
 
 void testMeshApp() {
@@ -2936,6 +3241,7 @@ int runSelfTest() {
     testStorage();
     testBattery();
     testLinkBaud();
+    testPortRoles();
 #if defined(__linux__)
     {
         ThermalFixture action = makeThermalFixture("4");
@@ -3325,6 +3631,7 @@ int runSelfTest() {
     testMeshNmeaPort();
     testMeshConfigProgress();
     testMeshApp();
+    testGnssBaudProbe();
     testFieldGeometry();
     testMarks();
     testQuickMessages();
