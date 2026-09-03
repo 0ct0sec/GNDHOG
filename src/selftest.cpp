@@ -1377,6 +1377,26 @@ void testGnss() {
     check(parseNmeaSentence("$GPTXT,01,01,01,ANTENNA OPEN*25", antenna, 6000) &&
               antenna.receiverText == "ANTENNA OPEN",
           "a TXT sentence keeps the receiver's own words for the status screen");
+
+    // The bench's AT6668 sends one GSV set per constellation, and the last
+    // set of the cycle says 00 in view. The status page read "0 in view"
+    // under a sky the same receiver had just counted ten satellites in.
+    GnssFix sky;
+    for (const char* body :
+         {"GPGSV,2,1,05,10,48,168,,15,20,061,,18,39,066,,20,10,031,,1",
+          "GLGSV,1,1,03,69,25,034,,70,35,092,,85,46,059,,1", "GAGSV,1,1,00,7",
+          "BDGSV,1,1,02,06,27,038,,19,32,062,,1", "GQGSV,1,1,00,1",
+          "GPGSV,2,1,05,10,48,168,,15,20,061,,18,39,066,,20,10,031,,1"}) {
+        const std::string text = body;
+        sum = 0;
+        for (char c : text) sum ^= static_cast<uint8_t>(c);
+        std::snprintf(tail, sizeof(tail), "*%02X", sum);
+        check(parseNmeaSentence("$" + text + tail, sky, 7000),
+              std::string("a GSV set from ") + text.substr(0, 2) + " is a sentence");
+    }
+    check(sky.satellitesInView == 10,
+          "satellites in view are summed across constellations, and a repeated "
+          "talker replaces its own count rather than adding to it");
 }
 
 // --------------------------------------------------------- mesh session

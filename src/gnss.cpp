@@ -215,7 +215,14 @@ bool parseNmeaSentence(const std::string& sentence, GnssFix& fix, uint64_t nowMs
     if (type == "GSV") {
         if (f.size() < 4) return false;
         int inView = 0;
-        if (parseInt(f[3], inView)) fix.satellitesInView = inView;
+        if (parseInt(f[3], inView)) {
+            // Field 3 is that constellation's total, so the sky is the sum
+            // over talkers, not whichever talker spoke last.
+            fix.inViewByTalker[f[0].substr(0, f[0].size() - 3)] = inView;
+            int total = 0;
+            for (const auto& entry : fix.inViewByTalker) total += entry.second;
+            fix.satellitesInView = total;
+        }
         return true;
     }
 

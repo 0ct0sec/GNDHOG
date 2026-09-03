@@ -2,6 +2,7 @@
 #include "serialport.h"
 
 #include <cstdint>
+#include <map>
 #include <string>
 
 namespace bf {
@@ -18,7 +19,11 @@ struct GnssFix {
     bool haveAltitude = false;
     double altitudeM = 0.0;
     int satellitesUsed = 0;
-    int satellitesInView = 0;
+    int satellitesInView = 0;        // the sum of every constellation's GSV total
+    // One GSV total per talker (GP, GL, GA, BD, GQ...). The bench's AT6668
+    // sends a set per constellation and the last set of each cycle said 00,
+    // which used to zero a count that was five satellites high.
+    std::map<std::string, int> inViewByTalker;
     double hdop = 0.0;
     bool haveSpeed = false;
     double speedKph = 0.0;
