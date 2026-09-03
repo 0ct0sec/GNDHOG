@@ -39,6 +39,9 @@ enum MenuId {
     MenuGnssToggle,
     MenuGnssStatus,
     MenuMeshShare,
+    MenuFcBaud,
+    MenuMeshBaud,
+    MenuGnssBaud,
     MenuOpenFlightController = 100,
     MenuOpenBackupRestore,
     MenuOpenMesh,
@@ -46,6 +49,7 @@ enum MenuId {
     MenuOpenControlsInfo,
     MenuOpenSoundDisplay,
     MenuOpenConnectionExit,
+    MenuOpenLinkSpeeds,
 };
 
 struct QuickCmd {
@@ -143,9 +147,19 @@ void App::setupMenus() {
         {"Brightness +", "", MenuBrightUp, true},
     };
     connectionMenu_ = {
+        {"Baud rates", "one line rate per peer, remembered", MenuOpenLinkSpeeds, true},
         {"Disconnect", "restore bench VTX state or close link", MenuDisconnect, true},
         {"Exit GNDHOG ZERO", "return to the launcher", MenuExit, true},
     };
+    // Three peers, three rates. USB CDC negotiates its own and ignores these;
+    // the Grove and EXT UARTs do not, which is where a wrong rate turns into
+    // a port that opens perfectly and then says nothing at all.
+    linkSpeedMenu_ = {
+        {"Flight controller", "", MenuFcBaud, true},
+        {"Meshtastic radio", "", MenuMeshBaud, true},
+        {"LoRa Cap GNSS", "", MenuGnssBaud, true},
+    };
+    refreshLinkSpeedMenu();
     refreshMeshMenus();
     menuPage_ = MenuPage::Root;
     menuList_ = ListState{};
@@ -212,6 +226,7 @@ std::vector<MenuItem>& App::currentMenuItems() {
     case MenuPage::ControlsInfo:     return controlsMenu_;
     case MenuPage::SoundDisplay:     return settingsMenu_;
     case MenuPage::ConnectionExit:   return connectionMenu_;
+    case MenuPage::LinkSpeeds:       return linkSpeedMenu_;
     case MenuPage::Root:
     default:                         return menu_;
     }
@@ -241,6 +256,7 @@ void App::setScreen(Screen s) {
     screen_ = s;
     if (screen_ == Screen::Menu) {
         refreshSoundMenu();
+        refreshLinkSpeedMenu();
         refreshMeshMenus();
     }
     // A key held across a screen change must not act on the new screen.
@@ -361,16 +377,25 @@ bool App::setup(const Options& opt, std::string& error) {
     // or a USB receiver is somebody else's Tuesday.
     gnssDevice_ = opt_.gnssDevice.empty() ? config_.get("gnss.device", "/dev/serial0")
                                           : opt_.gnssDevice;
-    gnssBaud_ = config_.getInt("gnss.baud", 115200);
+    // A rate on the command line wins for this launch; otherwise the saved one
+    // does. A hand-edited config that names a rate this libc has no termios
+    // constant for is refused here rather than at open time, where it would
+    // look like the peer had gone quiet.
+    gnssBaud_ = opt_.gnssBaudSet ? opt_.gnssBaud : config_.getInt("gnss.baud", 115200);
     if (!isSupportedBaud(gnssBaud_)) gnssBaud_ = 115200;
+    fcBaud_ = opt_.fcBaudSet ? opt_.fcBaud : config_.getInt("fc.baud", 115200);
+    if (!isSupportedBaud(fcBaud_)) fcBaud_ = 115200;
+    meshBaud_ = opt_.meshBaudSet ? opt_.meshBaud : config_.getInt("mesh.baud", 115200);
+    if (!isSupportedBaud(meshBaud_)) meshBaud_ = 115200;
     gnssWanted_ = opt_.gnssEnabled && config_.getBool("gnss.enabled", true);
+
+    // The pack is the operator's own clock in the field, so the indicator is
+    // wired up before anything is connected. No gauge is a normal outcome.
+    battery_.discover();
+    battery_.poll(nowMs());
 
     setupMenus();
     refreshSoundMenu();
-
-    for (int i = 0; i < kBaudChoiceCount; ++i) {
-        if (kBaudChoices[i] == opt_.baud) baudIndex_ = i;
-    }
 
     refreshPorts();
     refreshFiles();
@@ -413,7 +438,11 @@ void App::teardown() {
     // smoke test with --no-gnss should not disable the receiver forever.
     if (opt_.gnssEnabled) config_.setBool("gnss.enabled", gnssWanted_);
     if (opt_.gnssDevice.empty()) config_.set("gnss.device", gnssDevice_);
-    config_.setInt("gnss.baud", gnssBaud_);
+    // Same contract as --mute and --no-gnss: a rate handed in on the command
+    // line is this launch's business and never becomes the saved default.
+    if (!opt_.gnssBaudSet) config_.setInt("gnss.baud", gnssBaud_);
+    if (!opt_.fcBaudSet) config_.setInt("fc.baud", fcBaud_);
+    if (!opt_.meshBaudSet) config_.setInt("mesh.baud", meshBaud_);
     std::string err;
     config_.save(storage_, err);
     mesh_.disconnect();
@@ -774,7 +803,7 @@ void App::connectSelected() {
 }
 
 void App::connectPort(const PortInfo& port, LinkMode mode) {
-    const int baud = kBaudChoices[baudIndex_];
+    const int baud = linkBaud(mode);
     std::string error;
 
     if (mode == LinkMode::Meshtastic) {
@@ -1265,6 +1294,66 @@ void App::adjustBrightness(int delta) {
     dirty_ = true;
 }
 
+int& App::linkBaudFor(LinkMode mode) {
+    return mode == LinkMode::Meshtastic ? meshBaud_ : fcBaud_;
+}
+
+int App::linkBaud(LinkMode mode) const {
+    return mode == LinkMode::Meshtastic ? meshBaud_ : fcBaud_;
+}
+
+void App::cycleLinkBaud(LinkMode mode) {
+    int& baud = linkBaudFor(mode);
+    baud = nextBaudChoice(baud);
+    const char* who = mode == LinkMode::Meshtastic ? "radio" : "flight controller";
+    // The rate is applied when the port is opened, so saying so is the
+    // difference between a setting and an apparently ignored keystroke.
+    status_ = std::string(who) + " baud " + std::to_string(baud) +
+              (linkConnected() && linkMode_ == mode ? " - applies on the next connect" : "");
+    statusUntil_ = nowMs() + 3000;
+    refreshLinkSpeedMenu();
+    dirty_ = true;
+}
+
+void App::cycleGnssBaud() {
+    gnssBaud_ = nextBaudChoice(gnssBaud_);
+    status_ = "GNSS baud " + std::to_string(gnssBaud_);
+    // Unlike the link rates, this one owns its port outright, so it can be
+    // proved immediately instead of being promised for the next connect.
+    if (gnssWanted_ && gnss_.isOpen()) {
+        gnss_.close();
+        gnssProbeDeadlineMs_ = 0;
+        startGnss();
+        if (!gnss_.isOpen()) status_ += " - receiver did not reopen";
+    }
+    statusUntil_ = nowMs() + 3000;
+    refreshLinkSpeedMenu();
+    refreshMeshMenus();
+    dirty_ = true;
+}
+
+void App::refreshLinkSpeedMenu() {
+    for (MenuItem& item : linkSpeedMenu_) {
+        switch (item.id) {
+        case MenuFcBaud:
+            item.label = "Flight controller: " + std::to_string(fcBaud_);
+            item.hint = "USB CDC ignores this; a wired UART does not";
+            break;
+        case MenuMeshBaud:
+            item.label = "Meshtastic radio: " + std::to_string(meshBaud_);
+            item.hint = "used when the radio is wired, not on USB";
+            break;
+        case MenuGnssBaud:
+            item.label = "LoRa Cap GNSS: " + std::to_string(gnssBaud_);
+            item.hint = gnss_.isOpen() ? "Enter reopens the receiver at the next rate"
+                                       : "AT6668 ships at 115200 NMEA 0183";
+            break;
+        default: break;
+        }
+    }
+    dirty_ = true;
+}
+
 void App::refreshSoundMenu() {
     const std::string audioError = audio_.lastError();
     for (MenuItem& item : settingsMenu_) {
@@ -1366,6 +1455,13 @@ void App::applyMenu(int id) {
     case MenuOpenConnectionExit:
         openMenuPage(MenuPage::ConnectionExit);
         break;
+    case MenuOpenLinkSpeeds:
+        refreshLinkSpeedMenu();
+        openMenuPage(MenuPage::LinkSpeeds);
+        break;
+    case MenuFcBaud:   cycleLinkBaud(LinkMode::Betaflight); break;
+    case MenuMeshBaud: cycleLinkBaud(LinkMode::Meshtastic); break;
+    case MenuGnssBaud: cycleGnssBaud(); break;
     case MenuFieldCheck:
         runFieldCheck();
         break;
@@ -1462,8 +1558,9 @@ void App::onPortsKey(const KeyEvent& e) {
             status_ = "rescanned: " + std::to_string(ports_.size()) + " ports";
             statusUntil_ = nowMs() + 2000;
         } else if (e.ch == 'b' || e.ch == 'B') {
-            baudIndex_ = (baudIndex_ + 1) % kBaudChoiceCount;
-            dirty_ = true;
+            // The picker already knows which protocol Enter will speak, so B
+            // adjusts that peer's rate and leaves the other two alone.
+            cycleLinkBaud(portLinkMode_);
         } else if (e.ch == 'm' || e.ch == 'M') {
             // The identity is a strong hint, not a verdict. A radio flashed
             // onto an FC-shaped board is still a radio.
@@ -1635,6 +1732,10 @@ void App::onMenuKey(const KeyEvent& e) {
         audio_.play(HudCue::Back);
         if (quick) {
             setScreen(Screen::Menu);
+        } else if (menuPage_ == MenuPage::LinkSpeeds) {
+            // The only page two levels deep. Escape gives back the category it
+            // was opened from rather than dropping the operator at the root.
+            openMenuPage(MenuPage::ConnectionExit);
         } else if (menuPage_ != MenuPage::Root) {
             openMenuPage(MenuPage::Root);
         } else {
@@ -2068,6 +2169,10 @@ void App::tick(uint64_t now) {
 }
 
 void App::tickStatusTail(uint64_t now) {
+    // Throttled inside Battery: a resting pack is read every five seconds and
+    // only repaints the bar when a number the operator can see has moved.
+    if (battery_.poll(now)) dirty_ = true;
+
     const std::string audioError = audio_.lastError();
     if (audioError != lastAudioError_) {
         lastAudioError_ = audioError;
@@ -2198,12 +2303,13 @@ int App::run(const Options& opt) {
             {Screen::Menu, MenuPage::ControlsInfo, "06-menu-controls-info"},
             {Screen::Menu, MenuPage::SoundDisplay, "07-menu-sound-display"},
             {Screen::Menu, MenuPage::ConnectionExit, "08-menu-connection-exit"},
-            {Screen::Quick, MenuPage::FlightController, "09-quick"},
-            {Screen::Files, MenuPage::Root, "10-files"},
-            {Screen::Keymap, MenuPage::Root, "11-keymap"},
-            {Screen::Help, MenuPage::Root, "12-help"},
-            {Screen::Diagnostics, MenuPage::Root, "13-field-check"},
-            {Screen::About, MenuPage::Root, "14-about"},
+            {Screen::Menu, MenuPage::LinkSpeeds, "09-menu-link-speeds"},
+            {Screen::Quick, MenuPage::FlightController, "10-quick"},
+            {Screen::Files, MenuPage::Root, "11-files"},
+            {Screen::Keymap, MenuPage::Root, "12-keymap"},
+            {Screen::Help, MenuPage::Root, "13-help"},
+            {Screen::Diagnostics, MenuPage::Root, "14-field-check"},
+            {Screen::About, MenuPage::Root, "15-about"},
         };
         status_.clear();   // show each screen's real hint bar, not a startup notice
         pushLocal("# Betaflight / STM32G47X (G473) 2026.6.0-alpha MSP API: 1.48", LineKind::Fc);
@@ -2234,7 +2340,7 @@ int App::run(const Options& opt) {
         screen_ = Screen::Terminal;
         confirm("Props off?", "Spins a motor. Props off?\n\n> motor 1 1100", "Send", nullptr);
         render();
-        if (display_.canvas().writePpm(opt.previewDir + "/15-confirm.ppm")) ++written;
+        if (display_.canvas().writePpm(opt.previewDir + "/16-confirm.ppm")) ++written;
         closeModal();
         confirm("Bench VTX guard?",
                 "SmartAudio reports power level 3/4.\n\nTry verified pit mode before entering "
@@ -2242,7 +2348,7 @@ int App::run(const Options& opt) {
                 "Unsupported hardware is left unchanged.",
                 "Use pit", nullptr);
         render();
-        if (display_.canvas().writePpm(opt.previewDir + "/16-vtx-guard.ppm")) ++written;
+        if (display_.canvas().writePpm(opt.previewDir + "/17-vtx-guard.ppm")) ++written;
         closeModal();
         notice("CRITICAL FC TEMPERATURE",
                "FC MCU core is 82C. Betaflight's default alarm is 70C.\n\n"
@@ -2250,7 +2356,7 @@ int App::run(const Options& opt) {
                "battery power, and let the stack cool. Closing the serial link does not "
                "remove USB power.");
         render();
-        if (display_.canvas().writePpm(opt.previewDir + "/17-temperature-warning.ppm")) ++written;
+        if (display_.canvas().writePpm(opt.previewDir + "/18-temperature-warning.ppm")) ++written;
         closeModal();
         confirm("Restore VTX state?",
                 "Pit mode is active for bench work. Restore the saved flight state?\n\n"
@@ -2259,7 +2365,7 @@ int App::run(const Options& opt) {
                 "power-cycled.",
                 "Restore", nullptr);
         render();
-        if (display_.canvas().writePpm(opt.previewDir + "/18-vtx-restore.ppm")) ++written;
+        if (display_.canvas().writePpm(opt.previewDir + "/19-vtx-restore.ppm")) ++written;
         closeModal();
 
         // The mesh screens are worth seeing with real traffic in them, so the
@@ -2296,12 +2402,12 @@ int App::run(const Options& opt) {
             chatFollow_ = true;
 
             const struct { Screen screen; MenuPage page; const char* name; } kMeshShots[] = {
-                {Screen::Nodes, MenuPage::Root, "19-mesh-nodes"},
-                {Screen::Chat, MenuPage::Root, "20-mesh-chat"},
-                {Screen::Menu, MenuPage::Root, "21-mesh-menu"},
-                {Screen::Menu, MenuPage::Mesh, "22-mesh-network"},
-                {Screen::Menu, MenuPage::MeshPosition, "23-mesh-position-gnss"},
-                {Screen::Terminal, MenuPage::Root, "24-mesh-radio-log"},
+                {Screen::Nodes, MenuPage::Root, "20-mesh-nodes"},
+                {Screen::Chat, MenuPage::Root, "21-mesh-chat"},
+                {Screen::Menu, MenuPage::Root, "22-mesh-menu"},
+                {Screen::Menu, MenuPage::Mesh, "23-mesh-network"},
+                {Screen::Menu, MenuPage::MeshPosition, "24-mesh-position-gnss"},
+                {Screen::Terminal, MenuPage::Root, "25-mesh-radio-log"},
             };
             for (const auto& shot : kMeshShots) {
                 screen_ = shot.screen;

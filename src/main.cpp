@@ -43,7 +43,10 @@ void usage() {
         "Usage: bfcli [options]\n"
         "\n"
         "  --port DEV        connect to DEV instead of showing the port picker\n"
-        "  --baud N          baud rate for a UART port (default 115200)\n"
+        "  --baud N          UART rate for both link peers (default 115200)\n"
+        "  --fc-baud N       UART rate for the flight controller only\n"
+        "  --mesh-baud N     UART rate for the Meshtastic radio only\n"
+        "  --gnss-baud N     UART rate for the LoRa Cap GNSS receiver only\n"
         "  --fb DEV          framebuffer device (default /dev/fb0)\n"
         "  --headless        render offscreen only, no framebuffer\n"
         "  --stdin           read keys from stdin instead of evdev\n"
@@ -62,6 +65,11 @@ void usage() {
         "  --about           open the About screen without connecting an FC\n"
         "  --version         print the author and source commit, then exit\n"
         "  --help            this text\n"
+        "\n"
+        "Each --*-baud switch is a launch-wide override in the way --mute is: it\n"
+        "changes this session and does not rewrite the saved rate. Without one,\n"
+        "the rates in config.ini (fc.baud, mesh.baud, gnss.baud) are used, and\n"
+        "the menu's Baud rates page is what keeps them.\n"
         "\n"
         "Data (backups, history, config) lives under $BFCLI_DATA_DIR, or\n"
         "$XDG_DATA_HOME/bfcli, defaulting to ~/.local/share/bfcli.\n");
@@ -106,11 +114,28 @@ int main(int argc, char** argv) {
         else if (a == "--selftest") return bf::runSelfTest();
         else if (a == "--list-ports") return listPorts();
         else if (a == "--port") opt.portOverride = next("--port");
-        else if (a == "--baud") {
-            if (!parsePositiveInt(next("--baud"), "--baud", opt.baud)) return 2;
-            if (!bf::isSupportedBaud(opt.baud)) {
-                printUnsupportedBaud(opt.baud);
+        else if (a == "--baud" || a == "--fc-baud" || a == "--mesh-baud" ||
+                 a == "--gnss-baud") {
+            const std::string flag = a;
+            int rate = 0;
+            if (!parsePositiveInt(next(flag.c_str()), flag.c_str(), rate)) return 2;
+            if (!bf::isSupportedBaud(rate)) {
+                printUnsupportedBaud(rate);
                 return 2;
+            }
+            // --baud keeps its original meaning -- the rate of whichever link
+            // this launch opens -- while the specific switches name one peer.
+            if (flag == "--baud" || flag == "--fc-baud") {
+                opt.fcBaud = rate;
+                opt.fcBaudSet = true;
+            }
+            if (flag == "--baud" || flag == "--mesh-baud") {
+                opt.meshBaud = rate;
+                opt.meshBaudSet = true;
+            }
+            if (flag == "--gnss-baud") {
+                opt.gnssBaud = rate;
+                opt.gnssBaudSet = true;
             }
         }
         else if (a == "--fb") opt.fbDevice = next("--fb");

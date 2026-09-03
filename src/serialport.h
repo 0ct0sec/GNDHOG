@@ -81,5 +81,9 @@ extern const int kBaudChoiceCount;
 // True only when the requested rate has an exact termios mapping. Unsupported
 // values must never be silently negotiated as 115200.
 bool isSupportedBaud(int baud);
+// The next rate in kBaudChoices, wrapping at the end. A rate that is not in the
+// table -- a hand-edited config, or a value this libc has no constant for --
+// lands on the first choice rather than being cycled from nowhere.
+int nextBaudChoice(int baud);
 
 } // namespace bf

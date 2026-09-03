@@ -1,5 +1,6 @@
 #include "app.h"
 #include "audio.h"
+#include "battery.h"
 #include "brand.h"
 #include "mascot.h"
 #include "bfcommands.h"
@@ -1575,6 +1576,249 @@ void testMeshSession() {
 
 // ------------------------------------------------------------- mesh app
 
+struct BatteryFixture {
+    std::string root;
+    std::string supply;
+    bool ok = false;
+};
+
+// A power_supply class with two entries, because the real one has more than a
+// battery in it and picking the wrong node would draw the wall socket.
+BatteryFixture makeBatteryFixture() {
+    static int serial = 0;
+    BatteryFixture f;
+    f.root = "/tmp/bfcli-battery-selftest-" + std::to_string(::getpid()) + "-" +
+             std::to_string(++serial);
+    const std::string mains = f.root + "/ac-adapter";
+    f.supply = f.root + "/bq27220-0";
+    if (!fixtureDir(f.root) || !fixtureDir(mains) || !fixtureDir(f.supply)) return f;
+    if (!fixtureFile(mains + "/type", "Mains") ||
+        !fixtureFile(mains + "/online", "1") ||
+        !fixtureFile(f.supply + "/type", "Battery") ||
+        !fixtureFile(f.supply + "/present", "1") ||
+        !fixtureFile(f.supply + "/capacity", "96") ||
+        !fixtureFile(f.supply + "/status", "Discharging") ||
+        !fixtureFile(f.supply + "/health", "Good") ||
+        !fixtureFile(f.supply + "/voltage_now", "3987000") ||
+        !fixtureFile(f.supply + "/current_now", "-461000") ||
+        !fixtureFile(f.supply + "/time_to_empty_now", "23700")) {
+        return f;
+    }
+    f.ok = true;
+    return f;
+}
+
+int barPixels(Surface& s, int row, Color c) {
+    int n = 0;
+    for (int x = 0; x < s.w; ++x) {
+        if (s.row(row)[x] == c) ++n;
+    }
+    return n;
+}
+
+int firstPixel(Surface& s, int row, Color c) {
+    for (int x = 0; x < s.w; ++x) {
+        if (s.row(row)[x] == c) return x;
+    }
+    return -1;
+}
+
+// The percentage text is drawn in the same colour as the fill, so counting the
+// whole scanline measures both. The pictogram is always left of the text, so
+// the leftmost run of that colour is the fill and only the fill. Row 4 crosses
+// it and nothing else the bar paints in these colours.
+int fillRun(Surface& s, int row, Color c) {
+    const int start = firstPixel(s, row, c);
+    if (start < 0) return 0;
+    int n = 0;
+    for (int x = start; x < s.w && s.row(row)[x] == c; ++x) ++n;
+    return n;
+}
+
+int lastPixel(Surface& s, int row, Color c) {
+    for (int x = s.w - 1; x >= 0; --x) {
+        if (s.row(row)[x] == c) return x;
+    }
+    return -1;
+}
+
+void testBattery() {
+    section("battery gauge and its indicator");
+    const BatteryFixture f = makeBatteryFixture();
+    check(f.ok, "power_supply fixture is created");
+    if (!f.ok) return;
+
+    Battery b;
+    check(b.discoverIn(f.root) && b.path() == f.supply,
+          "discovery walks past the mains supply to the battery");
+    check(!Battery().discoverIn(f.root + "/nope"),
+          "a machine with no power_supply class is a normal, quiet outcome");
+
+    check(b.poll(0), "the first poll produces a reading");
+    const BatteryReading& r = b.reading();
+    check(r.present && r.percent == 96 && !r.charging && r.state == "Discharging",
+          "the gauge's capacity and status are read as published");
+    check(r.milliVolts == 3987 && r.milliAmps == -461 && r.secondsToEmpty == 23700,
+          "microvolts and microamps are scaled, and the runtime estimate kept");
+    checkEq(r.shortText(), "96%", "the bar's text is the bare percentage");
+    check(r.detailText().find("3.98V") != std::string::npos &&
+              r.detailText().find("6h35m left") != std::string::npos,
+          "the detail line carries volts and the gauge's own time to empty");
+
+    // Five seconds between reads: a resting pack must not repaint the bar, and
+    // must not be re-read either.
+    check(fixtureFile(f.supply + "/capacity", "42"), "the fixture capacity is rewritten");
+    check(!b.poll(4999) && b.reading().percent == 96,
+          "a poll inside the interval neither reads nor repaints");
+    check(b.poll(5000) && b.reading().percent == 42,
+          "the next poll past the interval picks the new level up");
+    check(!b.poll(10000), "an unchanged pack reports no repaint");
+
+    check(fixtureFile(f.supply + "/status", "Charging"), "the fixture is put on the cable");
+    check(b.poll(15000), "a change of charging state is a repaint");
+    checkEq(b.reading().shortText(), "+42%",
+            "charging is spelled with a plus, not a fourth colour");
+
+    check(fixtureFile(f.supply + "/present", "0"), "the fixture pack is pulled");
+    check(b.poll(20000) && !b.reading().present && !b.reading().known(),
+          "an absent pack is reported absent rather than as zero percent");
+
+    // The indicator itself, drawn into the real top bar at the real geometry.
+    check(fixtureFile(f.supply + "/present", "1") &&
+              fixtureFile(f.supply + "/capacity", "96") &&
+              fixtureFile(f.supply + "/status", "Discharging"),
+          "the fixture pack is restored");
+    {
+        App app;
+        app.display_.setHeadlessSize(kScreenW, kScreenH);
+        app.setupMenus();
+        app.screen_ = Screen::Ports;
+        app.render();
+        Surface bare = app.display_.surface();
+        const int bareFill = barPixels(bare, 4, theme::ok) + barPixels(bare, 4, theme::warn) +
+                             barPixels(bare, 4, theme::err);
+        check(bareFill == 0, "a host with no gauge draws no indicator at all");
+
+        check(app.battery_.discoverIn(f.root), "the app binds the fixture gauge");
+        app.battery_.poll(0);
+        app.render();
+        Surface s = app.display_.surface();
+        check(fillRun(s, 4, theme::ok) == 11,
+              "a full pack fills the whole 11px column in the healthy colour");
+        const int chipX = firstPixel(s, 4, theme::panelHi);
+        check(chipX > 0 && lastPixel(s, 4, theme::ok) < chipX,
+              "the indicator stays clear of the state chip it sits beside");
+        check(firstPixel(s, 4, theme::textDim) < firstPixel(s, 4, theme::ok),
+              "the shell is drawn as chrome around the fill, not as the fill");
+
+        check(fixtureFile(f.supply + "/capacity", "25"), "the fixture drops to a low pack");
+        app.battery_.poll(6000);
+        app.render();
+        s = app.display_.surface();
+        check(barPixels(s, 4, theme::ok) == 0 && fillRun(s, 4, theme::warn) == 3,
+              "a low pack switches to amber and shrinks the fill");
+
+        check(fixtureFile(f.supply + "/capacity", "3"), "the fixture drops to a critical pack");
+        app.battery_.poll(12000);
+        app.render();
+        s = app.display_.surface();
+        check(fillRun(s, 4, theme::err) == 1,
+              "3% is red and still one visible pixel, never an empty shell");
+    }
+}
+
+void testLinkBaud() {
+    section("one baud rate per peer");
+    check(nextBaudChoice(115200) == kBaudChoices[1], "the default cycles to the next choice");
+    check(nextBaudChoice(kBaudChoices[kBaudChoiceCount - 1]) == kBaudChoices[0],
+          "the last choice wraps to the first");
+    check(nextBaudChoice(1200) == kBaudChoices[0],
+          "a rate no termios constant covers lands on the default");
+    check(!isSupportedBaud(1200), "1200 baud is still refused outright");
+
+    const std::string dataDir = "/tmp/bfcli-baud-selftest-" + std::to_string(::getpid());
+    const char* previous = ::getenv("BFCLI_DATA_DIR");
+    const std::string saved = previous ? previous : "";
+    ::setenv("BFCLI_DATA_DIR", dataDir.c_str(), 1);
+
+    App::Options opt;
+    opt.headless = true;
+    opt.autoConnect = false;
+    opt.muteSound = true;
+
+    std::string error;
+    {
+        App app;
+        check(app.setup(opt, error), "the app starts with an empty config: " + error);
+        check(app.fcBaud_ == 115200 && app.meshBaud_ == 115200 && app.gnssBaud_ == 115200,
+              "all three peers default to 115200");
+        app.cycleLinkBaud(LinkMode::Betaflight);
+        app.cycleGnssBaud();
+        app.cycleGnssBaud();
+        check(app.fcBaud_ == 57600 && app.meshBaud_ == 115200 && app.gnssBaud_ == 38400,
+              "changing one peer's rate leaves the other two where they were");
+        app.teardown();
+    }
+    {
+        App app;
+        check(app.setup(opt, error), "the app restarts against the written config: " + error);
+        check(app.fcBaud_ == 57600 && app.meshBaud_ == 115200 && app.gnssBaud_ == 38400,
+              "every rate survives a restart on its own key");
+        check(app.linkBaud(LinkMode::Betaflight) == 57600 &&
+                  app.linkBaud(LinkMode::Meshtastic) == 115200,
+              "the connect path asks for the rate of the protocol it is opening");
+
+        // The picker's B key belongs to the protocol Enter is about to speak.
+        PortInfo grove;
+        grove.device = "/dev/ttyS0";
+        grove.kind = "uart";
+        app.ports_ = {grove};
+        app.screen_ = Screen::Ports;
+        app.portLinkMode_ = LinkMode::Meshtastic;
+        KeyEvent key;
+        key.key = Key::Char;
+        key.ch = 'b';
+        app.handleKey(key);
+        check(app.meshBaud_ == 57600 && app.fcBaud_ == 57600 && app.gnssBaud_ == 38400,
+              "B on the picker moves only the highlighted protocol's rate");
+        app.teardown();
+    }
+    {
+        // The --no-gnss lesson: a launch-wide switch changes the session and
+        // must never quietly become the saved default.
+        App::Options override = opt;
+        override.fcBaud = 921600;
+        override.fcBaudSet = true;
+        App app;
+        check(app.setup(override, error), "the app starts under a command-line rate: " + error);
+        check(app.fcBaud_ == 921600, "--fc-baud wins for the launch that named it");
+        check(app.meshBaud_ == 57600, "the peers it did not name keep their saved rates");
+        app.teardown();
+    }
+    {
+        App app;
+        check(app.setup(opt, error), "the app restarts after the override: " + error);
+        check(app.fcBaud_ == 57600,
+              "a command-line rate did not rewrite the rate on disk");
+        app.teardown();
+    }
+
+    // And the file itself, because every host test points at a directory
+    // nobody ever opens again.
+    Storage storage;
+    check(storage.init(error), "the baud config directory is readable: " + error);
+    std::string ini;
+    check(storage.readFile(storage.configPath(), ini, error),
+          "the config file the app left behind is readable: " + error);
+    check(ini.find("fc.baud = 57600") != std::string::npos &&
+              ini.find("mesh.baud = 57600") != std::string::npos &&
+              ini.find("gnss.baud = 38400") != std::string::npos,
+          "each peer's rate is written under its own key");
+
+    if (saved.empty()) ::unsetenv("BFCLI_DATA_DIR");
+    else ::setenv("BFCLI_DATA_DIR", saved.c_str(), 1);
+}
+
 void testMeshApp() {
     section("mesh screens, menus and saved conversations");
     SimMesh sim;
@@ -1617,7 +1861,7 @@ void testMeshApp() {
               "the mesh root keeps five categories and leads with the radio");
         const MenuPage pages[] = {
             MenuPage::Mesh,         MenuPage::MeshPosition,  MenuPage::ControlsInfo,
-            MenuPage::SoundDisplay, MenuPage::ConnectionExit,
+            MenuPage::SoundDisplay, MenuPage::ConnectionExit, MenuPage::LinkSpeeds,
         };
         std::set<int> ids;
         int actions = 0;
@@ -1631,7 +1875,7 @@ void testMeshApp() {
                 labelsFit &= static_cast<int>(item.label.size()) <= labelColumns;
             }
         }
-        check(actions == 18 && ids.size() == 18,
+        check(actions == 22 && ids.size() == 22,
               "every mesh action has exactly one category owner");
         check(labelsFit, "every mesh menu label fits the 6x8 grid");
         app.openMenuPage(MenuPage::Root);
@@ -1783,6 +2027,8 @@ int runSelfTest() {
     testDiagnostics();
     testThermalTrip();
     testStorage();
+    testBattery();
+    testLinkBaud();
 #if defined(__linux__)
     {
         ThermalFixture action = makeThermalFixture("4");
@@ -1823,12 +2069,16 @@ int runSelfTest() {
             MenuPage::ControlsInfo,
             MenuPage::SoundDisplay,
             MenuPage::ConnectionExit,
+            MenuPage::LinkSpeeds,
         };
         std::set<int> actionIds;
         bool labelsFit = true;
         bool labelsClean = true;
+        bool hintsFit = true;
         int actionCount = 0;
         const int labelColumns = (kScreenW - 48) / kGlyphW;
+        // What drawHintBar leaves once the "Esc back" plate has taken its side.
+        const int hintColumns = (kScreenW - (textWidth("Esc back") + 8) - 4) / kGlyphW;
         for (const MenuItem& item : app.menu_) {
             labelsClean &= item.label.size() < 3 ||
                            item.label.compare(item.label.size() - 3, 3, "...") != 0;
@@ -1843,13 +2093,15 @@ int runSelfTest() {
                 ++actionCount;
                 actionIds.insert(item.id);
                 labelsFit &= static_cast<int>(item.label.size()) <= labelColumns;
+                hintsFit &= static_cast<int>(item.hint.size()) <= hintColumns;
                 labelsClean &= item.label.size() < 3 ||
                                item.label.compare(item.label.size() - 3, 3, "...") != 0;
             }
         }
-        check(actionCount == 16 && actionIds.size() == 16,
-              "all 16 actions have exactly one category owner");
+        check(actionCount == 20 && actionIds.size() == 20,
+              "all 20 actions have exactly one category owner");
         check(labelsFit, "every category action fits the original 6x8 menu grid");
+        check(hintsFit, "every category hint fits the hint bar without being clipped");
         check(labelsClean, "menu labels do not use trailing dot-dot-dot affordances");
         check(app.bodyRows(false) == 18, "menu typography restores eighteen 6x8 rows");
 

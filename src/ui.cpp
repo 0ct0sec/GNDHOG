@@ -47,6 +47,17 @@ Color colorFor(LineKind k) {
     }
 }
 
+// The pack's own three-step alarm ladder, deliberately the same green/amber/red
+// the state chip and the field check already use. Charging is not a level, so
+// it is spelled with a leading "+" in the text rather than a fourth colour that
+// would have to be learned.
+Color colorFor(const BatteryReading& b) {
+    if (!b.known()) return theme::textDim;
+    if (b.percent < 15) return theme::err;
+    if (b.percent < 40) return theme::warn;
+    return theme::ok;
+}
+
 Color colorFor(DiagnosticLevel level) {
     switch (level) {
     case DiagnosticLevel::Pass:    return theme::ok;
@@ -154,9 +165,27 @@ const char* const kHelpText[] = {
     "  Set the Host/Slave switch to HOST and plug the FC",
     "  into the USB-A port. It appears as ttyACM0.",
     "  A spare FC UART can be wired to Grove instead;",
-    "  pick the port and baud on the connect screen.",
+    "  pick the port on the connect screen, and press B",
+    "  to set the rate of the protocol Enter will open.",
     "  The picker proposes a protocol from the USB",
     "  identity. Press M to override it before Enter.",
+    "",
+    "BAUD RATES",
+    "  The flight controller, the Meshtastic radio and",
+    "  the LoRa Cap GNSS each keep their own rate, as",
+    "  fc.baud, mesh.baud and gnss.baud in config.ini.",
+    "  Set them in Menu > Connection & exit > Baud",
+    "  rates, or with B on the port picker. USB CDC",
+    "  negotiates its own rate and ignores these; a",
+    "  wired UART does not, and a wrong rate is a port",
+    "  that opens perfectly and then says nothing.",
+    "",
+    "BATTERY",
+    "  The top bar draws this device's own pack: a",
+    "  filled cell, the percentage, and a + while it is",
+    "  charging. Green, then amber, then red. A machine",
+    "  with no fuel gauge draws nothing at all rather",
+    "  than showing a level it had to invent.",
     "",
     "MESHTASTIC",
     "  A Meshtastic radio (M5Stack Unit C6L and friends)",
@@ -196,6 +225,32 @@ const char* const kHelpText[] = {
 constexpr int kHelpLines = static_cast<int>(sizeof(kHelpText) / sizeof(kHelpText[0]));
 
 } // namespace
+
+// Right-aligned against `right`, which is the left edge of the state chip. The
+// pictogram is 15px of the 6x8 lattice: a 13px shell, a 2px terminal, and an
+// 11px column of fill that is never allowed to vanish while the pack still has
+// charge -- an empty-looking shell at 3% is the one lie that matters here.
+int App::drawBatteryIndicator(Surface& s, int right) {
+    if (!battery_.available()) return right;
+    const BatteryReading& b = battery_.reading();
+    if (!b.present) return right;
+
+    const Color fg = colorFor(b);
+    const std::string text = b.shortText();
+    const int textW = textWidth(text);
+    const int x = right - 4 - textW - 2 - 15;
+    if (x < 0) return right;
+
+    const int y = 2;
+    rect(s, x, y, 13, 7, theme::textDim);
+    fillRect(s, x + 13, y + 2, 2, 3, theme::textDim);
+    if (b.percent > 0) {
+        const int fillW = std::max(1, std::min(11, (b.percent * 11 + 50) / 100));
+        fillRect(s, x + 1, y + 1, fillW, 5, fg);
+    }
+    drawText(s, x + 15 + 2, 1, text, fg);
+    return x;
+}
 
 void App::drawTopBar(Surface& s) {
     fillRect(s, 0, 0, s.w, kTopH, theme::panel);
@@ -271,9 +326,10 @@ void App::drawTopBar(Surface& s) {
     fillRect(s, chipX, 0, chipW, kTopH, theme::panelHi);
     vLine(s, chipX, 0, kTopH, theme::rule);
     hLine(s, chipX + 1, kTopH - 1, chipW - 1, chip);
+    const int batteryX = drawBatteryIndicator(s, chipX);
     const int midX = separatorX + 4;
     drawTextClipped(s, midX, 1, mid,
-                    (chipX - kGlyphW - midX) / kGlyphW, theme::text);
+                    (batteryX - kGlyphW - midX) / kGlyphW, theme::text);
     drawText(s, chipX + 4, 1, st, chip);
 }
 
@@ -402,9 +458,11 @@ void App::drawPorts(Surface& s) {
         const PortInfo& p = ports_[static_cast<size_t>(portList_.sel)];
         std::string detail = p.detail();
         if (p.kind == "uart") {
+            // Name the peer the rate belongs to: the same wire carries a very
+            // different conversation depending on which protocol Enter opens.
             detail += (detail.empty() ? "" : "  ") +
-                      std::string("baud ") + std::to_string(kBaudChoices[baudIndex_]) +
-                      "  B changes";
+                      std::string(portLinkMode_ == LinkMode::Meshtastic ? "mesh " : "FC ") +
+                      std::to_string(linkBaud(portLinkMode_)) + "  B changes";
         }
         if (!detail.empty()) hint = detail + "  M protocol";
     }
@@ -524,6 +582,7 @@ void App::drawMenu(Surface& s) {
             case MenuPage::ControlsInfo:     title = "Controls & info"; break;
             case MenuPage::SoundDisplay:     title = "Sound & display"; break;
             case MenuPage::ConnectionExit:   title = "Connection & exit"; break;
+            case MenuPage::LinkSpeeds:       title = "Baud rates"; break;
             case MenuPage::Root:             title = "Menu"; break;
             }
         }

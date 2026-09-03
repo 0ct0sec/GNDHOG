@@ -25,7 +25,7 @@ suspiciously small department.
 
 ```text
 ┌─────────────────────────────────────────────────────┐
-│ GNDHOG ZERO  ttyACM0 AIR65 C                  ready │
+│ GNDHOG ZERO  ttyACM0 AIR65 C         [==] 96% ready │
 │ # Betaflight / STM32G47X (G473) 2026.6.0-alpha      │
 │ Voltage: 4.12V (1S battery - OK)                    │
 │ Arming disable flags: RXLOSS CLI                    │
@@ -102,6 +102,19 @@ suspiciously small department.
   to any node that reported a position, plus a position you can choose to
   transmit. With no receiver, or no fix, GNDHOG says so. It does not invent a
   coordinate to fill a field.
+- **The pack, on every screen.** The Cardputer Zero's BQ27220 fuel gauge is
+  read through the ordinary Linux `power_supply` class and drawn in the top bar
+  beside the state chip: a filled cell, the percentage, and a `+` when it is on
+  the cable. It is green, amber, or red on the same ladder the rest of the app
+  uses, and the fill never rounds down to an empty-looking shell while there is
+  still charge. A machine with no gauge draws nothing and gives the width back
+  to the title, because an indicator that guesses is worse than no indicator.
+- **One baud rate per peer.** A flight controller, a Meshtastic radio, and the
+  LoRa Cap's GNSS receiver disagree about line rates, and they are wired to
+  different pins. GNDHOG keeps three separate rates in `config.ini` —
+  `fc.baud`, `mesh.baud`, `gnss.baud` — sets them under **Menu → Connection &
+  exit → Baud rates**, and changes the one that belongs to the highlighted
+  protocol when **B** is pressed on the port picker.
 - **Offline About screen.** Open **Menu → About GNDHOG ZERO**, or press **A**
   on the port picker, for the mascot, author, source commit, and abbreviated
   crash report. Enter or Escape returns to the previous screen. No FC is
@@ -218,8 +231,10 @@ Set the **Host/Slave switch to HOST**, then plug the FC into **USB-A**. A normal
 Betaflight USB connection appears as a CDC-ACM device such as `/dev/ttyACM0`
 (commonly `0483:5740`), and GNDHOG ranks it for automatic connection.
 
-A spare FC UART on the Grove connector works too; select its port and baud on
-the connect screen. Grove signal pins are **3.3 V**. The presence of 5 V on the
+A spare FC UART on the Grove connector works too; select its port on the
+connect screen and set its rate with **B**, which moves the rate of whichever
+protocol **Enter** is about to speak and leaves the other two peers alone.
+Grove signal pins are **3.3 V**. The presence of 5 V on the
 power pin does not grant the data pins diplomatic immunity from 5 V.
 
 In Slave/device mode the internal hub is disconnected and USB-A is offline.
@@ -270,7 +285,8 @@ state when it starts again.
 ## Meshtastic
 
 Set the **Host/Slave switch to HOST** and plug the radio into **USB-A**, or wire
-one to Grove and pick its baud. An M5Stack Unit C6L enumerates as its own
+one to Grove and pick its baud — the radio's rate is its own (`mesh.baud`) and
+setting it does not disturb the flight controller's. An M5Stack Unit C6L enumerates as its own
 ESP32-C6 USB serial device (`303a:1001`), which is enough for the picker to
 propose the mesh protocol; **M** overrides the proposal either way, because a
 board can be flashed with anything.
@@ -284,7 +300,7 @@ rather than discarded as noise.
 
 ```text
 ┌─────────────────────────────────────────────────────┐
-│ GNDHOG ZERO  GNDH mesh nodes                  ready │
+│ GNDHOG ZERO  GNDH mesh nodes         [==] 96% ready │
 │>ALL  Broadcast - LongFast                           │
 │ GNDH GNDHOG BENCH   (this radio)                now │
 │*HILL HILLTOP RELAY                              12m │
@@ -323,7 +339,10 @@ The Cardputer Zero's **Cap LoRa868 / Cap LoRa-1262** carries an AT6668 GNSS
 receiver alongside its SX1262. On this board that receiver arrives as a plain
 UART speaking NMEA 0183 at 115200 8N1, so GNDHOG reads `/dev/serial0` and parses
 `GGA`, `RMC`, and `GSV`. Change the device with `gnss.device` in `config.ini`,
-or launch with `--gnss DEV`; `--no-gnss` skips it entirely. Both switches are
+or launch with `--gnss DEV`; `--no-gnss` skips it entirely. A receiver that was
+reconfigured to another rate gets `gnss.baud`, which the **Baud rates** page
+changes and applies at once by reopening the port — this is the one peer whose
+port GNDHOG owns outright, so the setting can be proved instead of promised. Both switches are
 launch-wide session overrides in the way `--mute` is: they do not rewrite the
 saved choice, and the menu toggle says so rather than appearing to do nothing.
 

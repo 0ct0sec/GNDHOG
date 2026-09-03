@@ -111,6 +111,14 @@ bool isSupportedBaud(int baud) {
 #endif
 }
 
+int nextBaudChoice(int baud) {
+    for (int i = 0; i < kBaudChoiceCount; ++i) {
+        if (kBaudChoices[i] != baud) continue;
+        return kBaudChoices[(i + 1) % kBaudChoiceCount];
+    }
+    return kBaudChoices[0];
+}
+
 std::string PortInfo::vidPid() const {
     if (vendorId.empty() || productId.empty()) return {};
     return vendorId + ":" + productId;

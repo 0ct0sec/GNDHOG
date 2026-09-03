@@ -1,5 +1,6 @@
 #pragma once
 #include "audio.h"
+#include "battery.h"
 #include "bfcommands.h"
 #include "bfsession.h"
 #include "diagnostics.h"
@@ -52,6 +53,7 @@ enum class MenuPage {
     ControlsInfo,
     SoundDisplay,
     ConnectionExit,
+    LinkSpeeds,
 };
 
 // Which protocol the open serial port is speaking. The two are mutually
@@ -81,7 +83,15 @@ public:
     struct Options {
         std::string fbDevice = "/dev/fb0";
         std::string portOverride;      // --port
-        int baud = 115200;
+        // One port at a time, but three peers with three different opinions
+        // about line rate. Each is remembered separately and each command-line
+        // switch is a launch-wide override that must not rewrite the saved one.
+        int fcBaud = 115200;           // --fc-baud (or --baud)
+        int meshBaud = 115200;         // --mesh-baud (or --baud)
+        int gnssBaud = 115200;         // --gnss-baud
+        bool fcBaudSet = false;
+        bool meshBaudSet = false;
+        bool gnssBaudSet = false;
         bool headless = false;         // render offscreen only
         bool stdinKeys = false;        // read stdin instead of evdev
         bool simulate = false;         // talk to the built-in fake FC
@@ -103,6 +113,8 @@ public:
 private:
     friend int runSelfTest();
     friend void testMeshApp();   // selftest.cpp: drives the mesh screens
+    friend void testBattery();   // selftest.cpp: paints the gauge indicator
+    friend void testLinkBaud();  // selftest.cpp: drives the saved link rates
     // ---- lifecycle
     bool setup(const Options& opt, std::string& error);
     void teardown();
@@ -129,6 +141,9 @@ private:
 
     // ---- screens
     void drawTopBar(Surface& s);
+    // Returns the x of the indicator's left edge, or `right` when there is no
+    // pack to draw -- the top bar hands the reclaimed width back to the title.
+    int drawBatteryIndicator(Surface& s, int right);
     void drawHintBar(Surface& s, const std::string& hints,
                      const std::string& action = {});
     void drawPorts(Surface& s);
@@ -174,6 +189,12 @@ private:
     void applyQuick(int id);
     void applyMenu(int id);
     void adjustBrightness(int delta);
+    // The rate the picker will use for the protocol it is about to open.
+    int& linkBaudFor(LinkMode mode);
+    int linkBaud(LinkMode mode) const;
+    void cycleLinkBaud(LinkMode mode);
+    void cycleGnssBaud();
+    void refreshLinkSpeedMenu();
     void adjustSoundVolume(int delta);
     void toggleSound();
     void refreshSoundMenu();
@@ -224,6 +245,7 @@ private:
     Keyboard keyboard_;
     Audio audio_;
     Storage storage_;
+    Battery battery_;
     Config config_;
     Terminal term_;
     Completer completer_;
@@ -256,13 +278,15 @@ private:
     std::vector<MenuItem> controlsMenu_;
     std::vector<MenuItem> settingsMenu_;
     std::vector<MenuItem> connectionMenu_;
+    std::vector<MenuItem> linkSpeedMenu_;
     ListState submenuList_;
     MenuPage menuPage_ = MenuPage::Root;
     std::vector<MenuItem> quick_;
     ListState quickList_;
     ListState keymapList_;
     int helpScroll_ = 0;
-    int baudIndex_ = 0;
+    int fcBaud_ = 115200;
+    int meshBaud_ = 115200;
 
     // ---- mesh state
     LinkMode linkMode_ = LinkMode::Betaflight;
