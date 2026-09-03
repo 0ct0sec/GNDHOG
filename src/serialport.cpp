@@ -181,6 +181,15 @@ bool isSerialBridgeId(const std::string& vid, const std::string& pid) {
     return false;
 }
 
+bool sameDeviceNode(const std::string& a, const std::string& b) {
+    if (a == b) return true;
+#if defined(__linux__)
+    return resolve(a) == resolve(b);
+#else
+    return false;
+#endif
+}
+
 std::vector<PortInfo> enumeratePorts() {
     std::vector<PortInfo> out;
 #if defined(__linux__)

@@ -502,6 +502,10 @@ bool App::setup(const Options& opt, std::string& error) {
             connectSelected();
         }
     }
+    // The cap's receiver is this application's own peer, not a radio's. It used
+    // to be opened only once a Meshtastic link was up, and on the bench there
+    // was never going to be one: the only UART on the board was the AT6668.
+    startGnss(true);
     return true;
 }
 
@@ -612,20 +616,24 @@ void App::flushMeshChats() {
     }
 }
 
-void App::startGnss() {
+void App::startGnss(bool quiet) {
     if (!gnssWanted_ || gnss_.isOpen()) return;
     if (gnssDevice_.empty()) return;
     // The cap's receiver and a Grove-wired peer can be the same device node.
     // Whoever the operator deliberately connected keeps it.
     const std::string linkDevice = meshMode() ? mesh_.device() : session_.device();
-    if (linkConnected() && linkDevice == gnssDevice_) {
+    if (linkConnected() && sameDeviceNode(linkDevice, gnssDevice_)) {
         pushLocal("-- GNSS skipped: " + gnssDevice_ + " is the link port --", LineKind::Warn);
         return;
     }
     std::string error;
     if (!gnss_.open(gnssDevice_, gnssBaud_, error)) {
-        pushLocal("-- no LoRa Cap GNSS on " + gnssDevice_ + ": " + error + " --",
-                  LineKind::Warn);
+        // A node that is not there is a development host. A node that is there
+        // and would not open is worth a line even at launch.
+        if (!quiet || ::access(gnssDevice_.c_str(), F_OK) == 0) {
+            pushLocal("-- no LoRa Cap GNSS on " + gnssDevice_ + ": " + error + " --",
+                      LineKind::Warn);
+        }
         gnssProbeDeadlineMs_ = 0;
         return;
     }
@@ -634,6 +642,10 @@ void App::startGnss() {
     pushLocal("-- listening for LoRa Cap GNSS on " + gnssDevice_ + " @ " +
                   std::to_string(gnssBaud_) + " (NMEA 0183) --",
               LineKind::Local);
+}
+
+bool App::isGnssPort(const std::string& device) const {
+    return gnss_.isOpen() && sameDeviceNode(gnss_.device(), device);
 }
 
 void App::toggleGnss() {
@@ -686,6 +698,7 @@ void App::showGnssStatus() {
             body += "\nAltitude: " + std::to_string(static_cast<int>(fix.altitudeM)) + " m";
         }
         if (!fix.utc.empty()) body += "\nUTC: " + fix.utc;
+        if (!fix.receiverText.empty()) body += "\nReceiver says: " + fix.receiverText;
     }
     notice("LoRa Cap GNSS", body, HudCue::Select);
 }
@@ -884,6 +897,28 @@ void App::connectPort(const PortInfo& port, LinkMode mode) {
     const int baud = linkBaud(mode);
     std::string error;
 
+    // A UART that has been proving itself with NMEA is the cap's receiver.
+    // Opened as a link it would feed sentences to a CLI or, as the bench
+    // showed, scroll them through a radio log as console chatter until the
+    // config request had timed out three times. Show the receiver instead.
+    if (isGnssPort(port.device)) {
+        if (gnss_.receiverPresent()) {
+            pushLocal("-- " + port.device + " is the LoRa Cap GNSS receiver (" +
+                          std::to_string(gnss_.sentenceCount()) +
+                          " NMEA sentences); not opening it as a link --",
+                      LineKind::Warn);
+            showGnssStatus();
+            return;
+        }
+        // Still probing and nothing has spoken: the operator's deliberate
+        // choice of this port wins, and the probe starts over when the link
+        // closes.
+        gnss_.close();
+        gnssProbeDeadlineMs_ = 0;
+        pushLocal("-- GNSS probe released " + port.device + " for the link --",
+                  LineKind::Local);
+    }
+
     if (mode == LinkMode::Meshtastic) {
         // USB CDC ignores the line rate; a cap or Grove-wired radio does not.
         const int meshBaud = port.kind == "uart" ? baud : 115200;
@@ -1017,13 +1052,6 @@ void App::finishDisconnect(bool exitAfter) {
         // change is written before the link and its node table go away.
         flushMeshChats();
         mesh_.disconnect();
-        // The cap's receiver was opened by this session and belongs to it. On
-        // this board its device node is also the Grove header, and nothing
-        // takes an exclusive lock on a tty: holding it after the radio is gone
-        // means the next thing plugged in shares its bytes with a reader that
-        // has no business reading them.
-        gnss_.close();
-        gnssProbeDeadlineMs_ = 0;
         // Session-only by contract, and the session is over.
         autoShareMinutes_ = 0;
         lastAutoShareMs_ = 0;
@@ -1044,6 +1072,9 @@ void App::finishDisconnect(bool exitAfter) {
     thermalTripPromptPending_ = false;
     thermalTripAttempted_ = false;
     refreshPorts();
+    // A link that had borrowed the receiver's UART has given it back, so the
+    // probe starts over; a receiver on a port of its own was never closed.
+    if (!exitAfter) startGnss();
     if (exitAfter) running_ = false;
     else setScreen(Screen::Ports);
 }
@@ -2132,6 +2163,11 @@ void App::onPortsKey(const KeyEvent& e) {
         } else if (e.ch == 'f' || e.ch == 'F') {
             refreshFiles();
             openReturnableScreen(Screen::Files);
+        } else if (e.ch == 'g' || e.ch == 'G') {
+            // The receiver no longer waits for a radio, so its status cannot
+            // either: on a bench with nothing but a cap, this is the screen.
+            audio_.play(HudCue::Select);
+            showGnssStatus();
         } else if (e.ch == 'h' || e.ch == 'H' || e.ch == '?') {
             helpScroll_ = 0;
             openReturnableScreen(Screen::Help);
@@ -2949,12 +2985,34 @@ void App::tickMesh(uint64_t now) {
     if (mesh_.state() == MeshState::Failed && !meshFailureReported_ && !modal_) {
         meshFailureReported_ = true;
         audio_.play(HudCue::Error);
-        notice("No Meshtastic radio",
-               "The device on " + mesh_.device() +
-                   " did not answer the client API.\n\n"
-                   "Check that this is the radio's port, that the firmware is running, "
-                   "and that nothing else already holds the connection.",
-               HudCue::Error);
+        if (mesh_.nmeaSentences() > 0) {
+            // The bench case: the cap's receiver on the node the picker offered
+            // as a Grove UART. Close the link and give the wire back to the
+            // reader that parses it, which finishDisconnect restarts.
+            const std::string device = mesh_.device();
+            const bool ownDevice = sameDeviceNode(device, gnssDevice_);
+            pushLocal("-- " + device + " answered with NMEA 0183, not the client API: "
+                      "that is the LoRa Cap GNSS receiver --",
+                      LineKind::Warn);
+            finishDisconnect(false);
+            notice("GNSS receiver, not a radio",
+                   device + " is speaking NMEA 0183: that is the LoRa Cap's "
+                   "receiver, and the radio link on it has been closed.\n\n" +
+                       (ownDevice
+                            ? std::string("The receiver is being read again; "
+                                          "G shows its status.")
+                            : "It is not the configured receiver (" + gnssDevice_ +
+                                  "). Launch with --gnss " + device +
+                                  " or set gnss.device to read it."),
+                   HudCue::Error);
+        } else {
+            notice("No Meshtastic radio",
+                   "The device on " + mesh_.device() +
+                       " did not answer the client API.\n\n"
+                       "Check that this is the radio's port, that the firmware is running, "
+                       "and that nothing else already holds the connection.",
+                   HudCue::Error);
+        }
     }
 
     if (mesh_.linkLost()) {

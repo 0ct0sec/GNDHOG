@@ -219,7 +219,15 @@ bool parseNmeaSentence(const std::string& sentence, GnssFix& fix, uint64_t nowMs
         return true;
     }
 
-    // GSA, VTG, TXT and the rest are well-formed and simply not needed here.
+    if (type == "TXT") {
+        // $GPTXT,01,01,01,ANTENNA OPEN*25: total, number, severity, text. The
+        // text is the receiver talking about itself, kept for the status screen.
+        if (f.size() < 5) return false;
+        fix.receiverText = f[4];
+        return true;
+    }
+
+    // GSA, VTG and the rest are well-formed and simply not needed here.
     return true;
 }
 

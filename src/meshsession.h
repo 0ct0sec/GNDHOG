@@ -101,6 +101,13 @@ public:
     uint32_t channelIndex() const { return channelIndex_; }
     void setChannelIndex(uint32_t index) { channelIndex_ = index; }
 
+    // Checksummed NMEA 0183 sentences seen on the wire, and frames seen. A
+    // Meshtastic radio never opens with sentences; a GNSS receiver on the same
+    // Grove UART sends nothing else. This is how the bench's "radio" was
+    // recognised for what it was.
+    int nmeaSentences() const { return nmeaSentences_; }
+    int framesSeen() const { return framesSeen_; }
+
     // The most recent protocol event worth putting in the status bar.
     const std::string& note() const { return note_; }
     uint64_t noteSequence() const { return noteSequence_; }
@@ -126,12 +133,16 @@ private:
     void resolvePending(uint32_t packetId, bool delivered, const std::string& reason,
                         uint64_t now);
     uint32_t nextPacketId();
+    void noteConsoleText(const std::string& text);
 
     Terminal& term_;
     SerialPort port_;
     MeshState state_ = MeshState::Disconnected;
 
     std::string rxBuf_;
+    std::string consoleLine_;        // the console's current line, for the NMEA check
+    int nmeaSentences_ = 0;
+    int framesSeen_ = 0;
     uint64_t lastByteMs_ = 0;
     uint64_t wakeSentMs_ = 0;
     uint64_t configSentMs_ = 0;

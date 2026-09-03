@@ -18,6 +18,11 @@ constexpr uint64_t kWakeSettleMs = 150;
 // a node database over 115200 and short enough to retry inside a bench session.
 constexpr uint64_t kConfigTimeoutMs = 8000;
 constexpr int kConfigMaxAttempts = 3;
+// Three checksummed sentences and not one frame: the peer is a GNSS receiver.
+// One would do, but a console line that quotes a sentence should not convict a
+// radio that is about to answer; the third arrives a second later anyway.
+constexpr int kNmeaVerdictSentences = 3;
+constexpr size_t kMaxConsoleLine = 512;
 // The firmware drops a client API connection that stops talking. The reference
 // clients heartbeat every five minutes; so does this one.
 constexpr uint64_t kHeartbeatIntervalMs = 300000;
@@ -63,6 +68,9 @@ bool MeshSession::connect(const std::string& device, int baud, std::string& erro
     configAttempts_ = 0;
     configItems_ = 0;
     rxBuf_.clear();
+    consoleLine_.clear();
+    nmeaSentences_ = 0;
+    framesSeen_ = 0;
     radio_ = MeshRadioInfo{};
     nodes_.clear();
     nodeIndex_.clear();
@@ -87,6 +95,7 @@ void MeshSession::disconnect() {
     port_.close();
     state_ = MeshState::Disconnected;
     rxBuf_.clear();
+    consoleLine_.clear();
     pending_.clear();
     configItems_ = 0;
 }
@@ -100,6 +109,23 @@ void MeshSession::fail(const std::string& reason) {
 void MeshSession::setNote(const std::string& text) {
     note_ = text;
     ++noteSequence_;
+}
+
+// Console bytes arrive in whatever pieces the UART delivered them, so lines are
+// reassembled before the checksum is tried: a fragment that starts with '$' is
+// not a sentence, and a sentence split across two reads is still one.
+void MeshSession::noteConsoleText(const std::string& text) {
+    for (char c : text) {
+        if (c != '\r' && c != '\n') {
+            if (consoleLine_.size() < kMaxConsoleLine) consoleLine_.push_back(c);
+            continue;
+        }
+        if (!consoleLine_.empty() && consoleLine_[0] == '$' &&
+            consoleLine_.find('*') != std::string::npos && nmeaChecksumOk(consoleLine_)) {
+            ++nmeaSentences_;
+        }
+        consoleLine_.clear();
+    }
 }
 
 void MeshSession::writeToRadio(const std::string& payload) {
@@ -620,8 +646,22 @@ void MeshSession::poll(uint64_t now) {
         extractMeshFrames(rxBuf_, frames, log);
         // The radio's own console shares this wire. Keeping it visible is the
         // difference between "nothing happened" and "the radio said why".
-        if (!log.empty()) term_.feed(log);
+        if (!log.empty()) {
+            term_.feed(log);
+            noteConsoleText(log);
+        }
+        framesSeen_ += static_cast<int>(frames.size());
         for (const std::string& frame : frames) handleFrame(frame, now);
+
+        // What the bench's Grove UART actually had on it was the cap's GNSS
+        // receiver, and its NMEA scrolled through here as "console output" for
+        // three config timeouts before anyone was told. A wire that has only
+        // ever produced checksummed sentences is not a radio; say so now.
+        if (framesSeen_ == 0 && nmeaSentences_ >= kNmeaVerdictSentences &&
+            (state_ == MeshState::Waking || state_ == MeshState::Configuring)) {
+            fail("this port is speaking NMEA 0183: a GNSS receiver, not a Meshtastic radio");
+            return;
+        }
     }
 
     switch (state_) {

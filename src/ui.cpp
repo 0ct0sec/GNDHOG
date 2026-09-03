@@ -494,31 +494,43 @@ void App::drawPorts(Surface& s) {
             }
             drawText(s, 2, y, selected ? ">" : " ", theme::accent);
             Color fg = theme::text;
-            if (isDfuId(p.vendorId, p.productId)) fg = theme::warn;
+            std::string text = p.label();
+            if (isGnssPort(p.device)) {
+                // The receiver holds this node right now, so Enter will not
+                // open a link on it while it keeps proving itself.
+                text += gnss_.receiverPresent() ? "  GNSS live" : "  GNSS probe";
+                fg = gnss_.receiverPresent() ? theme::accent : theme::textDim;
+            } else if (isDfuId(p.vendorId, p.productId)) fg = theme::warn;
             else if (p.prefersMeshtastic() && p.looksLikeMeshtastic()) fg = theme::echo;
             else if (p.looksLikeFlightController()) fg = theme::ok;
-            drawTextClipped(s, 2 + kGlyphW, y, p.label(), cols - 3, fg);
+            drawTextClipped(s, 2 + kGlyphW, y, text, cols - 3, fg);
         }
         drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, portList_.top, rows,
                       static_cast<int>(ports_.size()));
     }
 
-    std::string hint = "R scan  M protocol  F files  H help  A about";
+    std::string hint = "R scan  M protocol  F files  G GNSS  H help  A about";
+    bool selectedIsReceiver = false;
     if (!ports_.empty()) {
         const PortInfo& p = ports_[static_cast<size_t>(portList_.sel)];
+        selectedIsReceiver = isGnssPort(p.device) && gnss_.receiverPresent();
         std::string detail = p.detail();
-        if (p.kind == "uart") {
+        if (selectedIsReceiver) {
+            // What the wire is saying beats what the rate table would do to it.
+            detail = gnss_.statusText(nowMs());
+        } else if (p.kind == "uart") {
             // Name the peer the rate belongs to: the same wire carries a very
             // different conversation depending on which protocol Enter opens.
             detail += (detail.empty() ? "" : "  ") +
                       std::string(portLinkMode_ == LinkMode::Meshtastic ? "mesh " : "FC ") +
                       std::to_string(linkBaud(portLinkMode_)) + "  B changes";
         }
-        if (!detail.empty()) hint = detail + "  M protocol";
+        if (!detail.empty()) hint = detail + (selectedIsReceiver ? "" : "  M protocol");
     }
     const std::string action =
-        ports_.empty() ? "Esc quit"
-                       : (portLinkMode_ == LinkMode::Meshtastic ? "Enter mesh" : "Enter CLI");
+        ports_.empty()       ? "Esc quit"
+        : selectedIsReceiver ? "Enter GNSS"
+        : (portLinkMode_ == LinkMode::Meshtastic ? "Enter mesh" : "Enter CLI");
     drawHintBar(s, hint, action);
 }
 

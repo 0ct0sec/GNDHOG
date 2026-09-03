@@ -25,6 +25,9 @@ struct GnssFix {
     bool haveCourse = false;
     double courseDeg = 0.0;
     std::string utc;                 // "hh:mm:ss" as the receiver reported it
+    // The latest $--TXT payload, verbatim. The AT6668 on the bench used it for
+    // "ANTENNA OPEN" while it sat indoors with no fix; it is shown, not judged.
+    std::string receiverText;
     uint32_t utcSeconds = 0;         // epoch seconds, 0 until date and time agree
     uint64_t updatedMs = 0;          // our monotonic clock at the last good fix
 

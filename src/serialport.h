@@ -35,6 +35,11 @@ struct PortInfo {
 // Read-only: nothing is opened, no bus is probed.
 std::vector<PortInfo> enumeratePorts();
 
+// True when two names reach the same device node once symlinks are followed.
+// /dev/serial0 and /dev/ttyS0 are one UART on this board, and the receiver and
+// the port picker do not necessarily call it by the same name.
+bool sameDeviceNode(const std::string& a, const std::string& b);
+
 // True for USB IDs known to be Betaflight-capable flight controllers.
 bool isKnownFcId(const std::string& vid, const std::string& pid);
 // True for the USB identities a Meshtastic radio arrives with: an ESP32's own

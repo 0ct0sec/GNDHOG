@@ -1372,9 +1372,70 @@ void testGnss() {
     check(!parseNmeaSentence("garbage", view, 5000) &&
               !parseNmeaSentence("$", view, 5000),
           "non-NMEA input is rejected without reading past the end");
+
+    GnssFix antenna;
+    check(parseNmeaSentence("$GPTXT,01,01,01,ANTENNA OPEN*25", antenna, 6000) &&
+              antenna.receiverText == "ANTENNA OPEN",
+          "a TXT sentence keeps the receiver's own words for the status screen");
 }
 
 // --------------------------------------------------------- mesh session
+
+// What the bench's Grove UART said, verbatim, while the app was calling it a
+// radio: the cap's AT6668 indoors with no fix, checksums as the receiver sent
+// them. A void RMC and a quality-0 GGA are still sentences.
+const char* const kBenchNmea =
+    "$GNRMC,020211.00,V,,,,,,,030926,,,N,V*17\r\n"
+    "$GNVTG,,,,,,,,,N*2E\r\n"
+    "$GNGGA,020211.00,,,,,0,00,5.9,,,,,,*74\r\n"
+    "$GNGSA,A,1,,,,,,,,,,,,,13.6,5.9,12.3,1*3B\r\n"
+    "$GPTXT,01,01,01,ANTENNA OPEN*25\r\n";
+
+// A bare pty whose master end the test writes to: a stand-in for a UART with
+// nothing but an NMEA receiver on it, which is what the bench's Grove node
+// turned out to be. It never answers; it only talks.
+struct RawPty {
+    int master = -1;
+    std::string slave;
+
+    ~RawPty() {
+        if (master >= 0) ::close(master);
+    }
+    bool start(std::string& error) {
+        master = ::posix_openpt(O_RDWR | O_NOCTTY);
+        if (master < 0) {
+            error = std::string("posix_openpt: ") + std::strerror(errno);
+            return false;
+        }
+        if (::grantpt(master) != 0 || ::unlockpt(master) != 0) {
+            error = std::string("unlockpt: ") + std::strerror(errno);
+            return false;
+        }
+        const char* name = ::ptsname(master);
+        if (!name) {
+            error = "ptsname failed";
+            return false;
+        }
+        slave = name;
+        const int flags = ::fcntl(master, F_GETFL, 0);
+        ::fcntl(master, F_SETFL, flags | O_NONBLOCK);
+        return true;
+    }
+    void write(const std::string& text) {
+        // Whatever the client sent (a resync burst, a config request) goes
+        // nowhere, the way it did on the bench; drain it so the pty never
+        // backs up.
+        char sink[256];
+        while (::read(master, sink, sizeof(sink)) > 0) {
+        }
+        size_t off = 0;
+        while (off < text.size()) {
+            const ssize_t n = ::write(master, text.data() + off, text.size() - off);
+            if (n <= 0) break;
+            off += static_cast<size_t>(n);
+        }
+    }
+};
 
 bool spinMesh(SimMesh& sim, MeshSession& mesh, int timeoutMs,
               const std::function<bool()>& until) {
@@ -1393,6 +1454,46 @@ bool spinMesh(SimMesh& sim, MeshSession& mesh, int timeoutMs,
 // the client must measure the timeout from the last frame it received, not from
 // the moment it asked: re-requesting restarts the download, and a client that
 // restarts it every eight seconds never sees the end of it.
+// The bench, reduced to its parts: a pty that only ever says what the cap's
+// receiver said, opened by the client as though a radio were on it.
+void testMeshNmeaPort() {
+    section("a Meshtastic link opened on the receiver's UART");
+    RawPty pty;
+    std::string error;
+    if (!pty.start(error)) {
+        std::printf("  SKIP  pty unavailable: %s\n", error.c_str());
+        return;
+    }
+    Terminal term;
+    MeshSession mesh(term);
+    check(mesh.connect(pty.slave, 115200, error),
+          "the client opens the receiver's pty as if it were a radio: " + error);
+
+    // Lines that merely begin with '$' are not sentences: a fragment, a line
+    // with no checksum, a corrupted one. None of these may convict the port.
+    const uint64_t quiet = nowMs() + 400;
+    while (nowMs() < quiet) {
+        pty.write("$GNRMC,broken\r\n$\r\n$GNGGA,020211.00,,,,,0,00,5.9,,,,,,*00\r\n");
+        mesh.poll(nowMs());
+        sleepMs(20);
+    }
+    check(mesh.nmeaSentences() == 0 && mesh.state() != MeshState::Failed,
+          "uncheckable lines count for nothing and the config request stands");
+
+    const uint64_t deadline = nowMs() + 3000;
+    while (nowMs() < deadline && mesh.state() != MeshState::Failed) {
+        pty.write(kBenchNmea);
+        mesh.poll(nowMs());
+        sleepMs(20);
+    }
+    check(mesh.state() == MeshState::Failed && mesh.nmeaSentences() >= 3 &&
+              mesh.framesSeen() == 0,
+          "checksummed sentences and no frame is a verdict inside a second, not 24");
+    check(mesh.note().find("NMEA") != std::string::npos &&
+              mesh.note().find("GNSS") != std::string::npos,
+          "the verdict names what answered, so the picker's next move is obvious");
+}
+
 void testMeshConfigProgress() {
     SimMesh sim;
     std::string error;
@@ -2287,30 +2388,90 @@ void testMeshApp() {
         check(foundPing, "a saved conversation is reloaded on the next launch");
     }
 
-    // The LoRa Cap receiver belongs to the mesh session that opened it. On this
-    // board its device node is also the Grove header, and nothing takes an
-    // exclusive lock on a tty: a receiver still held after the radio is gone
-    // would quietly steal bytes from whatever is connected next.
+    // The receiver belongs to the application, not to a radio session, because
+    // on the bench there was no radio session to belong to: the only UART on
+    // the board was the cap's AT6668, and a reader that waited for a radio
+    // waited forever. What a link may do is borrow a silent UART the probe is
+    // still listening on. A UART already proving itself with NMEA refuses to
+    // become a link, and a link that borrowed one gives it back on close.
     {
         SimFc grove;
+        RawPty receiver;
         std::string groveError;
-        if (grove.start(groveError)) {
+        std::string receiverError;
+        if (grove.start(groveError) && receiver.start(receiverError)) {
             App app;
             app.display_.setHeadlessSize(kScreenW, kScreenH);
             check(app.storage_.init(error), "a third app instance initializes storage");
             app.setupMenus();
+
+            // A silent UART: the probe holds it, a deliberate link takes it
+            // over, and the probe starts again once the link is gone.
             app.gnssDevice_ = grove.devicePath();
-            check(app.mesh_.connect(sim.devicePath(), 115200, error),
-                  "the app opens the radio for the GNSS lifecycle check: " + error);
+            app.startGnss();
+            check(app.gnss_.isOpen() && !app.mesh_.connected(),
+                  "the receiver probe opens its UART with no radio connected at all");
+            PortInfo grovePort;
+            grovePort.device = grove.devicePath();
+            grovePort.kind = "uart";
+            app.connectPort(grovePort, LinkMode::Betaflight);
+            check(app.session_.connected() && !app.gnss_.isOpen(),
+                  "a link opened on a silent UART takes it from the probe");
+            app.requestDisconnect(false);
+            check(!app.session_.connected() && app.gnss_.isOpen(),
+                  "closing that link hands the UART back to the receiver probe");
+            app.gnss_.close();
+            app.gnssProbeDeadlineMs_ = 0;
+
+            // A UART with NMEA on it is the receiver, whatever the picker calls
+            // it. Enter shows the receiver instead of opening a link.
+            app.gnssDevice_ = receiver.slave;
+            app.startGnss();
+            const std::string burst = kBenchNmea;
+            const uint64_t proven = nowMs() + 2000;
+            while (nowMs() < proven && !app.gnss_.receiverPresent()) {
+                receiver.write(burst);
+                app.pollGnss(nowMs());
+                sleepMs(10);
+            }
+            check(app.gnss_.receiverPresent(), "sentences on the UART prove the receiver");
+            PortInfo receiverPort;
+            receiverPort.device = receiver.slave;
+            receiverPort.kind = "uart";
+            app.connectPort(receiverPort, LinkMode::Meshtastic);
+            check(!app.mesh_.connected() && app.gnss_.isOpen() && app.modal_,
+                  "a proven receiver is not opened as a radio; its status is shown instead");
+            app.closeModal();
+
+            // The bench itself: the link was opened on the receiver's UART
+            // first (an older session, a hand-edited config). The NMEA verdict
+            // closes it and the receiver is reopened on the wire it gave back.
+            app.gnss_.close();
+            app.gnssProbeDeadlineMs_ = 0;
+            check(app.mesh_.connect(receiver.slave, 115200, error),
+                  "the radio link opens the receiver's UART: " + error);
             app.linkMode_ = LinkMode::Meshtastic;
             app.beginMeshSession();
-            check(app.gnss_.isOpen(), "a mesh session opens the LoRa Cap receiver");
-            // The six-second "is anything talking NMEA here" probe would close
-            // the port on its own; this is a test of the disconnect path.
-            app.gnssProbeDeadlineMs_ = 0;
-            app.requestDisconnect(false);
-            check(!app.gnss_.isOpen(),
-                  "closing the radio link releases the LoRa Cap receiver's port");
+            check(!app.gnss_.isOpen(), "the receiver stands aside while a link holds its UART");
+            const uint64_t verdict = nowMs() + 4000;
+            while (nowMs() < verdict && app.mesh_.connected()) {
+                receiver.write(burst);
+                app.tick(nowMs());
+                sleepMs(20);
+            }
+            check(!app.mesh_.connected() && !app.meshMode(),
+                  "the NMEA verdict closes the radio link without waiting for a timeout");
+            check(app.gnss_.isOpen(), "and reopens the receiver on the UART the link gave back");
+            check(app.modal_ && app.screen_ == Screen::Ports,
+                  "the operator is told it was the receiver, back on the port picker");
+            app.closeModal();
+            const uint64_t again = nowMs() + 2000;
+            while (nowMs() < again && !app.gnss_.receiverPresent()) {
+                receiver.write(burst);
+                app.tick(nowMs());
+                sleepMs(10);
+            }
+            check(app.gnss_.receiverPresent(), "NMEA reaches the reader again after the handover");
         }
     }
 
@@ -3141,6 +3302,7 @@ int runSelfTest() {
     testMeshChatFiles();
     testGnss();
     testMeshSession();
+    testMeshNmeaPort();
     testMeshConfigProgress();
     testMeshApp();
     testFieldGeometry();

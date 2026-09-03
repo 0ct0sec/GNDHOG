@@ -366,9 +366,16 @@ that is deliberately mute.
 ## The LoRa Cap and GPS
 
 The Cardputer Zero's **Cap LoRa868 / Cap LoRa-1262** carries an AT6668 GNSS
-receiver alongside its SX1262. On this board that receiver arrives as a plain
-UART speaking NMEA 0183 at 115200 8N1, so GNDHOG reads `/dev/serial0` and parses
-`GGA`, `RMC`, and `GSV`. Change the device with `gnss.device` in `config.ini`,
+receiver alongside its SX1262. On this board the receiver is the header UART,
+`/dev/serial0` (a symlink to `/dev/ttyS0`), speaking NMEA 0183 at 115200 8N1,
+so GNDHOG reads it and parses `GGA`, `RMC`, `GSV` and the receiver's own `TXT`
+remarks (the bench unit says `ANTENNA OPEN` indoors; the status page repeats
+it without judging it). The SX1262 is on the SPI bus as `/dev/spidev0.1`, and
+nothing on the stock image drives it: M5Stack's own cap application reads the
+GPS and leaves the radio alone. So the mesh screens need a real Meshtastic
+radio on USB or the Grove UART; the cap's LoRa half would be a `meshtasticd`
+on the Zero and a TCP transport here, not a serial port, and neither exists
+yet. Change the device with `gnss.device` in `config.ini`,
 or launch with `--gnss DEV`; `--no-gnss` skips it entirely. A receiver that was
 reconfigured to another rate gets `gnss.baud`, which the **Baud rates** page
 changes and applies at once by reopening the port — this is the one peer whose
@@ -381,11 +388,21 @@ UART exists whether or not a cap is clipped to it. If nothing speaks NMEA within
 a few seconds the port is closed again and the receiver is reported absent,
 which also keeps GNDHOG off the Grove header it shares.
 
-The receiver's lifetime is the radio session's. It is opened when a Meshtastic
-link comes up and closed when that link goes down, so a flight controller
-connected afterwards on the same Grove node does not have to share its bytes
-with a reader nobody asked for: nothing takes an exclusive lock on a tty, and
-two readers on one UART is a link that drops characters and never says why.
+The receiver is opened at launch and belongs to GNDHOG, not to a radio session.
+It used to wait for a Meshtastic link, and on the bench there was never going
+to be one: the only UART on the board was the AT6668, and the app was found
+scrolling its sentences through a "radio log" as console chatter while a
+config request timed out three times. Now the port picker marks the node the
+receiver holds (`GNSS live` once sentences have arrived, `GNSS probe` while it
+is still listening), **Enter** on a live receiver shows its status instead of
+opening a link, and **G** shows it from the picker at any time. A link opened
+on the receiver's node some other way (a saved port, a hand-edited config) is
+closed by the client itself as soon as three checksummed sentences and no
+frame have arrived, and the receiver is reopened on the wire it gave back.
+Nothing takes an exclusive lock on a tty, and two readers on one UART is a
+link that drops characters and never says why, so a link may borrow the node
+only while the probe is still silent, and the probe starts over when the link
+closes.
 
 With a fix, the node list shows **range and bearing** to every node that
 reported a position, and **Share my position** transmits this station's own

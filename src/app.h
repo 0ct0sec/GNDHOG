@@ -237,7 +237,13 @@ private:
     void showRadioInfo();
     void showGnssStatus();
     void toggleGnss();
-    void startGnss();
+    // `quiet` drops the terminal line when the node cannot be opened: at
+    // launch on a development host /dev/serial0 does not exist, and that is
+    // not news. The GNSS status page still reports the reason.
+    void startGnss(bool quiet = false);
+    // True when `device` is the UART the receiver currently holds open, under
+    // whichever name the picker used for it.
+    bool isGnssPort(const std::string& device) const;
     void exportConversation();
     void clearConversation();
     void rebuildChatRows();
