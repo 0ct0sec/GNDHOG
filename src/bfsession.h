@@ -138,6 +138,9 @@ private:
     void beginCommand(const std::string& line, uint64_t now);
     void pumpRestore(uint64_t now);
     void finishJob(bool ok, const std::string& message);
+    void finishCapture(bool ok);
+    void loseLink(const std::string& reason, const char* rebootNote);
+    void noteVtxGuard(const std::string& note, LineKind kind);
     void scanForIdentity(const std::string& text);
     void beginCli(uint64_t now);
     void queueMsp(uint8_t command, const std::vector<uint8_t>& payload = {});

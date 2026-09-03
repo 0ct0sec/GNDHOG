@@ -2,14 +2,12 @@
 #include "input.h"
 #include "meshtastic.h"
 #include "protowire.h"
+#include "simpty.h"
 
-#include <cerrno>
 #include <cmath>
-#include <cstring>
 #include <ctime>
 
 #if defined(__linux__)
-#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -108,27 +106,8 @@ uint32_t SimMesh::vanNodeNum() const { return kVanNum; }
 SimMesh::~SimMesh() { stop(); }
 
 bool SimMesh::start(std::string& error) {
-#if defined(__linux__)
     stop();
-    master_ = ::posix_openpt(O_RDWR | O_NOCTTY);
-    if (master_ < 0) {
-        error = std::string("posix_openpt: ") + std::strerror(errno);
-        return false;
-    }
-    if (::grantpt(master_) != 0 || ::unlockpt(master_) != 0) {
-        error = std::string("unlockpt: ") + std::strerror(errno);
-        stop();
-        return false;
-    }
-    const char* name = ::ptsname(master_);
-    if (!name) {
-        error = "ptsname failed";
-        stop();
-        return false;
-    }
-    slavePath_ = name;
-    const int flags = ::fcntl(master_, F_GETFL, 0);
-    ::fcntl(master_, F_SETFL, flags | O_NONBLOCK);
+    if (!openSimPty(master_, slavePath_, error)) return false;
     in_.clear();
     out_.clear();
     acks_.clear();
@@ -138,10 +117,6 @@ bool SimMesh::start(std::string& error) {
     heartbeatsReceived_ = 0;
     lastTextReceived_.clear();
     return true;
-#else
-    error = "the simulator needs a Linux pty";
-    return false;
-#endif
 }
 
 void SimMesh::stop() {

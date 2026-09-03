@@ -1,17 +1,13 @@
 #include "marks.h"
 #include "meshtastic.h"
+#include "strutil.h"
 
-#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 
 namespace bf {
 
-std::string Mark::coordText() const {
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "%.5f, %.5f", latitude, longitude);
-    return buf;
-}
+std::string Mark::coordText() const { return formatLatLon(latitude, longitude); }
 
 std::string cleanMarkName(const std::string& name) {
     std::string out;
@@ -22,10 +18,7 @@ std::string cleanMarkName(const std::string& name) {
         if (u < 0x20 || u == 0x7F) continue;
         out.push_back(c);
     }
-    size_t a = 0, b = out.size();
-    while (a < b && std::isspace(static_cast<unsigned char>(out[a]))) ++a;
-    while (b > a && std::isspace(static_cast<unsigned char>(out[b - 1]))) --b;
-    out = out.substr(a, b - a);
+    out = trim(out);
     if (out.size() > kMaxMarkNameBytes) out.resize(kMaxMarkNameBytes);
     return out;
 }

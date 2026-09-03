@@ -1,6 +1,5 @@
 #include "quickmsg.h"
-
-#include <cstdio>
+#include "strutil.h"
 
 namespace bf {
 
@@ -49,12 +48,8 @@ std::string expandQuickMessage(const std::string& text, const GnssFix& fix) {
     // Formatted here rather than through GnssFix::coordText(), which answers
     // for the receiver's history ("no fix" until it has ever had one); this
     // placeholder only cares whether there is a fix right now.
-    std::string value = "(no GNSS fix)";
-    if (fix.valid) {
-        char buf[48];
-        std::snprintf(buf, sizeof(buf), "%.5f, %.5f", fix.latitude, fix.longitude);
-        value = buf;
-    }
+    const std::string value = fix.valid ? formatLatLon(fix.latitude, fix.longitude)
+                                        : std::string("(no GNSS fix)");
     size_t at = out.find(placeholder);
     while (at != std::string::npos) {
         out.replace(at, placeholder.size(), value);

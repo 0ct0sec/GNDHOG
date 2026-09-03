@@ -1,6 +1,7 @@
 #include "app.h"
 #include "brand.h"
 #include "mascot.h"
+#include "strutil.h"
 
 #include <algorithm>
 #include <cmath>
@@ -105,6 +106,34 @@ std::vector<std::string> wrapText(const std::string& text, int cols) {
         if (nl == std::string::npos) break;
         pos = nl + 1;
     }
+    return out;
+}
+
+// "4m", "2h", "-": how long ago this station, or failing that the radio's own
+// database, last heard a node.
+std::string heardAgeText(const MeshNode& node, uint64_t now) {
+    if (node.heardLocalMs != 0) return meshAgeText((now - node.heardLocalMs) / 1000);
+    if (node.lastHeard != 0) {
+        const int64_t age = static_cast<int64_t>(::time(nullptr)) -
+                            static_cast<int64_t>(node.lastHeard);
+        return age > 0 ? meshAgeText(static_cast<uint64_t>(age)) : "now";
+    }
+    return "-";
+}
+
+// "  snr 6.2  1 hop  87%": what the radio knows about a node, in the order
+// the node list and the Locate screen both print it.
+std::string nodeEvidenceText(const MeshNode& node) {
+    std::string out;
+    if (node.haveSnr) {
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "  snr %.1f", static_cast<double>(node.snr));
+        out += buf;
+    }
+    if (node.haveHops) {
+        out += "  " + std::to_string(node.hopsAway) + (node.hopsAway == 1 ? " hop" : " hops");
+    }
+    if (node.haveBattery) out += "  " + std::to_string(node.batteryLevel) + "%";
     return out;
 }
 
@@ -330,16 +359,13 @@ void App::drawTopBar(Surface& s) {
         break;
     case Screen::Terminal:
         if (meshMode()) {
-            mid = mesh_.connected()
-                      ? mesh_.device().substr(mesh_.device().find_last_of('/') + 1) +
-                            " radio log"
-                      : "radio log";
+            mid = mesh_.connected() ? baseName(mesh_.device()) + " radio log" : "radio log";
         } else if (!session_.connected()) {
             // The state chip already says "offline". Keep the middle label as
             // screen context instead of printing the same state twice.
             mid = "terminal";
         } else {
-            mid = session_.device().substr(session_.device().find_last_of('/') + 1);
+            mid = baseName(session_.device());
             if (!session_.craft().empty()) mid += " " + session_.craft();
             else if (!session_.board().empty()) mid += " " + session_.board();
         }
@@ -492,10 +518,7 @@ void App::drawPorts(Surface& s) {
             const PortInfo& p = ports_[static_cast<size_t>(idx)];
             const int y = kBodyY + i * kGlyphH;
             const bool selected = (idx == portList_.sel);
-            if (selected) {
-                fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
-                fillRect(s, 0, y, 2, kGlyphH, theme::accent);
-            }
+            drawRowSelection(s, y, selected);
             drawText(s, 2, y, selected ? ">" : " ", theme::accent);
             Color fg = theme::text;
             std::string text = p.label();
@@ -604,25 +627,8 @@ void App::drawTerminal(Surface& s) {
         }
     }
 
-    // Input line with horizontal scrolling around the cursor.
-    const std::string& text = editor_.text();
-    const int avail = cols - 3;
-    int scroll = 0;
-    if (editor_.cursor() >= avail) scroll = editor_.cursor() - avail + 1;
-    const std::string shown = text.substr(static_cast<size_t>(scroll),
-                                          static_cast<size_t>(avail));
-    const Color promptColor = session_.ready() ? theme::accent : theme::textDim;
-    drawText(s, 2, inputY + 2, "#", promptColor);
-    drawText(s, 2 + 2 * kGlyphW, inputY + 2, shown, theme::text);
-
-    // Block cursor, drawn inverted over whatever character is under it.
-    const int cx = 2 + (2 + editor_.cursor() - scroll) * kGlyphW;
-    if (frame_ % 30 < 20) {
-        const int ci = editor_.cursor();
-        const char under = ci < static_cast<int>(text.size()) ? text[static_cast<size_t>(ci)] : ' ';
-        fillRect(s, cx, inputY + 1, kGlyphW, kGlyphH + 1, theme::accent);
-        drawChar(s, cx, inputY + 2, under, theme::bg);
-    }
+    drawInputLine(s, 2, inputY + 2, editor_, cols - 3, "#",
+                  session_.ready() ? theme::accent : theme::textDim, true);
 
     std::string hints;
     if (!completionNote_.empty()) hints = completionNote_ + "   ";
@@ -691,10 +697,7 @@ void App::drawFiles(Surface& s) {
         const BackupFile& f = files_[static_cast<size_t>(idx)];
         const int y = kBodyY + i * kGlyphH;
         const bool selected = (idx == fileList_.sel);
-        if (selected) {
-            fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
-            fillRect(s, 0, y, 2, kGlyphH, theme::accent);
-        }
+        drawRowSelection(s, y, selected);
         drawText(s, 2, y, selected ? ">" : " ", theme::accent);
         // Trim the fixed BTFL_cli_ prefix: it is on every file and wastes width.
         std::string name = f.name;
@@ -911,10 +914,7 @@ void App::drawNodes(Surface& s) {
         if (index >= count) break;
         const int y = kBodyY + i * kGlyphH;
         const bool selected = index == nodeList_.sel;
-        if (selected) {
-            fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
-            fillRect(s, 0, y, 2, kGlyphH, theme::accent);
-        }
+        drawRowSelection(s, y, selected);
 
         const uint32_t peer = peerForNodeRow(index);
         const int unread = mesh_.unread(peer);
@@ -946,15 +946,7 @@ void App::drawNodes(Surface& s) {
             }
             // "Heard N ago" is a fact. "Online" would be a guess about a radio
             // that may simply have nothing to say.
-            if (node.heardLocalMs != 0) {
-                right = meshAgeText((now - node.heardLocalMs) / 1000);
-            } else if (node.lastHeard != 0) {
-                const int64_t age = static_cast<int64_t>(::time(nullptr)) -
-                                    static_cast<int64_t>(node.lastHeard);
-                right = age > 0 ? meshAgeText(static_cast<uint64_t>(age)) : "now";
-            } else {
-                right = "-";
-            }
+            right = heardAgeText(node, now);
         }
 
         drawText(s, 2 + kGlyphW, y, tag, selected ? theme::accent : theme::textDim);
@@ -987,17 +979,7 @@ void App::drawNodes(Surface& s) {
     } else {
         const MeshNode* node = mesh_.findNode(peer);
         if (node) {
-            hint = node->idText();
-            if (node->haveSnr) {
-                char buf[24];
-                std::snprintf(buf, sizeof(buf), "  snr %.1f", static_cast<double>(node->snr));
-                hint += buf;
-            }
-            if (node->haveHops) {
-                hint += "  " + std::to_string(node->hopsAway) +
-                        (node->hopsAway == 1 ? " hop" : " hops");
-            }
-            if (node->haveBattery) hint += "  " + std::to_string(node->batteryLevel) + "%";
+            hint = node->idText() + nodeEvidenceText(*node);
             if (node->viaMqtt) hint += "  mqtt";
             // Range needs two real fixes: ours from the cap, theirs from the mesh.
             if (fix.valid && node->position.valid) {
@@ -1041,12 +1023,8 @@ void App::rebuildChatRows() {
         // A time separator only where the conversation actually paused, so a
         // fast exchange stays dense on an eighteen-row screen.
         if (message.stampUtc > 0 && message.stampUtc - previousStamp > 300) {
-            const std::time_t stamp = static_cast<std::time_t>(message.stampUtc);
-            std::tm tmv{};
-            ::localtime_r(&stamp, &tmv);
-            char when[32];
-            std::strftime(when, sizeof(when), "%a %H:%M", &tmv);
-            chatRows_.push_back({std::string("-- ") + when + " --", LineKind::Local});
+            chatRows_.push_back({"-- " + formatLocalTime(message.stampUtc, "%a %H:%M") + " --",
+                                 LineKind::Local});
         }
         if (message.stampUtc > 0) previousStamp = message.stampUtc;
 
@@ -1110,22 +1088,9 @@ void App::drawChat(Surface& s) {
     hLine(s, 0, inputY, s.w, theme::rule);
 
     const std::string& text = chatEditor_.text();
-    const int avail = cols - 3;
-    int scroll = 0;
-    if (chatEditor_.cursor() >= avail) scroll = chatEditor_.cursor() - avail + 1;
-    const std::string shown = text.substr(static_cast<size_t>(scroll),
-                                          static_cast<size_t>(avail));
     const bool sendable = mesh_.ready() && mesh_.radio().loraReady();
-    drawText(s, 2, inputY + 2, ">", sendable ? theme::accent : theme::textDim);
-    drawText(s, 2 + 2 * kGlyphW, inputY + 2, shown, theme::text);
-
-    const int cx = 2 + (2 + chatEditor_.cursor() - scroll) * kGlyphW;
-    if (frame_ % 30 < 20) {
-        const int ci = chatEditor_.cursor();
-        const char under = ci < static_cast<int>(text.size()) ? text[static_cast<size_t>(ci)] : ' ';
-        fillRect(s, cx, inputY + 1, kGlyphW, kGlyphH + 1, theme::accent);
-        drawChar(s, cx, inputY + 2, under, theme::bg);
-    }
+    drawInputLine(s, 2, inputY + 2, chatEditor_, cols - 3, ">",
+                  sendable ? theme::accent : theme::textDim, true);
 
     std::string hints;
     if (!mesh_.connected()) {
@@ -1201,26 +1166,6 @@ void App::drawCompass(Surface& s, int cx, int cy, int r, bool haveBearing,
     fillCircle(s, cx, cy, 2, theme::accent);
 }
 
-namespace {
-
-std::string coordPair(double latitude, double longitude) {
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "%.5f, %.5f", latitude, longitude);
-    return buf;
-}
-
-std::string heardAgeText(const MeshNode& node, uint64_t now) {
-    if (node.heardLocalMs != 0) return meshAgeText((now - node.heardLocalMs) / 1000);
-    if (node.lastHeard != 0) {
-        const int64_t age = static_cast<int64_t>(::time(nullptr)) -
-                            static_cast<int64_t>(node.lastHeard);
-        return age > 0 ? meshAgeText(static_cast<uint64_t>(age)) : "now";
-    }
-    return "-";
-}
-
-} // namespace
-
 void App::drawLocate(Surface& s) {
     const uint64_t now = nowMs();
     const GnssFix& fix = gnss_.fix();
@@ -1261,17 +1206,7 @@ void App::drawLocate(Surface& s) {
                     positionAge = "their fix age unknown (node db)";
                 }
             }
-            evidence = "heard " + heardAgeText(*node, now);
-            if (node->haveSnr) {
-                char buf[24];
-                std::snprintf(buf, sizeof(buf), "  snr %.1f", static_cast<double>(node->snr));
-                evidence += buf;
-            }
-            if (node->haveHops) {
-                evidence += "  " + std::to_string(node->hopsAway) +
-                            (node->hopsAway == 1 ? " hop" : " hops");
-            }
-            if (node->haveBattery) evidence += "  " + std::to_string(node->batteryLevel) + "%";
+            evidence = "heard " + heardAgeText(*node, now) + nodeEvidenceText(*node);
         }
     } else if (isMark) {
         const Mark& mark = marks_[static_cast<size_t>(locateMark_)];
@@ -1283,12 +1218,7 @@ void App::drawLocate(Surface& s) {
         haveAltitude = mark.haveAltitude;
         altitudeM = mark.altitudeM;
         if (mark.stampUtc > 0) {
-            const std::time_t stamp = static_cast<std::time_t>(mark.stampUtc);
-            std::tm tmv{};
-            ::localtime_r(&stamp, &tmv);
-            char when[32];
-            std::strftime(when, sizeof(when), "%a %d %b %H:%M", &tmv);
-            positionAge = std::string("marked ") + when;
+            positionAge = "marked " + formatLocalTime(mark.stampUtc, "%a %d %b %H:%M");
         }
     } else {
         title = "Nothing to locate";
@@ -1381,7 +1311,7 @@ void App::drawLocate(Surface& s) {
     y += kGlyphH;
 
     drawTextClipped(s, textX, y,
-                    havePosition ? "them " + coordPair(latitude, longitude)
+                    havePosition ? "them " + formatLatLon(latitude, longitude)
                                  : std::string("no position reported"),
                     textCols, havePosition ? theme::text : theme::warn);
     y += kGlyphH;
@@ -1539,10 +1469,7 @@ void App::drawMarks(Surface& s) {
         const Mark& mark = marks_[static_cast<size_t>(idx)];
         const int y = kBodyY + i * kGlyphH;
         const bool selected = (idx == markList_.sel);
-        if (selected) {
-            fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
-            fillRect(s, 0, y, 2, kGlyphH, theme::accent);
-        }
+        drawRowSelection(s, y, selected);
         drawText(s, 2, y, selected ? ">" : " ", theme::accent);
         std::string right;
         if (fix.valid) {
@@ -1577,6 +1504,32 @@ void App::drawQuickMsg(Surface& s) {
         if (!h.empty()) hint = h;
     }
     drawHintBar(s, hint, "Esc back");
+}
+
+void App::drawInputLine(Surface& s, int x, int y, const LineEditor& editor, int avail,
+                        const char* prompt, Color promptColor, bool tallCursor) {
+    // Horizontal scrolling keeps the cursor on screen for a line longer than
+    // the row; the block cursor is drawn inverted over whatever is under it.
+    const std::string& text = editor.text();
+    int scroll = 0;
+    if (editor.cursor() >= avail) scroll = editor.cursor() - avail + 1;
+    const std::string shown = text.substr(static_cast<size_t>(scroll),
+                                          static_cast<size_t>(avail));
+    drawText(s, x, y, prompt, promptColor);
+    drawText(s, x + 2 * kGlyphW, y, shown, theme::text);
+    if (frame_ % 30 >= 20) return;
+    const int ci = editor.cursor();
+    const char under = ci < static_cast<int>(text.size()) ? text[static_cast<size_t>(ci)] : ' ';
+    const int cx = x + (2 + ci - scroll) * kGlyphW;
+    if (tallCursor) fillRect(s, cx, y - 1, kGlyphW, kGlyphH + 1, theme::accent);
+    else fillRect(s, cx, y, kGlyphW, kGlyphH, theme::accent);
+    drawChar(s, cx, y, under, theme::bg);
+}
+
+void App::drawRowSelection(Surface& s, int y, bool selected) {
+    if (!selected) return;
+    fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
+    fillRect(s, 0, y, 2, kGlyphH, theme::accent);
 }
 
 void App::drawModal(Surface& s) {
@@ -1616,22 +1569,7 @@ void App::drawModal(Surface& s) {
         const int iy = ty + 2;
         fillRect(s, x + 4, iy, w - 8, kGlyphH + 2, theme::bg);
         rect(s, x + 4, iy, w - 8, kGlyphH + 2, theme::accent);
-        const std::string& text = modalEditor_.text();
-        const int avail = innerCols - 3;
-        int scroll = 0;
-        if (modalEditor_.cursor() >= avail) scroll = modalEditor_.cursor() - avail + 1;
-        const std::string shown = text.substr(static_cast<size_t>(scroll),
-                                              static_cast<size_t>(avail));
-        drawText(s, x + 8, iy + 1, ">", theme::accent);
-        drawText(s, x + 8 + 2 * kGlyphW, iy + 1, shown, theme::text);
-        if (frame_ % 30 < 20) {
-            const int ci = modalEditor_.cursor();
-            const char under = ci < static_cast<int>(text.size())
-                                   ? text[static_cast<size_t>(ci)] : ' ';
-            const int cx = x + 8 + (2 + ci - scroll) * kGlyphW;
-            fillRect(s, cx, iy + 1, kGlyphW, kGlyphH, theme::accent);
-            drawChar(s, cx, iy + 1, under, theme::bg);
-        }
+        drawInputLine(s, x + 8, iy + 1, modalEditor_, innerCols - 3, ">", theme::accent, false);
     }
 
     const std::string prompt = modalIsConfirm_

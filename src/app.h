@@ -186,6 +186,13 @@ private:
                   int visibleRows, bool showSelection = true);
     void drawMenuModal(Surface& s, const std::string& title,
                        const std::vector<MenuItem>& items, ListState& st);
+    // One editable line with the block cursor: the terminal's, the chat's and
+    // the input dialog's. `tallCursor` is the terminal and chat variant that
+    // overhangs the row by a pixel.
+    void drawInputLine(Surface& s, int x, int y, const LineEditor& editor, int avail,
+                       const char* prompt, Color promptColor, bool tallCursor);
+    // The highlight behind the selected row of a list screen.
+    void drawRowSelection(Surface& s, int y, bool selected);
 
     void setupMenus();
     std::vector<MenuItem>& currentMenuItems();
@@ -285,6 +292,27 @@ private:
     void pollCompass(uint64_t now);
     void toggleCompassCalibration();
     void alignCompassToTrack();
+
+    // ---- the moves every screen makes
+    // Puts `text` on the hint bar for `ms` and schedules a repaint.
+    void showStatus(const std::string& text, uint64_t ms = 3000);
+    // The root menu from any screen: page, selection, screen.
+    void openRootMenu();
+    void openHelp();
+    void openMarks();
+    // Up/Down/PageUp/PageDown on a list, with the cue and the repaint. False
+    // for any other key, so the caller goes on to its own bindings.
+    bool navigateList(ListState& st, const KeyEvent& e, int count, int rows);
+    // The two "not ready" refusals, each with its dialog; true when ready.
+    bool requireFcReady();
+    bool requireRadioReady();
+    // True, with the dialog shown, when no more places can be saved.
+    bool marksFull();
+    // Ends a field check early with `why` on the screen and a report built
+    // from whatever had arrived.
+    void abortFieldCheck(const std::string& why);
+    // Closes the receiver and forgets the probe that was running on it.
+    void stopGnss();
 
     // ---- modal helpers
     void confirm(const std::string& title, const std::string& body,

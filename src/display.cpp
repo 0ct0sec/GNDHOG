@@ -1,4 +1,5 @@
 #include "display.h"
+#include "storage.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -137,15 +138,6 @@ void Display::present() {
 
 // ---------------------------------------------------------------- Backlight
 
-namespace {
-std::string readLine(const std::string& path) {
-    std::ifstream f(path);
-    std::string v;
-    if (f) std::getline(f, v);
-    return v;
-}
-} // namespace
-
 bool Backlight::discover() {
 #if defined(__linux__)
     DIR* d = ::opendir("/sys/class/backlight");
@@ -154,7 +146,7 @@ bool Backlight::discover() {
         const std::string name = e->d_name;
         if (name == "." || name == "..") continue;
         const std::string dir = "/sys/class/backlight/" + name;
-        const std::string maxs = readLine(dir + "/max_brightness");
+        const std::string maxs = readFirstLine(dir + "/max_brightness");
         if (maxs.empty()) continue;
         try {
             max_ = std::stoi(maxs);
@@ -174,7 +166,7 @@ bool Backlight::discover() {
 
 int Backlight::get() const {
     if (!available()) return -1;
-    const std::string v = readLine(path_ + "/brightness");
+    const std::string v = readFirstLine(path_ + "/brightness");
     try {
         return std::stoi(v);
     } catch (...) {

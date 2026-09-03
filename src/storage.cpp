@@ -1,6 +1,8 @@
 #include "storage.h"
+#include "strutil.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -34,11 +36,32 @@ bool fsyncDir(const std::string& dir) {
     return ok;
 }
 
-std::string trim(const std::string& s) {
-    size_t a = 0, b = s.size();
-    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
-    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
-    return s.substr(a, b - a);
+// <prefix>[_craft]_<stamp>[_board]<suffix>: the Configurator's own shape.
+std::string stampedName(const char* prefix, const std::string& craft,
+                        const std::string& board, const char* suffix) {
+    std::string name = prefix;
+    const std::string c = sanitizeForFilename(craft);
+    if (!c.empty()) name += "_" + c;
+    name += "_" + timestampCompact();
+    const std::string b = sanitizeForFilename(board);
+    if (!b.empty()) name += "_" + b;
+    return name + suffix;
+}
+
+// Only a path inside our own directory is ever unlinked, and never one that
+// walks out of it. A transcript that is already gone is not an error; a
+// backup that is already gone is, because the operator just asked for it.
+bool deleteInside(const std::string& dir, const char* what, const std::string& path,
+                  bool missingOk, std::string& error) {
+    if (path.rfind(dir + "/", 0) != 0 || path.find("..") != std::string::npos) {
+        error = std::string("refusing to delete a path outside the ") + what + " directory";
+        return false;
+    }
+    if (::unlink(path.c_str()) != 0 && !(missingOk && errno == ENOENT)) {
+        error = std::string("unlink: ") + std::strerror(errno);
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -69,17 +92,21 @@ std::string humanBytes(uint64_t n) {
     return buf;
 }
 
-std::string timestampCompact() {
-    const std::time_t t = std::time(nullptr);
+std::string formatLocalTime(int64_t epochSeconds, const char* format) {
+    const std::time_t t = static_cast<std::time_t>(epochSeconds);
     std::tm tmv{};
 #if defined(_WIN32)
     localtime_s(&tmv, &t);
 #else
     ::localtime_r(&t, &tmv);
 #endif
-    char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tmv);
+    char buf[64];
+    if (std::strftime(buf, sizeof(buf), format, &tmv) == 0) return {};
     return buf;
+}
+
+std::string timestampCompact() {
+    return formatLocalTime(static_cast<int64_t>(std::time(nullptr)), "%Y%m%d_%H%M%S");
 }
 
 std::string sanitizeForFilename(const std::string& s) {
@@ -99,18 +126,7 @@ std::string sanitizeForFilename(const std::string& s) {
 
 std::string BackupFile::sizeText() const { return humanBytes(bytes); }
 
-std::string BackupFile::dateText() const {
-    const std::time_t t = static_cast<std::time_t>(mtime);
-    std::tm tmv{};
-#if defined(_WIN32)
-    localtime_s(&tmv, &t);
-#else
-    ::localtime_r(&t, &tmv);
-#endif
-    char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &tmv);
-    return buf;
-}
+std::string BackupFile::dateText() const { return formatLocalTime(mtime, "%Y-%m-%d %H:%M"); }
 
 bool Storage::init(std::string& error) {
     const std::string home = envOr("HOME", ".");
@@ -194,6 +210,15 @@ bool Storage::readFile(const std::string& path, std::string& out, std::string& e
     return true;
 }
 
+std::string readFirstLine(const std::string& path) {
+    std::ifstream f(path);
+    if (!f) return {};
+    std::string line;
+    std::getline(f, line);
+    while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) line.pop_back();
+    return line;
+}
+
 std::vector<BackupFile> Storage::listBackups() const {
     std::vector<BackupFile> out;
     DIR* d = ::opendir(backupDir_.c_str());
@@ -220,50 +245,19 @@ std::vector<BackupFile> Storage::listBackups() const {
 }
 
 bool Storage::deleteMeshChat(const std::string& path, std::string& error) const {
-    // Same containment rule as a backup: only our own directory, never a path
-    // that walks out of it.
-    if (path.rfind(meshDir_ + "/", 0) != 0 || path.find("..") != std::string::npos) {
-        error = "refusing to delete a path outside the mesh directory";
-        return false;
-    }
-    if (::unlink(path.c_str()) != 0 && errno != ENOENT) {
-        error = std::string("unlink: ") + std::strerror(errno);
-        return false;
-    }
-    return true;
+    return deleteInside(meshDir_, "mesh", path, true, error);
 }
 
 bool Storage::deleteBackup(const std::string& path, std::string& error) const {
-    // Refuse anything that is not inside our own backup directory.
-    if (path.rfind(backupDir_ + "/", 0) != 0 || path.find("..") != std::string::npos) {
-        error = "refusing to delete a path outside the backup directory";
-        return false;
-    }
-    if (::unlink(path.c_str()) != 0) {
-        error = std::string("unlink: ") + std::strerror(errno);
-        return false;
-    }
-    return true;
+    return deleteInside(backupDir_, "backup", path, false, error);
 }
 
 std::string Storage::makeBackupName(const std::string& craft, const std::string& board) const {
-    std::string name = "BTFL_cli";
-    const std::string c = sanitizeForFilename(craft);
-    if (!c.empty()) name += "_" + c;
-    name += "_" + timestampCompact();
-    const std::string b = sanitizeForFilename(board);
-    if (!b.empty()) name += "_" + b;
-    return name + "_backup.txt";
+    return stampedName("BTFL_cli", craft, board, "_backup.txt");
 }
 
 std::string Storage::makeDiagnosticName(const std::string& craft, const std::string& board) const {
-    std::string name = "GNDHOG_fieldcheck";
-    const std::string c = sanitizeForFilename(craft);
-    if (!c.empty()) name += "_" + c;
-    name += "_" + timestampCompact();
-    const std::string b = sanitizeForFilename(board);
-    if (!b.empty()) name += "_" + b;
-    return name + ".txt";
+    return stampedName("GNDHOG_fieldcheck", craft, board, ".txt");
 }
 
 uint64_t Storage::freeBytes() const {

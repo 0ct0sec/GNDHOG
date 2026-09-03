@@ -1,9 +1,10 @@
 #include "thermaltrip.h"
+#include "storage.h"
+#include "strutil.h"
 
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <utility>
 
 #if defined(__linux__)
@@ -15,21 +16,8 @@
 namespace bf {
 namespace {
 
-std::string readTrimmed(const std::string& path) {
-    std::ifstream f(path);
-    if (!f) return {};
-    std::string value;
-    std::getline(f, value);
-    while (!value.empty() &&
-           (value.back() == '\n' || value.back() == '\r' || value.back() == ' ' ||
-            value.back() == '\t')) {
-        value.pop_back();
-    }
-    return value;
-}
-
 bool readSwitch(const std::string& path, bool& on) {
-    const std::string text = readTrimmed(path);
+    const std::string text = readFirstLine(path);
     if (text.empty()) return false;
     char* end = nullptr;
     errno = 0;
@@ -37,11 +25,6 @@ bool readSwitch(const std::string& path, bool& on) {
     if (errno != 0 || end == text.c_str() || *end != '\0' || value < 0) return false;
     on = value != 0;
     return true;
-}
-
-std::string basenameOf(const std::string& path) {
-    const size_t slash = path.find_last_of('/');
-    return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
 std::string parentOf(const std::string& path) {
@@ -82,7 +65,7 @@ ThermalTripProbe ThermalTrip::probeDevice(const std::string& device) const {
     return out;
 #else
     const std::string resolvedDevice = resolvePath(device);
-    const std::string ttyName = basenameOf(resolvedDevice.empty() ? device : resolvedDevice);
+    const std::string ttyName = baseName(resolvedDevice.empty() ? device : resolvedDevice);
     if (ttyName.empty()) {
         out.reason = "serial device name is unavailable";
         return out;
@@ -96,12 +79,12 @@ ThermalTripProbe ThermalTrip::probeDevice(const std::string& device) const {
 
     std::string usbDevice;
     for (int hop = 0; hop < 12 && !cursor.empty(); ++hop) {
-        const std::string vid = readTrimmed(cursor + "/idVendor");
+        const std::string vid = readFirstLine(cursor + "/idVendor");
         if (!vid.empty()) {
             usbDevice = cursor;
             out.usbDeviceFound = true;
-            out.usbNode = basenameOf(cursor);
-            const std::string pid = readTrimmed(cursor + "/idProduct");
+            out.usbNode = baseName(cursor);
+            const std::string pid = readFirstLine(cursor + "/idProduct");
             out.usbIdentity = pid.empty() ? vid : vid + ":" + pid;
             break;
         }
@@ -117,11 +100,11 @@ ThermalTripProbe ThermalTrip::probeDevice(const std::string& device) const {
     std::string child = usbDevice;
     cursor = parentOf(usbDevice);
     for (int hop = 0; hop < 12 && !cursor.empty() && cursor != "/"; ++hop) {
-        const std::string vid = readTrimmed(cursor + "/idVendor");
-        const std::string pid = readTrimmed(cursor + "/idProduct");
-        const std::string hubName = basenameOf(cursor);
+        const std::string vid = readFirstLine(cursor + "/idVendor");
+        const std::string pid = readFirstLine(cursor + "/idProduct");
+        const std::string hubName = baseName(cursor);
         if (vid == "05e3" && pid == "0610" && internalHubNodeName(hubName)) {
-            out.extUsb4 = isExtBranch(hubName, basenameOf(child));
+            out.extUsb4 = isExtBranch(hubName, baseName(child));
             break;
         }
         child = cursor;

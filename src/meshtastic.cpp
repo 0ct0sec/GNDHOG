@@ -1,11 +1,11 @@
 #include "meshtastic.h"
 #include "protowire.h"
+#include "strutil.h"
 
 #include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 
 namespace bf {
 namespace {
@@ -135,10 +135,7 @@ uint32_t parseHex32(const std::string& text) {
 // ------------------------------------------------------------------ values
 
 std::string MeshPosition::coordText() const {
-    if (!valid) return "no position";
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "%.5f, %.5f", latitude, longitude);
-    return buf;
+    return valid ? formatLatLon(latitude, longitude) : std::string("no position");
 }
 
 std::string meshNodeIdText(uint32_t num) {
@@ -691,7 +688,7 @@ double meshBearingDeg(double lat1, double lon1, double lat2, double lon2) {
 
 const char* meshCompassPoint(double bearingDeg) {
     static const char* const kPoints[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
-    if (!(bearingDeg >= 0.0) && !(bearingDeg <= 0.0)) return "?";   // NaN
+    if (std::isnan(bearingDeg)) return "?";
     double normalised = std::fmod(bearingDeg, 360.0);
     if (normalised < 0.0) normalised += 360.0;
     const int index = static_cast<int>((normalised + 22.5) / 45.0) % 8;
@@ -711,7 +708,7 @@ std::string meshRangeText(double metres) {
 }
 
 std::string meshBearingText(double bearingDeg) {
-    if (!(bearingDeg >= 0.0) && !(bearingDeg <= 0.0)) return "---";   // NaN
+    if (std::isnan(bearingDeg)) return "---";
     double normalised = std::fmod(bearingDeg, 360.0);
     if (normalised < 0.0) normalised += 360.0;
     int whole = static_cast<int>(normalised + 0.5);

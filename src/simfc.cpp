@@ -1,25 +1,16 @@
 #include "simfc.h"
+#include "simpty.h"
+#include "strutil.h"
 
-#include <cctype>
 #include <cerrno>
 #include <cstdlib>
-#include <cstring>
-#include <sstream>
 
 #if defined(__linux__)
-#include <fcntl.h>
 #include <unistd.h>
 #endif
 
 namespace bf {
 namespace {
-
-std::string trim(const std::string& s) {
-    size_t a = 0, b = s.size();
-    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
-    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
-    return s.substr(a, b - a);
-}
 
 const char kDiffAll[] =
     "# version\r\n"
@@ -92,32 +83,8 @@ const char* simDiffAll() { return kDiffAll; }
 SimFc::~SimFc() { stop(); }
 
 bool SimFc::start(std::string& error) {
-#if defined(__linux__)
     stop();
-    master_ = ::posix_openpt(O_RDWR | O_NOCTTY);
-    if (master_ < 0) {
-        error = std::string("posix_openpt: ") + std::strerror(errno);
-        return false;
-    }
-    if (::grantpt(master_) != 0 || ::unlockpt(master_) != 0) {
-        error = std::string("unlockpt: ") + std::strerror(errno);
-        stop();
-        return false;
-    }
-    const char* name = ::ptsname(master_);
-    if (!name) {
-        error = "ptsname failed";
-        stop();
-        return false;
-    }
-    slavePath_ = name;
-    const int flags = ::fcntl(master_, F_GETFL, 0);
-    ::fcntl(master_, F_SETFL, flags | O_NONBLOCK);
-    return true;
-#else
-    error = "the simulator needs a Linux pty";
-    return false;
-#endif
+    return openSimPty(master_, slavePath_, error);
 }
 
 void SimFc::stop() {

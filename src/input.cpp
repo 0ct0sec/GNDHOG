@@ -1,4 +1,5 @@
 #include "input.h"
+#include "strutil.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -82,13 +83,11 @@ int Keyboard::open(std::string& error) {
 
         char nameBuf[256] = {0};
         if (::ioctl(fd, EVIOCGNAME(sizeof(nameBuf) - 1), nameBuf) < 0) nameBuf[0] = '\0';
-        std::string devName = nameBuf;
-        std::string lowerName = devName;
-        for (char& c : lowerName) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+        const std::string devName = nameBuf;
 
         Device d;
         d.fd = fd;
-        d.cardputer = lowerName.find("tca8418") != std::string::npos;
+        d.cardputer = lower(devName).find("tca8418") != std::string::npos;
         devices_.push_back(d);
         infos_.push_back(InputDeviceInfo{node, devName, d.cardputer});
     }

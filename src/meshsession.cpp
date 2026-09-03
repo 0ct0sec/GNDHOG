@@ -132,6 +132,33 @@ void MeshSession::writeToRadio(const std::string& payload) {
     port_.write(frameToRadio(payload));
 }
 
+// Asks for the config download under a fresh id, stepping over the one id
+// the firmware reads as "no node database, please".
+void MeshSession::requestConfig(uint64_t now) {
+    configId_ = nextPacketId();
+    if (configId_ == kMeshNodelessConfigId) ++configId_;
+    configSentMs_ = now;
+    writeToRadio(encodeWantConfig(configId_));
+}
+
+void MeshSession::loseLink(const std::string& reason) {
+    linkLost_ = true;
+    term_.addLine("-- link lost (" + reason + ") --", LineKind::Error);
+    port_.close();
+    state_ = MeshState::Disconnected;
+}
+
+// True, with the reason, while the radio cannot legally put anything in the
+// air. An unset region is how Meshtastic ships, and it stays mute until
+// somebody picks one.
+bool MeshSession::loraBlocked(std::string& error) const {
+    if (radio_.loraReady()) return false;
+    error = radio_.region == 0
+                ? "the radio has no LoRa region set, so it will not transmit"
+                : "the radio reports transmit disabled";
+    return true;
+}
+
 uint32_t MeshSession::nextPacketId() {
     // A packet id only has to be unique among this client's in-flight packets;
     // the mesh matches acknowledgements against it. xorshift keeps it cheap and
@@ -216,12 +243,7 @@ bool MeshSession::sendText(uint32_t peer, const std::string& text, std::string& 
         error = "message is longer than " + std::to_string(kMeshMaxTextBytes) + " bytes";
         return false;
     }
-    if (!radio_.loraReady()) {
-        error = radio_.region == 0
-                    ? "the radio has no LoRa region set, so it will not transmit"
-                    : "the radio reports transmit disabled";
-        return false;
-    }
+    if (loraBlocked(error)) return false;
     const MeshNode* target = peer == kMeshBroadcast ? nullptr : findNode(peer);
     if (target && target->user.unmessagable) {
         error = target->title() + " advertises that it does not accept messages";
@@ -266,12 +288,7 @@ bool MeshSession::sendPosition(uint32_t peer, const GnssFix& fix, std::string& e
         error = "the GNSS receiver has no current fix";
         return false;
     }
-    if (!radio_.loraReady()) {
-        error = radio_.region == 0
-                    ? "the radio has no LoRa region set, so it will not transmit"
-                    : "the radio reports transmit disabled";
-        return false;
-    }
+    if (loraBlocked(error)) return false;
     const uint32_t packetId = nextPacketId();
     writeToRadio(encodePositionPacket(
         peer, channelIndex_, packetId, fix.latitude, fix.longitude,
@@ -370,8 +387,7 @@ std::vector<uint32_t> MeshSession::takeDirtyPeers() {
 }
 
 void MeshSession::resolvePending(uint32_t packetId, bool delivered,
-                                 const std::string& reason, uint64_t now) {
-    (void)now;
+                                 const std::string& reason) {
     auto it = pending_.find(packetId);
     if (it == pending_.end()) return;
     const uint32_t peer = it->second.peer;
@@ -391,13 +407,10 @@ void MeshSession::resolvePending(uint32_t packetId, bool delivered,
 // ---------------------------------------------------------------- receiving
 
 void MeshSession::handlePacket(const MeshFromRadio& frame, uint64_t now) {
-    if (frame.encrypted) {
-        // Somebody else's channel. Counting it as traffic is honest; pretending
-        // to have read it is not.
-        touchNode(frame.from, now);
-        return;
-    }
+    // Somebody else's channel still counts as having heard the sender;
+    // pretending to have read it would not.
     touchNode(frame.from, now);
+    if (frame.encrypted) return;
     // Indices, not references: nodeSlot() can grow or evict from the vector,
     // and a reference held across that call is a use-after-free waiting for a
     // busy mesh to find it.
@@ -485,7 +498,7 @@ void MeshSession::handlePacket(const MeshFromRadio& frame, uint64_t now) {
         if (!decodeMeshRouting(frame.payload, haveError, reason) || !haveError) break;
         if (frame.requestId == 0) break;
         const bool delivered = reason == 0;
-        resolvePending(frame.requestId, delivered, meshRoutingErrorText(reason), now);
+        resolvePending(frame.requestId, delivered, meshRoutingErrorText(reason));
         if (!delivered) {
             term_.addLine(std::string("-- mesh returned \"") + meshRoutingErrorText(reason) +
                               "\" for a sent message --",
@@ -594,10 +607,7 @@ void MeshSession::handleFrame(const std::string& body, uint64_t now) {
         state_ = MeshState::Configuring;
         configAttempts_ = 0;
         configItems_ = 0;
-        configId_ = nextPacketId();
-        if (configId_ == kMeshNodelessConfigId) ++configId_;
-        configSentMs_ = now;
-        writeToRadio(encodeWantConfig(configId_));
+        requestConfig(now);
         break;
 
     case MeshFromRadio::Kind::LogRecord:
@@ -622,20 +632,14 @@ void MeshSession::poll(uint64_t now) {
 
     std::string err;
     if (!port_.flush(err)) {
-        linkLost_ = true;
-        term_.addLine("-- link lost (" + err + ") --", LineKind::Error);
-        port_.close();
-        state_ = MeshState::Disconnected;
+        loseLink(err);
         return;
     }
 
     std::string incoming;
     const int n = port_.read(incoming);
     if (n < 0) {
-        linkLost_ = true;
-        term_.addLine("-- link lost (device disconnected) --", LineKind::Error);
-        port_.close();
-        state_ = MeshState::Disconnected;
+        loseLink("device disconnected");
         return;
     }
     if (n > 0) {
@@ -669,10 +673,7 @@ void MeshSession::poll(uint64_t now) {
         if (now - wakeSentMs_ < kWakeSettleMs) break;
         state_ = MeshState::Configuring;
         configAttempts_ = 1;
-        configId_ = nextPacketId();
-        if (configId_ == kMeshNodelessConfigId) ++configId_;
-        configSentMs_ = now;
-        writeToRadio(encodeWantConfig(configId_));
+        requestConfig(now);
         term_.addLine("-- meshtastic: requesting the node database --", LineKind::Local);
         break;
 
@@ -692,10 +693,7 @@ void MeshSession::poll(uint64_t now) {
         }
         ++configAttempts_;
         configItems_ = 0;
-        configId_ = nextPacketId();
-        if (configId_ == kMeshNodelessConfigId) ++configId_;
-        configSentMs_ = now;
-        writeToRadio(encodeWantConfig(configId_));
+        requestConfig(now);
         term_.addLine("-- meshtastic: no reply, asking again (attempt " +
                           std::to_string(configAttempts_) + ") --",
                       LineKind::Warn);
@@ -715,7 +713,7 @@ void MeshSession::poll(uint64_t now) {
                 if (now - kv.second.sentMs >= kAckTimeoutMs) expired.push_back(kv.first);
             }
             for (uint32_t packetId : expired) {
-                resolvePending(packetId, false, "no acknowledgement in 60s", now);
+                resolvePending(packetId, false, "no acknowledgement in 60s");
             }
         }
         break;

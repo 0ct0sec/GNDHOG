@@ -1,11 +1,10 @@
 #include "compass.h"
+#include "storage.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
-#include <sstream>
 #include <vector>
 
 #include <dirent.h>
@@ -16,19 +15,9 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
-bool readText(const std::string& path, std::string& out) {
-    std::ifstream f(path);
-    if (!f) return false;
-    std::getline(f, out);
-    while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' ')) {
-        out.pop_back();
-    }
-    return true;
-}
-
 bool readNumber(const std::string& path, double& out) {
-    std::string text;
-    if (!readText(path, text) || text.empty()) return false;
+    const std::string text = readFirstLine(path);
+    if (text.empty()) return false;
     char* end = nullptr;
     const double value = std::strtod(text.c_str(), &end);
     if (end == text.c_str()) return false;
@@ -75,18 +64,16 @@ bool Compass::discoverIn(const std::string& root) {
         if (magnDir_.empty() && fileExists(dir + "/in_magn_x_raw") &&
             fileExists(dir + "/in_magn_y_raw") && fileExists(dir + "/in_magn_z_raw")) {
             magnDir_ = dir;
-            readText(dir + "/name", magnName_);
+            magnName_ = readFirstLine(dir + "/name");
             if (!readNumber(dir + "/in_magn_scale", magnScale_) || magnScale_ <= 0.0) {
                 magnScale_ = 1.0;
             }
-            std::string matrix;
-            if (readText(dir + "/in_mount_matrix", matrix)) parseMountMatrix(matrix, magnMatrix_);
+            parseMountMatrix(readFirstLine(dir + "/in_mount_matrix"), magnMatrix_);
         }
         if (accelDir_.empty() && fileExists(dir + "/in_accel_x_raw") &&
             fileExists(dir + "/in_accel_y_raw") && fileExists(dir + "/in_accel_z_raw")) {
             accelDir_ = dir;
-            std::string matrix;
-            if (readText(dir + "/in_mount_matrix", matrix)) parseMountMatrix(matrix, accelMatrix_);
+            parseMountMatrix(readFirstLine(dir + "/in_mount_matrix"), accelMatrix_);
         }
     }
     return available();

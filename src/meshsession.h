@@ -120,6 +120,9 @@ private:
     };
 
     void writeToRadio(const std::string& payload);
+    void requestConfig(uint64_t now);
+    void loseLink(const std::string& reason);
+    bool loraBlocked(std::string& error) const;
     void handleFrame(const std::string& body, uint64_t now);
     void handlePacket(const MeshFromRadio& frame, uint64_t now);
     void touchNode(uint32_t num, uint64_t now);
@@ -130,8 +133,7 @@ private:
     void fail(const std::string& reason);
     void appendMessage(uint32_t peer, MeshMessage message);
     void markDirty(uint32_t peer);
-    void resolvePending(uint32_t packetId, bool delivered, const std::string& reason,
-                        uint64_t now);
+    void resolvePending(uint32_t packetId, bool delivered, const std::string& reason);
     uint32_t nextPacketId();
     void noteConsoleText(const std::string& text);
 

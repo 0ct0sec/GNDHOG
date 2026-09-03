@@ -1,9 +1,9 @@
 #include "bfsession.h"
 #include "diagnostics.h"
 #include "input.h"
+#include "strutil.h"
 
 #include <algorithm>
-#include <cctype>
 #include <sstream>
 
 namespace bf {
@@ -22,13 +22,6 @@ constexpr uint8_t kMspSetVtxConfig = 89;
 constexpr uint64_t kMspReplyTimeoutMs = 900;
 constexpr uint64_t kVtxApplySettleMs = 700;
 constexpr uint64_t kRebootDrainMs = 400;
-
-std::string trim(const std::string& s) {
-    size_t a = 0, b = s.size();
-    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
-    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
-    return s.substr(a, b - a);
-}
 
 } // namespace
 
@@ -199,11 +192,15 @@ void Session::requestVtxStatus(MspAction action, uint64_t now) {
     queueMsp(kMspVtxConfig);
 }
 
-void Session::finishVtxGuard(VtxBenchMode mode, const std::string& note, uint64_t now) {
-    vtxBenchMode_ = mode;
+void Session::noteVtxGuard(const std::string& note, LineKind kind) {
     vtxGuardNote_ = note;
     ++vtxGuardNoteSequence_;
-    term_.addLine("-- " + note + " --", mode == VtxBenchMode::PitMode ? LineKind::Good : LineKind::Warn);
+    term_.addLine("-- " + note + " --", kind);
+}
+
+void Session::finishVtxGuard(VtxBenchMode mode, const std::string& note, uint64_t now) {
+    vtxBenchMode_ = mode;
+    noteVtxGuard(note, mode == VtxBenchMode::PitMode ? LineKind::Good : LineKind::Warn);
     beginCli(now);
 }
 
@@ -227,9 +224,7 @@ void Session::enableVtxBenchGuard() {
 
 void Session::skipVtxBenchGuard() {
     if (state_ != SessionState::AwaitingVtxChoice) return;
-    vtxGuardNote_ = "VTX left at its current flight setting";
-    ++vtxGuardNoteSequence_;
-    term_.addLine("-- " + vtxGuardNote_ + " --", LineKind::Warn);
+    noteVtxGuard("VTX left at its current flight setting", LineKind::Warn);
     beginCli(nowMs());
 }
 
@@ -429,9 +424,7 @@ void Session::handleMspFrame(uint8_t direction, uint8_t command,
         }
         vtxOriginal_ = status;
         if (status.pitMode) {
-            vtxGuardNote_ = "VTX already reports pit mode";
-            ++vtxGuardNoteSequence_;
-            term_.addLine("-- " + vtxGuardNote_ + " --", LineKind::Good);
+            noteVtxGuard("VTX already reports pit mode", LineKind::Good);
             beginCli(now);
             return;
         }
@@ -488,37 +481,49 @@ void Session::noteCoreTemperature(const std::vector<TermLine>& lines) {
     }
 }
 
+// A write or read failure is the FC going away. Mid-reboot that is the
+// expected end of a VTX restore; anywhere else it is a lost link, and a job
+// in flight is finished as failed so nothing keeps waiting on it.
+void Session::loseLink(const std::string& reason, const char* rebootNote) {
+    if (state_ == SessionState::Rebooting) {
+        term_.addLine(std::string("-- ") + rebootNote + " --", LineKind::Good);
+        disconnect();
+        return;
+    }
+    linkLost_ = true;
+    term_.addLine("-- link lost (" + reason + ") --", LineKind::Error);
+    port_.close();
+    state_ = SessionState::Disconnected;
+    if (job_.active()) finishJob(false, "Link lost");
+}
+
+// Hands the captured output to whoever asked for it. A complete capture is
+// also mined for identity and completion candidates; a partial one is
+// delivered as it stands, marked failed, and never learned from.
+void Session::finishCapture(bool ok) {
+    std::string captured = term_.captureSince();
+    stripEchoedCommand(captured, captureCommand_);
+    if (ok) noteDumpText(captured);
+    auto cb = std::move(captureDone_);
+    captureDone_ = nullptr;
+    finishJob(ok, ok ? "Captured " + std::to_string(captured.size()) + " bytes"
+                     : std::string("Timed out waiting for the FC"));
+    if (cb) cb(ok, captured);
+}
+
 void Session::poll(uint64_t now) {
     if (!port_.isOpen()) return;
 
     std::string err;
     if (!port_.flush(err)) {
-        if (state_ == SessionState::Rebooting) {
-            term_.addLine("-- FC reboot requested; saved VTX state will reload --", LineKind::Good);
-            disconnect();
-            return;
-        }
-        linkLost_ = true;
-        term_.addLine("-- link lost (" + err + ") --", LineKind::Error);
-        port_.close();
-        state_ = SessionState::Disconnected;
-        if (job_.active()) finishJob(false, "Link lost");
+        loseLink(err, "FC reboot requested; saved VTX state will reload");
         return;
     }
 
     std::string incoming;
     const int n = port_.read(incoming);
     if (n < 0) {
-        if (state_ == SessionState::Rebooting) {
-            term_.addLine("-- FC reboot observed; saved VTX state will reload --", LineKind::Good);
-            disconnect();
-            return;
-        }
-        linkLost_ = true;
-        term_.addLine("-- link lost (device disconnected) --", LineKind::Error);
-        port_.close();
-        state_ = SessionState::Disconnected;
-        if (job_.active()) finishJob(false, "Link lost");
+        loseLink("device disconnected", "FC reboot observed; saved VTX state will reload");
         return;
     }
     if (n > 0) {
@@ -604,13 +609,7 @@ void Session::poll(uint64_t now) {
         if (commandComplete(now)) {
             state_ = SessionState::Ready;
             if (job_.kind == JobKind::Capture && !job_.finished) {
-                std::string captured = term_.captureSince();
-                stripEchoedCommand(captured, captureCommand_);
-                noteDumpText(captured);
-                auto cb = captureDone_;
-                captureDone_ = nullptr;
-                finishJob(true, "Captured " + std::to_string(captured.size()) + " bytes");
-                if (cb) cb(true, captured);
+                finishCapture(true);
             } else if (job_.kind == JobKind::Restore && !job_.finished) {
                 pumpRestore(now);
             }
@@ -632,13 +631,8 @@ void Session::poll(uint64_t now) {
                 state_ = SessionState::Ready;
                 pumpRestore(now);
             } else if (job_.kind == JobKind::Capture && !job_.finished) {
-                auto cb = captureDone_;
-                captureDone_ = nullptr;
-                finishJob(false, "Timed out waiting for the FC");
                 state_ = SessionState::Ready;
-                std::string partial = term_.captureSince();
-                stripEchoedCommand(partial, captureCommand_);
-                if (cb) cb(false, partial);
+                finishCapture(false);
             } else {
                 term_.addLine("-- no response; returning to the prompt --", LineKind::Warn);
                 state_ = SessionState::Ready;

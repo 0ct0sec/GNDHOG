@@ -20,6 +20,7 @@
 #include "simmesh.h"
 #include "storage.h"
 #include "term.h"
+#include "simpty.h"
 #include "thermaltrip.h"
 
 #include <cerrno>
@@ -803,11 +804,14 @@ void testGraphics() {
 
 // ------------------------------------------------- end-to-end against a pty
 
-bool spin(SimFc& sim, Session& s, int timeoutMs, const std::function<bool()>& until) {
+// Pumps a simulator and polls the link talking to it until `until` holds or
+// the deadline passes. One loop drives both the FC and the radio fixtures.
+template <class Sim, class Link>
+bool spin(Sim& sim, Link& link, int timeoutMs, const std::function<bool()>& until) {
     const uint64_t deadline = nowMs() + static_cast<uint64_t>(timeoutMs);
     while (nowMs() < deadline) {
         sim.pump();
-        s.poll(nowMs());
+        link.poll(nowMs());
         if (until()) return true;
         sleepMs(4);
     }
@@ -1421,26 +1425,7 @@ struct RawPty {
     ~RawPty() {
         if (master >= 0) ::close(master);
     }
-    bool start(std::string& error) {
-        master = ::posix_openpt(O_RDWR | O_NOCTTY);
-        if (master < 0) {
-            error = std::string("posix_openpt: ") + std::strerror(errno);
-            return false;
-        }
-        if (::grantpt(master) != 0 || ::unlockpt(master) != 0) {
-            error = std::string("unlockpt: ") + std::strerror(errno);
-            return false;
-        }
-        const char* name = ::ptsname(master);
-        if (!name) {
-            error = "ptsname failed";
-            return false;
-        }
-        slave = name;
-        const int flags = ::fcntl(master, F_GETFL, 0);
-        ::fcntl(master, F_SETFL, flags | O_NONBLOCK);
-        return true;
-    }
+    bool start(std::string& error) { return openSimPty(master, slave, error); }
     void write(const std::string& text) {
         // Whatever the client sent (a resync burst, a config request) goes
         // nowhere, the way it did on the bench; drain it so the pty never
@@ -1456,18 +1441,6 @@ struct RawPty {
         }
     }
 };
-
-bool spinMesh(SimMesh& sim, MeshSession& mesh, int timeoutMs,
-              const std::function<bool()>& until) {
-    const uint64_t deadline = nowMs() + static_cast<uint64_t>(timeoutMs);
-    while (nowMs() < deadline) {
-        sim.pump();
-        mesh.poll(nowMs());
-        if (until()) return true;
-        sleepMs(4);
-    }
-    return false;
-}
 
 // A radio with a large node database and a chatty console takes longer to
 // answer than the retry deadline. The download is arriving the whole time, so
@@ -1557,7 +1530,7 @@ void testMeshSession() {
     MeshSession mesh(term);
 
     check(mesh.connect(sim.devicePath(), 115200, error), "connect to the pty radio: " + error);
-    check(spinMesh(sim, mesh, 5000, [&] { return mesh.ready(); }),
+    check(spin(sim, mesh, 5000, [&] { return mesh.ready(); }),
           "the config download runs to config_complete_id");
     check(mesh.radio().myNodeNum == sim.selfNodeNum(),
           "my_info supplies the attached radio node number");
@@ -1596,7 +1569,7 @@ void testMeshSession() {
     check(direct != nullptr && direct->size() == 1 &&
               direct->back().state == MeshMessageState::Queued,
           "a direct message starts queued, never pre-emptively delivered");
-    check(spinMesh(sim, mesh, 4000,
+    check(spin(sim, mesh, 4000,
                    [&] {
                        const std::vector<MeshMessage>* log =
                            mesh.conversation(sim.hilltopNodeNum());
@@ -1610,7 +1583,7 @@ void testMeshSession() {
     sim.setAckError(1);   // NO_ROUTE
     check(mesh.sendText(sim.vanNodeNum(), "anyone there", error),
           "a second direct message is accepted");
-    check(spinMesh(sim, mesh, 4000,
+    check(spin(sim, mesh, 4000,
                    [&] {
                        const std::vector<MeshMessage>* log = mesh.conversation(sim.vanNodeNum());
                        return log && !log->empty() &&
@@ -1632,7 +1605,7 @@ void testMeshSession() {
           "a broadcast is recorded as sent, never as delivered");
 
     sim.injectText(sim.hilltopNodeNum(), sim.selfNodeNum(), "roger, gate is open");
-    check(spinMesh(sim, mesh, 3000,
+    check(spin(sim, mesh, 3000,
                    [&] {
                        const std::vector<MeshMessage>* log =
                            mesh.conversation(sim.hilltopNodeNum());
@@ -1647,7 +1620,7 @@ void testMeshSession() {
 
     const size_t broadcastBefore = broadcast ? broadcast->size() : 0;
     sim.injectText(sim.vanNodeNum(), kMeshBroadcast, "van 2 rolling");
-    check(spinMesh(sim, mesh, 3000,
+    check(spin(sim, mesh, 3000,
                    [&] {
                        const std::vector<MeshMessage>* log = mesh.conversation(kMeshBroadcast);
                        return log && log->size() > broadcastBefore;
@@ -1655,7 +1628,7 @@ void testMeshSession() {
           "a message addressed to everyone lands in the broadcast conversation");
 
     sim.injectPosition(sim.vanNodeNum(), 51.5007, -0.1246);
-    check(spinMesh(sim, mesh, 3000,
+    check(spin(sim, mesh, 3000,
                    [&] {
                        const MeshNode* van = mesh.findNode(sim.vanNodeNum());
                        return van && van->position.valid;
@@ -1683,7 +1656,7 @@ void testMeshSession() {
         MeshSession muteSession(muteTerm);
         check(muteSession.connect(mute.devicePath(), 115200, error),
               "connect to a region-less radio: " + error);
-        check(spinMesh(mute, muteSession, 5000, [&] { return muteSession.ready(); }),
+        check(spin(mute, muteSession, 5000, [&] { return muteSession.ready(); }),
               "a region-less radio still completes its config download");
         check(!muteSession.radio().loraReady(),
               "a radio with no region is not reported as ready to transmit");

@@ -1,5 +1,6 @@
 #include "audio.h"
 #include "brand.h"
+#include "strutil.h"
 
 #include <algorithm>
 #include <atomic>
@@ -42,14 +43,6 @@ bool isCardputerCodec(const std::string& id, const std::string& name) {
 
 bool isEs8389(const std::string& id, const std::string& name) {
     return id == "ES8389Audio" || name.find("ES8389-Audio") != std::string::npos;
-}
-
-std::string trim(std::string value) {
-    const std::string whitespace = " \t\r\n";
-    const auto first = value.find_first_not_of(whitespace);
-    if (first == std::string::npos) return {};
-    const auto last = value.find_last_not_of(whitespace);
-    return value.substr(first, last - first + 1);
 }
 
 int firstPlaybackDevice(const fs::path& root, int card) {
@@ -612,10 +605,8 @@ void Audio::shutdown() {
 void Audio::setEnabled(bool enabled) {
     impl_->isEnabled.store(enabled);
     if (!enabled) {
-        {
-            std::lock_guard<std::mutex> lock(impl_->queueMutex);
-            impl_->queue.clear();
-        }
+        std::lock_guard<std::mutex> lock(impl_->queueMutex);
+        impl_->queue.clear();
     }
 }
 

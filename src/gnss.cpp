@@ -1,5 +1,6 @@
 #include "gnss.h"
 #include "input.h"
+#include "strutil.h"
 
 #include <cctype>
 #include <cstdio>
@@ -127,10 +128,7 @@ bool epochFromNmea(const std::string& date, const std::string& time, uint32_t& o
 } // namespace
 
 std::string GnssFix::coordText() const {
-    if (!everValid) return "no fix";
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "%.5f, %.5f", latitude, longitude);
-    return buf;
+    return everValid ? formatLatLon(latitude, longitude) : std::string("no fix");
 }
 
 bool nmeaChecksumOk(const std::string& sentence) {

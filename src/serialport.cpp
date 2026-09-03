@@ -1,9 +1,10 @@
 #include "serialport.h"
+#include "storage.h"
+#include "strutil.h"
 
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
-#include <fstream>
 
 #if defined(__linux__)
 #include <dirent.h>
@@ -26,20 +27,6 @@ const int kBaudChoices[] = {
 const int kBaudChoiceCount = static_cast<int>(sizeof(kBaudChoices) / sizeof(kBaudChoices[0]));
 
 namespace {
-
-std::string readTrimmed(const std::string& path) {
-    std::ifstream f(path);
-    if (!f) return {};
-    std::string v;
-    std::getline(f, v);
-    while (!v.empty() && (v.back() == '\n' || v.back() == '\r' || v.back() == ' ')) v.pop_back();
-    return v;
-}
-
-std::string lower(std::string s) {
-    for (char& c : s) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-    return s;
-}
 
 #if defined(__linux__)
 std::string resolve(const std::string& path) {
@@ -65,15 +52,14 @@ std::vector<std::string> listDir(const std::string& dir) {
 // Walk up from /sys/class/tty/<tty> to the USB device that owns it and read the
 // identity attributes. Absence is reported as empty, never guessed at.
 void fillUsbIdentity(PortInfo& p) {
-    const std::string base = p.device.substr(p.device.find_last_of('/') + 1);
-    std::string dir = "/sys/class/tty/" + base + "/device";
+    std::string dir = "/sys/class/tty/" + baseName(p.device) + "/device";
     for (int hop = 0; hop < 6; ++hop) {
-        const std::string vid = readTrimmed(dir + "/idVendor");
+        const std::string vid = readFirstLine(dir + "/idVendor");
         if (!vid.empty()) {
             p.vendorId = vid;
-            p.productId = readTrimmed(dir + "/idProduct");
-            p.product = readTrimmed(dir + "/product");
-            p.manufacturer = readTrimmed(dir + "/manufacturer");
+            p.productId = readFirstLine(dir + "/idProduct");
+            p.product = readFirstLine(dir + "/product");
+            p.manufacturer = readFirstLine(dir + "/manufacturer");
             return;
         }
         dir += "/..";
@@ -125,7 +111,7 @@ std::string PortInfo::vidPid() const {
 }
 
 std::string PortInfo::label() const {
-    const std::string base = device.substr(device.find_last_of('/') + 1);
+    const std::string base = baseName(device);
     if (!product.empty()) return base + "  " + product;
     if (kind == "uart") return base + "  Grove/EXT UART";
     return base;

@@ -1,9 +1,9 @@
 #include "battery.h"
+#include "storage.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -15,20 +15,11 @@
 namespace bf {
 namespace {
 
-std::string readTrimmed(const std::string& path) {
-    std::ifstream f(path);
-    if (!f) return {};
-    std::string v;
-    std::getline(f, v);
-    while (!v.empty() && (v.back() == '\n' || v.back() == '\r' || v.back() == ' ')) v.pop_back();
-    return v;
-}
-
 // Every numeric attribute is optional and any of them may be an empty file on a
 // gauge that has not finished its first conversion. `fallback` is what the UI
 // gets told when the kernel will not commit.
 long readNumber(const std::string& path, long fallback) {
-    const std::string v = readTrimmed(path);
+    const std::string v = readFirstLine(path);
     if (v.empty()) return fallback;
     try {
         return std::stol(v);
@@ -98,11 +89,11 @@ bool Battery::discoverIn(const std::string& root) {
     std::sort(names.begin(), names.end());
     for (const std::string& name : names) {
         const std::string dir = root + "/" + name;
-        if (readTrimmed(dir + "/type") != "Battery") continue;
+        if (readFirstLine(dir + "/type") != "Battery") continue;
         // A mains adapter and a UPS both live in this class; only a supply that
         // can report a charge level is something to draw a battery for.
-        if (readTrimmed(dir + "/capacity").empty() &&
-            readTrimmed(dir + "/capacity_level").empty()) {
+        if (readFirstLine(dir + "/capacity").empty() &&
+            readFirstLine(dir + "/capacity_level").empty()) {
             continue;
         }
         path_ = dir;
@@ -120,15 +111,15 @@ BatteryReading Battery::read() const {
 
     // `present` is optional; a gauge that does not publish it is taken at its
     // word that the pack it is reporting on exists.
-    const std::string presentText = readTrimmed(path_ + "/present");
+    const std::string presentText = readFirstLine(path_ + "/present");
     r.present = presentText.empty() || presentText != "0";
     if (!r.present) return r;
 
     const long capacity = readNumber(path_ + "/capacity", -1);
     if (capacity >= 0) r.percent = static_cast<int>(std::min(capacity, 100L));
 
-    r.state = readTrimmed(path_ + "/status");
-    r.health = readTrimmed(path_ + "/health");
+    r.state = readFirstLine(path_ + "/status");
+    r.health = readFirstLine(path_ + "/health");
     r.charging = (r.state == "Charging");
     r.full = (r.state == "Full");
     // A full pack still sitting on the cable is not discharging, and drawing it

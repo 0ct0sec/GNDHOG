@@ -7,7 +7,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <ctime>
 #include <sstream>
 #include <poll.h>
@@ -389,6 +388,78 @@ void App::closeModal() {
     dirty_ = true;
 }
 
+// ------------------------------------------------------------ shared moves
+
+void App::showStatus(const std::string& text, uint64_t ms) {
+    status_ = text;
+    statusUntil_ = nowMs() + ms;
+    dirty_ = true;
+}
+
+void App::openRootMenu() {
+    openMenuPage(MenuPage::Root);
+    menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
+    setScreen(Screen::Menu);
+}
+
+void App::openHelp() {
+    helpScroll_ = 0;
+    openReturnableScreen(Screen::Help);
+}
+
+void App::openMarks() {
+    markList_.clamp(static_cast<int>(marks_.size()), bodyRows(false));
+    openReturnableScreen(Screen::Marks);
+}
+
+bool App::navigateList(ListState& st, const KeyEvent& e, int count, int rows) {
+    int delta = 0;
+    switch (e.key) {
+    case Key::Up:       delta = -1; break;
+    case Key::Down:     delta = +1; break;
+    case Key::PageUp:   delta = -rows; break;
+    case Key::PageDown: delta = +rows; break;
+    default: return false;
+    }
+    st.move(delta, count, rows);
+    audio_.play(HudCue::Navigate);
+    dirty_ = true;
+    return true;
+}
+
+bool App::requireFcReady() {
+    if (session_.ready()) return true;
+    notice("Not ready", "Connect to a flight controller first.");
+    return false;
+}
+
+bool App::requireRadioReady() {
+    if (meshMode() && mesh_.ready()) return true;
+    notice("Not ready", "Connect a Meshtastic radio first.");
+    return false;
+}
+
+bool App::marksFull() {
+    if (marks_.size() < kMaxMarks) return false;
+    notice("Marks full",
+           std::to_string(kMaxMarks) + " places are saved already. Delete one from "
+           "Menu > Position & GNSS > Marks before adding another.");
+    return true;
+}
+
+void App::abortFieldCheck(const std::string& why) {
+    diagnosticRunning_ = false;
+    diagnosticError_ = why;
+    diagnosticReport_ = buildDiagnosticReport(
+        diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
+    dirty_ = true;
+}
+
+void App::stopGnss() {
+    gnss_.close();
+    gnssProbeDeadlineMs_ = 0;
+}
+
 // ------------------------------------------------------------------- setup
 
 bool App::setup(const Options& opt, std::string& error) {
@@ -426,8 +497,7 @@ bool App::setup(const Options& opt, std::string& error) {
             // Headless is a fallback, not a failure: the app still runs for
             // previews and on a dev host with no panel.
             display_.setHeadlessSize(kScreenW, kScreenH);
-            status_ = "framebuffer: " + dispErr;
-            statusUntil_ = nowMs() + 6000;
+            showStatus("framebuffer: " + dispErr, 6000);
         }
     } else {
         display_.setHeadlessSize(kScreenW, kScreenH);
@@ -442,10 +512,7 @@ bool App::setup(const Options& opt, std::string& error) {
         std::string kbErr;
         if (keyboard_.open(kbErr) == 0) {
             keyboard_.enableStdinFallback(true);
-            if (status_.empty()) {
-                status_ = "keyboard: " + kbErr + " (using stdin)";
-                statusUntil_ = nowMs() + 6000;
-            }
+            if (status_.empty()) showStatus("keyboard: " + kbErr + " (using stdin)", 6000);
         }
     } else {
         keyboard_.enableStdinFallback(true);
@@ -628,8 +695,7 @@ void App::flushMeshChats() {
         if (!storage_.writeAtomic(path, formatMeshChat(*log), error)) {
             // Losing the transcript is worth saying out loud; the message
             // itself already went out over the air either way.
-            status_ = "chat not saved: " + error;
-            statusUntil_ = nowMs() + 6000;
+            showStatus("chat not saved: " + error, 6000);
         }
     }
 }
@@ -674,8 +740,7 @@ void App::toggleGnss() {
         // quietly undo, and which says so rather than appearing to do nothing.
         gnssWanted_ = false;
         gnss_.close();
-        status_ = "GNSS locked off by --no-gnss for this launch";
-        statusUntil_ = nowMs() + 4000;
+        showStatus("GNSS locked off by --no-gnss for this launch", 4000);
         refreshMeshMenus();
         return;
     }
@@ -683,13 +748,11 @@ void App::toggleGnss() {
     config_.setBool("gnss.enabled", gnssWanted_);
     if (gnssWanted_) {
         startGnss();
-        status_ = gnss_.isOpen() ? "GNSS receiver opened" : "GNSS receiver unavailable";
+        showStatus(gnss_.isOpen() ? "GNSS receiver opened" : "GNSS receiver unavailable", 4000);
     } else {
-        gnss_.close();
-        gnssProbeDeadlineMs_ = 0;
-        status_ = "GNSS receiver closed";
+        stopGnss();
+        showStatus("GNSS receiver closed", 4000);
     }
-    statusUntil_ = nowMs() + 4000;
     refreshMeshMenus();
 }
 
@@ -769,10 +832,7 @@ void App::submitChatLine() {
 }
 
 void App::shareMyPosition(uint32_t peer) {
-    if (!meshMode() || !mesh_.ready()) {
-        notice("Not ready", "Connect a Meshtastic radio first.");
-        return;
-    }
+    if (!requireRadioReady()) return;
     if (!gnss_.receiverPresent()) {
         notice("No GNSS receiver",
                "This station has no GNSS receiver reporting on " + gnssDevice_ + ".\n\n"
@@ -798,8 +858,7 @@ void App::shareMyPosition(uint32_t peer) {
                     notice("Not sent", error, HudCue::Error);
                     return;
                 }
-                status_ = "position transmitted";
-                statusUntil_ = nowMs() + 4000;
+                showStatus("position transmitted", 4000);
             });
 }
 
@@ -816,13 +875,8 @@ void App::exportConversation() {
         << mesh_.radio().loraSummary() << "\n"
         << "exported: " << timestampCompact() << "\n\n";
     for (const MeshMessage& message : *log) {
-        const std::time_t stamp = static_cast<std::time_t>(message.stampUtc);
-        std::tm tmv{};
-        ::localtime_r(&stamp, &tmv);
-        char when[32];
-        std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tmv);
         const MeshNode* from = mesh_.findNode(message.from);
-        out << when << "  "
+        out << formatLocalTime(message.stampUtc, "%Y-%m-%d %H:%M:%S") << "  "
             << (message.outgoing ? "this station"
                                  : (from ? from->title() : meshNodeIdText(message.from)))
             << ": " << message.text;
@@ -863,8 +917,7 @@ void App::clearConversation() {
                 // have an unwritten message in it, and this is not its problem.
                 chatRowsValid_ = false;
                 chatSequenceSeen_ = mesh_.chatSequence();
-                status_ = "conversation cleared";
-                statusUntil_ = nowMs() + 3000;
+                showStatus("conversation cleared");
             });
 }
 
@@ -936,8 +989,7 @@ void App::connectPort(const PortInfo& port, LinkMode mode) {
         // Still probing and nothing has spoken: the operator's deliberate
         // choice of this port wins, and the probe starts over when the link
         // closes.
-        gnss_.close();
-        gnssProbeDeadlineMs_ = 0;
+        stopGnss();
         pushLocal("-- GNSS probe released " + port.device + " for the link --",
                   LineKind::Local);
     }
@@ -1023,9 +1075,8 @@ void App::performThermalTrip(int temperatureC) {
     diagnosticRunning_ = false;
     session_.disconnect();
     setScreen(Screen::Terminal);
-    status_ = cut ? "thermal trip latched - EXT 5V is off"
-                  : "POWER CUT FAILED - unplug FC now";
-    statusUntil_ = nowMs() + 12000;
+    showStatus(cut ? "thermal trip latched - EXT 5V is off" : "POWER CUT FAILED - unplug FC now",
+               12000);
 
     std::string recordNote;
     if (finalRecorded) {
@@ -1137,8 +1188,7 @@ void App::requestDisconnect(bool exitAfter) {
                 }
                 disconnectAfterVtxRestore_ = true;
                 exitAfterVtxRestore_ = exitAfter;
-                status_ = "restoring VTX state via FC reboot";
-                statusUntil_ = nowMs() + 5000;
+                showStatus("restoring VTX state via FC reboot", 5000);
             },
             [this, exitAfter]() { finishDisconnect(exitAfter); });
 }
@@ -1203,10 +1253,7 @@ void App::doComplete() {
 }
 
 void App::runBackup(const std::string& command, const std::string& label) {
-    if (!session_.ready()) {
-        notice("Not ready", "Connect to a flight controller first.");
-        return;
-    }
+    if (!requireFcReady()) return;
     pushLocal("-- " + label + " --", LineKind::Local);
     const bool started = session_.startCapture(
         command, label, [this, label](bool ok, const std::string& text) {
@@ -1233,10 +1280,7 @@ void App::runBackup(const std::string& command, const std::string& label) {
 }
 
 void App::runFieldCheck() {
-    if (!session_.ready()) {
-        notice("Not ready", "Connect to a flight controller first.");
-        return;
-    }
+    if (!requireFcReady()) return;
     diagnosticReport_ = DiagnosticReport{};
     diagnosticStatus_.clear();
     diagnosticTasks_.clear();
@@ -1259,10 +1303,9 @@ void App::runFieldCheckStep() {
         diagnosticRunning_ = false;
         diagnosticReport_ = buildDiagnosticReport(
             diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
-        status_ = diagnosticReport_.actionableBlockerCount() > 0
-                      ? std::to_string(diagnosticReport_.actionableBlockerCount()) + " arming blocker(s)"
-                      : "field check complete";
-        statusUntil_ = nowMs() + 3000;
+        showStatus(diagnosticReport_.actionableBlockerCount() > 0
+                       ? std::to_string(diagnosticReport_.actionableBlockerCount()) + " arming blocker(s)"
+                       : std::string("field check complete"));
         audio_.play(diagnosticReport_.actionableBlockerCount() > 0
                         ? HudCue::Error
                         : HudCue::Success);
@@ -1278,24 +1321,13 @@ void App::runFieldCheckStep() {
             else diagnosticVersion_ = text;
 
             if (!ok) {
-                diagnosticRunning_ = false;
-                diagnosticError_ = "capture stopped while running " +
-                                   std::string(step == 0 ? "status" : step == 1 ? "tasks" : "version");
-                diagnosticReport_ = buildDiagnosticReport(
-                    diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
-                dirty_ = true;
+                abortFieldCheck(std::string("capture stopped while running ") + commands[step]);
                 return;
             }
             ++diagnosticStep_;
             runFieldCheckStep();
         });
-    if (!started) {
-        diagnosticRunning_ = false;
-        diagnosticError_ = "FC became busy before the next read-only query";
-        diagnosticReport_ = buildDiagnosticReport(
-            diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
-        dirty_ = true;
-    }
+    if (!started) abortFieldCheck("FC became busy before the next read-only query");
 }
 
 void App::saveFieldCheck() {
@@ -1337,10 +1369,7 @@ void App::viewFile(const BackupFile& f) {
 }
 
 void App::restoreFile(const BackupFile& f) {
-    if (!session_.ready()) {
-        notice("Not ready", "Connect to a flight controller first.");
-        return;
-    }
+    if (!requireFcReady()) return;
     std::string text, err;
     if (!storage_.readFile(f.path, text, err)) {
         notice("Could not read", err);
@@ -1378,8 +1407,7 @@ void App::deleteFile(const BackupFile& f) {
             return;
         }
         refreshFiles();
-        status_ = "deleted " + f.name;
-        statusUntil_ = nowMs() + 3000;
+        showStatus("deleted " + f.name);
     });
 }
 
@@ -1390,10 +1418,7 @@ void App::applyQuick(int id) {
 
     auto run = [this, cmd]() {
         setScreen(Screen::Terminal);
-        if (!session_.ready()) {
-            notice("Not ready", "Connect to a flight controller first.");
-            return;
-        }
+        if (!requireFcReady()) return;
         if (!session_.send(cmd)) {
             pushLocal("busy - wait for the current command to finish", LineKind::Warn);
             return;
@@ -1422,13 +1447,11 @@ void App::applyQuick(int id) {
 void App::adjustBrightness(int delta) {
     brightness_ = std::max(5, std::min(100, brightness_ + delta));
     if (backlight_.available() && backlight_.setPercent(brightness_)) {
-        status_ = "brightness " + std::to_string(brightness_) + "%";
+        showStatus("brightness " + std::to_string(brightness_) + "%", 2000);
     } else {
-        status_ = backlight_.available() ? "brightness write rejected"
-                                         : "no backlight control available";
+        showStatus(backlight_.available() ? "brightness write rejected"
+                                          : "no backlight control available", 2000);
     }
-    statusUntil_ = nowMs() + 2000;
-    dirty_ = true;
 }
 
 int& App::linkBaudFor(LinkMode mode) {
@@ -1445,28 +1468,24 @@ void App::cycleLinkBaud(LinkMode mode) {
     const char* who = mode == LinkMode::Meshtastic ? "radio" : "flight controller";
     // The rate is applied when the port is opened, so saying so is the
     // difference between a setting and an apparently ignored keystroke.
-    status_ = std::string(who) + " baud " + std::to_string(baud) +
-              (linkConnected() && linkMode_ == mode ? " - applies on the next connect" : "");
-    statusUntil_ = nowMs() + 3000;
+    showStatus(std::string(who) + " baud " + std::to_string(baud) +
+               (linkConnected() && linkMode_ == mode ? " - applies on the next connect" : ""));
     refreshLinkSpeedMenu();
-    dirty_ = true;
 }
 
 void App::cycleGnssBaud() {
     gnssBaud_ = nextBaudChoice(gnssBaud_);
-    status_ = "GNSS baud " + std::to_string(gnssBaud_);
+    std::string text = "GNSS baud " + std::to_string(gnssBaud_);
     // Unlike the link rates, this one owns its port outright, so it can be
     // proved immediately instead of being promised for the next connect.
     if (gnssWanted_ && gnss_.isOpen()) {
-        gnss_.close();
-        gnssProbeDeadlineMs_ = 0;
+        stopGnss();
         startGnss();
-        if (!gnss_.isOpen()) status_ += " - receiver did not reopen";
+        if (!gnss_.isOpen()) text += " - receiver did not reopen";
     }
-    statusUntil_ = nowMs() + 3000;
+    showStatus(text);
     refreshLinkSpeedMenu();
     refreshMeshMenus();
-    dirty_ = true;
 }
 
 // 9600 first: it is what most receivers that are not at 115200 ship at, and
@@ -1531,8 +1550,7 @@ void App::toggleSound() {
     if (opt_.muteSound) {
         soundEnabled_ = false;
         audio_.setEnabled(false);
-        status_ = "HUD sounds locked off by --mute for this launch";
-        statusUntil_ = nowMs() + 4000;
+        showStatus("HUD sounds locked off by --mute for this launch", 4000);
         refreshSoundMenu();
         return;
     }
@@ -1540,11 +1558,10 @@ void App::toggleSound() {
     audio_.setEnabled(soundEnabled_);
     if (soundEnabled_ && !audio_.available()) audio_.start();
     if (soundEnabled_ && audio_.available()) audio_.play(HudCue::Startup);
-    status_ = soundEnabled_ ? "HUD sounds on" : "HUD sounds muted";
-    if (soundEnabled_ && (!audio_.available() || !audio_.lastError().empty())) {
-        status_ = "HUD audio unavailable: " + audio_.lastError();
-    }
-    statusUntil_ = nowMs() + 4000;
+    const bool unavailable = soundEnabled_ && (!audio_.available() || !audio_.lastError().empty());
+    showStatus(unavailable ? "HUD audio unavailable: " + audio_.lastError()
+                           : std::string(soundEnabled_ ? "HUD sounds on" : "HUD sounds muted"),
+               4000);
     refreshSoundMenu();
 }
 
@@ -1552,9 +1569,9 @@ void App::adjustSoundVolume(int delta) {
     soundVolume_ = std::clamp(soundVolume_ + delta, 0, 100);
     audio_.setVolume(soundVolume_);
     if (soundEnabled_) audio_.play(HudCue::Select);
-    status_ = "HUD volume " + std::to_string(soundVolume_) + "%";
-    if (!audio_.available()) status_ += " (audio unavailable)";
-    statusUntil_ = nowMs() + 2500;
+    showStatus("HUD volume " + std::to_string(soundVolume_) + "%" +
+                   (audio_.available() ? "" : " (audio unavailable)"),
+               2500);
     refreshSoundMenu();
 }
 
@@ -1607,8 +1624,7 @@ void App::applyMenu(int id) {
         markHere();
         break;
     case MenuMarks:
-        markList_.clamp(static_cast<int>(marks_.size()), bodyRows(false));
-        openReturnableScreen(Screen::Marks);
+        openMarks();
         break;
     case MenuAutoShare:
         cycleAutoShare();
@@ -1655,8 +1671,7 @@ void App::applyMenu(int id) {
         openReturnableScreen(Screen::Keymap);
         break;
     case MenuHelp:
-        helpScroll_ = 0;
-        openReturnableScreen(Screen::Help);
+        openHelp();
         break;
     case MenuAbout:
         openReturnableScreen(Screen::About);
@@ -1691,9 +1706,7 @@ Screen App::escapeTarget(Screen self, Screen fallback) const {
 
 void App::openLocateNode(uint32_t node) {
     if (node == 0 || node == kMeshBroadcast) {
-        status_ = "the broadcast channel is not a place";
-        statusUntil_ = nowMs() + 3000;
-        dirty_ = true;
+        showStatus("the broadcast channel is not a place");
         return;
     }
     locateNode_ = node;
@@ -1720,9 +1733,7 @@ void App::loadMarks() {
 bool App::saveMarks() {
     std::string error;
     if (storage_.writeAtomic(storage_.marksPath(), formatMarks(marks_), error)) return true;
-    status_ = "marks not saved: " + error;
-    statusUntil_ = nowMs() + 6000;
-    dirty_ = true;
+    showStatus("marks not saved: " + error, 6000);
     return false;
 }
 
@@ -1730,19 +1741,13 @@ void App::addMark(Mark mark) {
     mark.name = cleanMarkName(mark.name);
     if (mark.name.empty()) mark.name = "Mark " + std::to_string(marks_.size() + 1);
     if (mark.stampUtc == 0) mark.stampUtc = static_cast<int64_t>(std::time(nullptr));
-    if (marks_.size() >= kMaxMarks) {
-        notice("Marks full",
-               std::to_string(kMaxMarks) + " places are saved already. Delete one from "
-               "Menu > Position & GNSS > Marks before adding another.");
-        return;
-    }
+    if (marksFull()) return;
     marks_.push_back(std::move(mark));
     const bool saved = saveMarks();
     markList_.sel = static_cast<int>(marks_.size()) - 1;
     markList_.clamp(static_cast<int>(marks_.size()), bodyRows(false));
     if (saved) {
-        status_ = "marked " + marks_.back().name;
-        statusUntil_ = nowMs() + 3000;
+        showStatus("marked " + marks_.back().name);
         audio_.play(HudCue::Success);
     }
     refreshMeshMenus();
@@ -1763,12 +1768,7 @@ void App::markHere() {
                    "\n\nGNDHOG will not save a stale or invented coordinate as a place.");
         return;
     }
-    if (marks_.size() >= kMaxMarks) {
-        notice("Marks full",
-               std::to_string(kMaxMarks) + " places are saved already. Delete one before "
-               "adding another.");
-        return;
-    }
+    if (marksFull()) return;
     // The fix is captured when the key is pressed. The operator is naming the
     // spot they were standing on, not wherever they wander while typing.
     prompt("Mark this spot", fix.coordText() + "\n\nName this place:",
@@ -1792,12 +1792,7 @@ void App::markNodePosition(uint32_t nodeNum) {
                "That node has not reported a position, so there is nothing to mark.");
         return;
     }
-    if (marks_.size() >= kMaxMarks) {
-        notice("Marks full",
-               std::to_string(kMaxMarks) + " places are saved already. Delete one before "
-               "adding another.");
-        return;
-    }
+    if (marksFull()) return;
     // Copied now: the node table can evict or update the entry while the
     // dialog is open, and the point of a mark is that it does not move.
     const MeshPosition position = node->position;
@@ -1833,8 +1828,7 @@ void App::deleteMark(int index) {
                 markList_.clamp(static_cast<int>(marks_.size()), bodyRows(false));
                 if (locateMark_ == index) locateMark_ = -1;
                 else if (locateMark_ > index) --locateMark_;
-                status_ = "deleted mark " + name;
-                statusUntil_ = nowMs() + 3000;
+                showStatus("deleted mark " + name);
                 refreshMeshMenus();
                 if (screen_ == Screen::Locate) setScreen(Screen::Marks);
             });
@@ -1873,10 +1867,7 @@ void App::sendQuickMessage(int index) {
 }
 
 void App::sendSos() {
-    if (!meshMode() || !mesh_.ready()) {
-        notice("Not ready", "Connect a Meshtastic radio first.");
-        return;
-    }
+    if (!requireRadioReady()) return;
     const GnssFix fix = gnss_.fix();
     std::string text = "SOS from " + myStationLabel() + ": need help";
     if (fix.valid) {
@@ -1913,16 +1904,12 @@ void App::sendSos() {
         openChat(kMeshBroadcast);
         // A broadcast is not acknowledged, so the only proof of rescue is a
         // reply. The conversation stays open to receive one.
-        status_ = "SOS sent - repeat from the menu if nobody answers";
-        statusUntil_ = nowMs() + 8000;
+        showStatus("SOS sent - repeat from the menu if nobody answers", 8000);
     });
 }
 
 void App::cycleAutoShare() {
-    if (!meshMode() || !mesh_.ready()) {
-        notice("Not ready", "Connect a Meshtastic radio first.");
-        return;
-    }
+    if (!requireRadioReady()) return;
     if (autoShareMinutes_ == 0) {
         if (!gnss_.receiverPresent()) {
             notice("No GNSS receiver",
@@ -1937,8 +1924,7 @@ void App::cycleAutoShare() {
                 "Switch on", [this]() {
                     autoShareMinutes_ = 2;
                     lastAutoShareMs_ = 0;
-                    status_ = "auto-share every 2 min - first fix goes out now";
-                    statusUntil_ = nowMs() + 4000;
+                    showStatus("auto-share every 2 min - first fix goes out now", 4000);
                     refreshMeshMenus();
                 });
         return;
@@ -1948,10 +1934,9 @@ void App::cycleAutoShare() {
     if (autoShareMinutes_ < 5) autoShareMinutes_ = 5;
     else if (autoShareMinutes_ < 15) autoShareMinutes_ = 15;
     else autoShareMinutes_ = 0;
-    status_ = autoShareMinutes_ > 0
-                  ? "auto-share every " + std::to_string(autoShareMinutes_) + " min"
-                  : "auto-share off";
-    statusUntil_ = nowMs() + 3000;
+    showStatus(autoShareMinutes_ > 0
+                   ? "auto-share every " + std::to_string(autoShareMinutes_) + " min"
+                   : std::string("auto-share off"));
     refreshMeshMenus();
 }
 
@@ -1965,8 +1950,7 @@ void App::tickAutoShare(uint64_t now) {
     std::string error;
     if (!mesh_.sendPosition(kMeshBroadcast, gnss_.fix(), error)) {
         autoShareMinutes_ = 0;
-        status_ = "auto-share off: " + error;
-        statusUntil_ = now + 6000;
+        showStatus("auto-share off: " + error, 6000);
         refreshMeshMenus();
         return;
     }
@@ -2008,8 +1992,7 @@ void App::saveCompassCalibration() {
     put("compass.offset", cal.mountOffsetDeg);
     std::string error;
     if (!config_.save(storage_, error)) {
-        status_ = "compass calibration not saved: " + error;
-        statusUntil_ = nowMs() + 6000;
+        showStatus("compass calibration not saved: " + error, 6000);
     }
 }
 
@@ -2036,9 +2019,7 @@ void App::toggleCompassCalibration() {
     }
     if (!compass_.calibrating()) {
         compass_.beginCalibration();
-        status_ = "turn the device slowly through a full circle, then press C";
-        statusUntil_ = nowMs() + 8000;
-        dirty_ = true;
+        showStatus("turn the device slowly through a full circle, then press C", 8000);
         return;
     }
     if (!compass_.finishCalibration()) {
@@ -2046,15 +2027,12 @@ void App::toggleCompassCalibration() {
         std::snprintf(buf, sizeof(buf), "keep turning: %d samples, %d%% of a circle so far",
                       compass_.calibrationSamples(),
                       static_cast<int>(compass_.calibrationCoverage() * 100.0 + 0.5));
-        status_ = buf;
-        statusUntil_ = nowMs() + 4000;
-        dirty_ = true;
+        showStatus(buf, 4000);
         return;
     }
     saveCompassCalibration();
     audio_.play(HudCue::Success);
-    status_ = "compass calibrated; press A while walking to align it";
-    statusUntil_ = nowMs() + 6000;
+    showStatus("compass calibrated; press A while walking to align it", 6000);
     refreshMeshMenus();
 }
 
@@ -2082,8 +2060,7 @@ void App::alignCompassToTrack() {
     char buf[64];
     std::snprintf(buf, sizeof(buf), "compass aligned to track %03d",
                   static_cast<int>(std::lround(fix.courseDeg)) % 360);
-    status_ = buf;
-    statusUntil_ = nowMs() + 5000;
+    showStatus(buf, 5000);
     refreshMeshMenus();
 }
 
@@ -2175,12 +2152,11 @@ void App::onPortsKey(const KeyEvent& e) {
         break;
     case Key::Enter: audio_.play(HudCue::Select); connectSelected(); break;
     case Key::Escape: audio_.play(HudCue::Back); running_ = false; break;
-    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); break;
+    case Key::F1: openHelp(); break;
     case Key::Char:
         if (e.ch == 'r' || e.ch == 'R') {
             refreshPorts();
-            status_ = "rescanned: " + std::to_string(ports_.size()) + " ports";
-            statusUntil_ = nowMs() + 2000;
+            showStatus("rescanned: " + std::to_string(ports_.size()) + " ports", 2000);
         } else if (e.ch == 'b' || e.ch == 'B') {
             // The picker already knows which protocol Enter will speak, so B
             // adjusts that peer's rate and leaves the other two alone.
@@ -2192,11 +2168,9 @@ void App::onPortsKey(const KeyEvent& e) {
                                                                  : LinkMode::Meshtastic;
             portLinkModeForced_ = true;
             audio_.play(HudCue::Select);
-            status_ = portLinkMode_ == LinkMode::Meshtastic
-                          ? "Enter opens this port as a Meshtastic radio"
-                          : "Enter opens this port as a Betaflight CLI";
-            statusUntil_ = nowMs() + 3000;
-            dirty_ = true;
+            showStatus(portLinkMode_ == LinkMode::Meshtastic
+                           ? "Enter opens this port as a Meshtastic radio"
+                           : "Enter opens this port as a Betaflight CLI");
         } else if (e.ch == 'f' || e.ch == 'F') {
             refreshFiles();
             openReturnableScreen(Screen::Files);
@@ -2206,8 +2180,7 @@ void App::onPortsKey(const KeyEvent& e) {
             audio_.play(HudCue::Select);
             showGnssStatus();
         } else if (e.ch == 'h' || e.ch == 'H' || e.ch == '?') {
-            helpScroll_ = 0;
-            openReturnableScreen(Screen::Help);
+            openHelp();
         } else if (e.ch == 'a' || e.ch == 'A') {
             openReturnableScreen(Screen::About);
         } else if (e.ch == 'q' || e.ch == 'Q') {
@@ -2232,12 +2205,10 @@ void App::onTerminalKey(const KeyEvent& e) {
         case Key::Escape:
         case Key::F9:
             audio_.play(HudCue::Back);
-            openMenuPage(MenuPage::Root);
-            menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
-            setScreen(Screen::Menu);
+            openRootMenu();
             return;
         case Key::Help:
-        case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
+        case Key::F1: openHelp(); return;
         case Key::F2: showRadioInfo(); return;
         case Key::F3:
         case Key::Enter: setScreen(Screen::Nodes); return;
@@ -2298,15 +2269,13 @@ void App::onTerminalKey(const KeyEvent& e) {
             session_.cancelJob();
             return;
         }
-        openMenuPage(MenuPage::Root);
-        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
         audio_.play(HudCue::Back);
-        setScreen(Screen::Menu);
+        openRootMenu();
         return;
-    case Key::Help:      helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
+    case Key::Help:      openHelp(); return;
     case Key::BrightUp:  adjustBrightness(+10); return;
     case Key::BrightDown: adjustBrightness(-10); return;
-    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
+    case Key::F1: openHelp(); return;
     case Key::F2: runFieldCheck(); return;
     case Key::F3: if (session_.ready()) session_.send("version"); return;
     case Key::F4: if (session_.ready()) session_.send("diff"); return;
@@ -2317,9 +2286,7 @@ void App::onTerminalKey(const KeyEvent& e) {
         applyQuick(12);   // save, with its confirmation
         return;
     case Key::F9:
-        openMenuPage(MenuPage::Root);
-        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
-        setScreen(Screen::Menu);
+        openRootMenu();
         return;
     case Key::F10: requestDisconnect(false); return;
     case Key::Char:
@@ -2340,11 +2307,8 @@ void App::onMenuKey(const KeyEvent& e) {
     const int rows = bodyRows(false);
     const int n = static_cast<int>(items.size());
 
+    if (navigateList(st, e, n, rows)) return;
     switch (e.key) {
-    case Key::Up:   st.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::Down: st.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageUp:   st.move(-rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageDown: st.move(+rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
     case Key::Enter:
         if (n == 0) break;
         if (quick) {
@@ -2383,11 +2347,8 @@ void App::onMenuKey(const KeyEvent& e) {
 void App::onFilesKey(const KeyEvent& e) {
     const int rows = bodyRows(false);
     const int n = static_cast<int>(files_.size());
+    if (navigateList(fileList_, e, n, rows)) return;
     switch (e.key) {
-    case Key::Up:   fileList_.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::Down: fileList_.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageUp:   fileList_.move(-rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageDown: fileList_.move(+rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
     case Key::Enter:
         audio_.play(HudCue::Select);
         if (n > 0) restoreFile(files_[static_cast<size_t>(fileList_.sel)]);
@@ -2414,21 +2375,15 @@ void App::onDiagnosticsKey(const KeyEvent& e) {
         if (e.key == Key::Escape && !e.repeat) {
             session_.cancelJob();
             session_.clearFinishedJob();
-            diagnosticRunning_ = false;
-            diagnosticError_ = "cancelled by operator";
-            diagnosticReport_ = buildDiagnosticReport(
-                diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
+            abortFieldCheck("cancelled by operator");
             pushLocal("-- field check cancelled --", LineKind::Warn);
             setScreen(returnScreen_);
         }
         return;
     }
 
+    if (navigateList(diagnosticList_, e, n, rows)) return;
     switch (e.key) {
-    case Key::Up:       diagnosticList_.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::Down:     diagnosticList_.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageUp:   diagnosticList_.move(-rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageDown: diagnosticList_.move(+rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
     case Key::Escape:
     case Key::Enter:
         audio_.play(HudCue::Back);
@@ -2478,11 +2433,8 @@ void App::onNodesKey(const KeyEvent& e) {
     const int rows = bodyRows(false);
     const int n = nodeRowCount();
 
+    if (navigateList(nodeList_, e, n, rows)) return;
     switch (e.key) {
-    case Key::Up:   nodeList_.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::Down: nodeList_.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageUp:   nodeList_.move(-rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageDown: nodeList_.move(+rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
     case Key::Enter:
         audio_.play(HudCue::Select);
         openChat(peerForNodeRow(nodeList_.sel));
@@ -2492,15 +2444,10 @@ void App::onNodesKey(const KeyEvent& e) {
         // Opened from a menu category, Escape goes back to that category, the
         // way every other menu-owned screen behaves. Reached as the mesh home
         // screen, it opens the menu instead.
-        if (returnScreen_ == Screen::Menu) {
-            setScreen(Screen::Menu);
-        } else {
-            openMenuPage(MenuPage::Root);
-            menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
-            setScreen(Screen::Menu);
-        }
+        if (returnScreen_ == Screen::Menu) setScreen(Screen::Menu);
+        else openRootMenu();
         break;
-    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); break;
+    case Key::F1: openHelp(); break;
     case Key::F2: showRadioInfo(); break;
     case Key::F4: openLocateNode(peerForNodeRow(nodeList_.sel)); break;
     case Key::F5:
@@ -2508,9 +2455,7 @@ void App::onNodesKey(const KeyEvent& e) {
         break;
     case Key::F6: showGnssStatus(); break;
     case Key::F9:
-        openMenuPage(MenuPage::Root);
-        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
-        setScreen(Screen::Menu);
+        openRootMenu();
         break;
     case Key::F10: requestDisconnect(false); break;
     case Key::Char:
@@ -2524,8 +2469,7 @@ void App::onNodesKey(const KeyEvent& e) {
         } else if (e.ch == 'f' || e.ch == 'F') {
             openLocateNode(peerForNodeRow(nodeList_.sel));
         } else if (e.ch == 'm' || e.ch == 'M') {
-            markList_.clamp(static_cast<int>(marks_.size()), bodyRows(false));
-            openReturnableScreen(Screen::Marks);
+            openMarks();
         }
         break;
     default: break;
@@ -2545,7 +2489,7 @@ void App::onLocateKey(const KeyEvent& e) {
             openChat(locateNode_);
         }
         return;
-    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
+    case Key::F1: openHelp(); return;
     case Key::F2: showRadioInfo(); return;
     case Key::F3: openReturnableScreen(Screen::Nodes); return;
     case Key::F5:
@@ -2553,9 +2497,7 @@ void App::onLocateKey(const KeyEvent& e) {
         return;
     case Key::F6: showGnssStatus(); return;
     case Key::F9:
-        openMenuPage(MenuPage::Root);
-        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
-        setScreen(Screen::Menu);
+        openRootMenu();
         return;
     case Key::F10: requestDisconnect(false); return;
     case Key::BrightUp:   adjustBrightness(+10); return;
@@ -2585,17 +2527,14 @@ void App::onCompassKey(const KeyEvent& e) {
         audio_.play(HudCue::Back);
         if (compass_.calibrating()) {
             compass_.cancelCalibration();
-            status_ = "compass calibration cancelled";
-            statusUntil_ = nowMs() + 3000;
+            showStatus("compass calibration cancelled");
         }
         setScreen(escapeTarget(Screen::Compass, Screen::Nodes));
         return;
-    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
+    case Key::F1: openHelp(); return;
     case Key::F6: showGnssStatus(); return;
     case Key::F9:
-        openMenuPage(MenuPage::Root);
-        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
-        setScreen(Screen::Menu);
+        openRootMenu();
         return;
     case Key::Char:
         if (e.repeat) return;
@@ -2610,11 +2549,8 @@ void App::onCompassKey(const KeyEvent& e) {
 void App::onMarksKey(const KeyEvent& e) {
     const int rows = bodyRows(false);
     const int n = static_cast<int>(marks_.size());
+    if (navigateList(markList_, e, n, rows)) return;
     switch (e.key) {
-    case Key::Up:   markList_.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::Down: markList_.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageUp:   markList_.move(-rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageDown: markList_.move(+rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
     case Key::Enter:
         if (n > 0) openLocateMark(markList_.sel);
         break;
@@ -2622,12 +2558,10 @@ void App::onMarksKey(const KeyEvent& e) {
         audio_.play(HudCue::Back);
         setScreen(escapeTarget(Screen::Marks, Screen::Nodes));
         break;
-    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); break;
+    case Key::F1: openHelp(); break;
     case Key::F6: showGnssStatus(); break;
     case Key::F9:
-        openMenuPage(MenuPage::Root);
-        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
-        setScreen(Screen::Menu);
+        openRootMenu();
         break;
     case Key::Char:
         if (e.ch == 'n' || e.ch == 'N') markHere();
@@ -2692,15 +2626,13 @@ void App::onChatKey(const KeyEvent& e) {
         audio_.play(HudCue::Back);
         setScreen(escapeTarget(Screen::Chat, Screen::Nodes));
         return;
-    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
+    case Key::F1: openHelp(); return;
     case Key::F2: showRadioInfo(); return;
     case Key::F3: openReturnableScreen(Screen::Nodes); return;
     case Key::F5: shareMyPosition(chatPeer_); return;
     case Key::F6: showGnssStatus(); return;
     case Key::F9:
-        openMenuPage(MenuPage::Root);
-        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
-        setScreen(Screen::Menu);
+        openRootMenu();
         return;
     case Key::F10: requestDisconnect(false); return;
     case Key::BrightUp:   adjustBrightness(+10); return;
@@ -2793,8 +2725,7 @@ void App::tick(uint64_t now) {
                         return;
                     }
                     pushLocal("-- EXT USB4 thermal trip ARMED at 80C --", LineKind::Good);
-                    status_ = "EXT USB4 thermal trip armed at 80C";
-                    statusUntil_ = nowMs() + 6000;
+                    showStatus("EXT USB4 thermal trip armed at 80C", 6000);
                 },
                 [this]() {
                     thermalTrip_.decline();
@@ -2816,8 +2747,7 @@ void App::tick(uint64_t now) {
                 "status", "Watching FC temperature",
                 [this](bool ok, const std::string& text) {
                     if (!ok) {
-                        status_ = "FC temperature unavailable";
-                        statusUntil_ = nowMs() + 3000;
+                        showStatus("FC temperature unavailable");
                         return;
                     }
                     int temperatureC = 0;
@@ -2825,21 +2755,18 @@ void App::tick(uint64_t now) {
                         // Older targets that omit the field should not have
                         // their terminal filled with an unproductive query.
                         nextTemperatureCheckMs_ = 0;
-                        status_ = "FC does not report core temperature - watch stopped";
-                        statusUntil_ = nowMs() + 5000;
+                        showStatus("FC does not report core temperature - watch stopped", 5000);
                     }
                 })) {
             nextTemperatureCheckMs_ = now + kTemperatureCheckRetryMs;
-            status_ = "temperature watch deferred - FC busy";
-            statusUntil_ = now + 3000;
+            showStatus("temperature watch deferred - FC busy");
         }
     }
 
     if (session_.coreTemperatureSequence() != lastTemperatureSequence_) {
         lastTemperatureSequence_ = session_.coreTemperatureSequence();
         const int temperatureC = session_.coreTemperatureC();
-        status_ = "FC core " + std::to_string(temperatureC) + "C";
-        statusUntil_ = now + 5000;
+        showStatus("FC core " + std::to_string(temperatureC) + "C", 5000);
         const int alarmLevel = temperatureC >= 80
                                    ? 2
                                    : temperatureC >= kDefaultCoreTemperatureAlarmC ? 1 : 0;
@@ -2854,7 +2781,6 @@ void App::tick(uint64_t now) {
         } else if (temperatureC < kDefaultCoreTemperatureAlarmC - 5) {
             temperatureAlarmLevel_ = 0;
         }
-        dirty_ = true;
         if (temperatureC >= 80 && thermalTrip_.armed() && !thermalTripAttempted_) {
             performThermalTrip(temperatureC);
             return;
@@ -2886,11 +2812,7 @@ void App::tick(uint64_t now) {
 
     const JobStatus& job = session_.job();
     if (diagnosticRunning_ && !session_.connected()) {
-        diagnosticRunning_ = false;
-        diagnosticError_ = "serial link lost during field check";
-        diagnosticReport_ = buildDiagnosticReport(
-            diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
-        dirty_ = true;
+        abortFieldCheck("serial link lost during field check");
     }
     if (job.finished) {
         const bool wasRestore = job.kind == JobKind::Restore;
@@ -2916,11 +2838,10 @@ void App::tick(uint64_t now) {
             linkLossHandled_ = true;
             audio_.play(HudCue::LinkDown);
             refreshPorts();
-            status_ = session_.vtxBenchGuardActive()
-                          ? "link lost - pit mode clears only when the FC reboots"
-                          : "link lost - Esc for the menu to reconnect";
-            statusUntil_ = now + 6000;
-            dirty_ = true;
+            showStatus(session_.vtxBenchGuardActive()
+                           ? "link lost - pit mode clears only when the FC reboots"
+                           : "link lost - Esc for the menu to reconnect",
+                       6000);
         }
     } else {
         linkLossHandled_ = false;
@@ -2938,8 +2859,7 @@ void App::tickStatusTail(uint64_t now) {
         lastAudioError_ = audioError;
         refreshSoundMenu();
         if (!audioError.empty() && soundEnabled_ && !opt_.muteSound) {
-            status_ = "HUD audio unavailable: " + audioError;
-            statusUntil_ = now + 6000;
+            showStatus("HUD audio unavailable: " + audioError, 6000);
         }
     }
     if (!status_.empty() && now > statusUntil_) {
@@ -3052,9 +2972,7 @@ void App::tickMesh(uint64_t now) {
 
     if (mesh_.noteSequence() != meshNoteSeen_) {
         meshNoteSeen_ = mesh_.noteSequence();
-        status_ = mesh_.note();
-        statusUntil_ = now + 5000;
-        dirty_ = true;
+        showStatus(mesh_.note(), 5000);
     }
 
     tickAutoShare(now);
@@ -3110,9 +3028,7 @@ void App::tickMesh(uint64_t now) {
             audio_.play(HudCue::LinkDown);
             flushMeshChats();
             refreshPorts();
-            status_ = "radio link lost - Esc for the menu to reconnect";
-            statusUntil_ = now + 6000;
-            dirty_ = true;
+            showStatus("radio link lost - Esc for the menu to reconnect", 6000);
         }
     } else {
         linkLossHandled_ = false;
@@ -3372,12 +3288,16 @@ int App::run(const Options& opt) {
     const uint64_t frameMs = 33;   // ~30 fps, matching the reference UI target
     uint64_t nextFrame = nowMs();
 
+    // Reused across frames: thirty times a second is no place to allocate.
+    std::vector<pollfd> pfds;
+    std::vector<KeyEvent> events;
+
     while (running_) {
         const uint64_t now = nowMs();
 
         // Wait on input and serial together so the UI stays responsive without
         // ever spinning: a slow `dump` never blocks the frame loop.
-        std::vector<pollfd> pfds;
+        pfds.clear();
         for (int fd : keyboard_.fds()) pfds.push_back(pollfd{fd, POLLIN, 0});
         if (session_.connected()) pfds.push_back(pollfd{session_.fd(), POLLIN, 0});
         if (mesh_.connected()) pfds.push_back(pollfd{mesh_.fd(), POLLIN, 0});
@@ -3391,7 +3311,7 @@ int App::run(const Options& opt) {
         if (!pfds.empty()) ::poll(pfds.data(), pfds.size(), waitMs);
         else sleepMs(waitMs);
 
-        std::vector<KeyEvent> events;
+        events.clear();
         keyboard_.pump(nowMs(), events);
         keyboard_.pumpStdin(events);
         keyboard_.pumpRepeat(nowMs(), events);

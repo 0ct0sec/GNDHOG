@@ -85,7 +85,12 @@ private:
 bool makeDirs(const std::string& path, std::string& error);
 
 std::string humanBytes(uint64_t n);
+// strftime in the local zone, with whatever format strftime takes.
+std::string formatLocalTime(int64_t epochSeconds, const char* format);
 std::string timestampCompact();          // 20260831_135905
+// The first line of a small text file -- a sysfs attribute, usually -- with
+// trailing whitespace removed. Empty when the file cannot be read.
+std::string readFirstLine(const std::string& path);
 std::string sanitizeForFilename(const std::string& s);
 
 } // namespace bf
