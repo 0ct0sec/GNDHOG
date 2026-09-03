@@ -69,6 +69,10 @@ struct MeshNode {
     int32_t rssi = 0;
     uint32_t lastHeard = 0;          // device clock, seconds
     uint64_t heardLocalMs = 0;       // our own monotonic clock, 0 if never
+    // When this station itself received the position packet, on our clock.
+    // Zero for a position that came out of the radio's database, whose age
+    // is then only known if the sender stamped it.
+    uint64_t positionLocalMs = 0;
     bool haveHops = false;
     uint32_t hopsAway = 0;
     bool viaMqtt = false;
@@ -223,6 +227,21 @@ double meshDistanceM(double lat1, double lon1, double lat2, double lon2);
 double meshBearingDeg(double lat1, double lon1, double lat2, double lon2);
 const char* meshCompassPoint(double bearingDeg);
 std::string meshRangeText(double metres);
+// "052 NE": three-digit true bearing plus the compass point, for a screen
+// that has no magnetometer and cannot draw a needle that points anywhere but
+// north-up.
+std::string meshBearingText(double bearingDeg);
+// The turn from a course over ground to a bearing, -180..180, negative left.
+double meshRelativeTurnDeg(double bearingDeg, double courseDeg);
+// "ahead", "left 12", "right 95", "behind": what to do with the turn above.
+std::string meshTurnText(double relativeDeg);
+// "+120m", "-30m", "level": the other station's altitude minus ours.
+std::string meshAltitudeDiffText(double metres);
+
+// Tab-separated-record escaping, shared by every file this app keeps one
+// record per line in: a field with a newline in it must not become two.
+std::string meshEscapeField(const std::string& in);
+std::string meshUnescapeField(const std::string& in);
 
 // -------------------------------------------------------- chat persistence
 

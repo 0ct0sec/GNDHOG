@@ -102,6 +102,33 @@ suspiciously small department.
   to any node that reported a position, plus a position you can choose to
   transmit. With no receiver, or no fix, GNDHOG says so. It does not invent a
   coordinate to fill a field.
+- **Locate: a compass rose to a node.** Press **F** on any node and the screen
+  becomes a compass rose with the bearing arrow, the range in large type, the
+  altitude difference, both coordinates, and how old their position is. With
+  the BMM150 calibrated the rose is heading-up and the arrow points where to
+  walk; without it the rose is north-up and the dot on the rim is your GNSS
+  track. A tracker on a quad that stopped reporting is still a place, and this
+  screen walks you to it.
+- **A real compass.** The Cardputer Zero's BMM150 magnetometer and BMI270
+  accelerometer are read through the kernel's IIO class, tilt-compensated,
+  hard-iron calibrated with one slow turn of the device, and aligned to
+  "forward" against the GNSS track with one key. Nothing is trusted before
+  that: an uncalibrated chip is shown as such and never steers the rose.
+- **Marks.** Save your own fix as a named place (the car, the launch pad) or
+  save a node's last reported position under its name before the radio
+  forgets it. Marks live in `marks.txt` on this device, appear in the node
+  list's **M** screen with range and bearing, and are never transmitted.
+- **Quick messages.** **Tab** in a conversation opens a picker of canned lines
+  ("Landed safe", "Need help at {pos}", "Heading back to the car") and Enter
+  sends one. `{pos}` becomes your coordinate, or an honest "(no GNSS fix)".
+  Replace any slot from `config.ini` with `quickmsg.3 = ...`.
+- **SOS broadcast.** One menu entry composes a help request that names this
+  station and carries its fix in plain text, shows exactly what it is about
+  to send, and on confirmation broadcasts it together with a position packet.
+  The broadcast conversation stays open for the reply.
+- **Auto-share, for this session only.** An opt-in position beacon every 2,
+  5, or 15 minutes, switched on after a confirmation and never written to
+  `config.ini`, so the next launch starts silent again.
 - **The pack, on every screen.** The Cardputer Zero's BQ27220 fuel gauge is
   read through the ordinary Linux `power_supply` class and drawn in the top bar
   beside the state chip: a filled cell, the percentage, and a `+` when it is on
@@ -191,6 +218,9 @@ With a radio attached the screens change and so do the keys:
 | Key | Action |
 |-----|--------|
 | `Enter` | open the highlighted conversation, or send the typed message |
+| `F` / `Fn+4` | locate: compass rose, range, and bearing to the node (or to the open chat's peer) |
+| `M` | saved marks; on the Locate screen, mark that node's last position |
+| `Tab` | quick messages, from inside a conversation |
 | `I` / `Fn+2` | radio firmware, region, preset, and channel |
 | `G` / `Fn+6` | LoRa Cap GNSS status |
 | `P` / `Fn+5` | transmit this station's own position (asks first) |
@@ -363,6 +393,109 @@ coordinate after a confirmation that says what it is about to do. Without a fix
 it says so. It will not send a stale coordinate, and it will not borrow the
 radio's idea of where it is and present that as this station's.
 
+## Finding things: Locate, marks, quick messages, SOS
+
+Two kinds of people carry a Meshtastic radio into a field with this device: a
+pilot whose quad is now somewhere in that hedge, possibly with a tracker node
+still chirping, and a hiker whose group has split up and whose car is a long
+way back. Both want the same four things, and none of them are a keyboard.
+
+**Locate.** Press **F** (or **Fn+4**) on a node, or **Enter** on a mark:
+
+```text
+┌─────────────────────────────────────────────────────┐
+│ GNDHOG ZERO  locate                  [==] 96% ready │
+│       N         HILLTOP RELAY                       │
+│    .  |  .      !a1b2c3d4  ROUTER                   │
+│  W    |    E    587m                (3x type)       │
+│    . / \  .     042 NE              (2x type)       │
+│      S          you 028  right 14                   │
+│ -> them  o you  alt level  theirs 42m               │
+│                 them 51.48180, 0.00420              │
+│                 their fix heard 4m ago              │
+│                 me   51.47790, -0.00150  9 sat      │
+│                 my fix now  4.2 km/h                │
+│                 heard 12m  snr 6.2  1 hop  87%      │
+│ Enter chat  P share my fix  M mark theirs  Esc back │
+└─────────────────────────────────────────────────────┘
+```
+
+The arrow is the true bearing to their last reported position. With a
+calibrated compass the rose turns heading-up, the cardinal letters ride the
+rim, and the arrow simply points where to walk; the line under the bearing
+reads `you 038 mag  right 14`. Without one the rose is north-up and the dot on
+the rim is your course over ground from the receiver, drawn only while you are
+moving faster than a slow walk, with the line reading `you 038 track`. Stand
+still without a compass and the line says so instead of guessing. The age of
+*their* position is printed separately from how long ago the node was
+*heard*, because a tracker that reports telemetry but has lost its own fix is
+exactly the case where the two differ and the difference is the whole search.
+
+**Compass.** The board carries a Bosch BMM150 on the auxiliary bus of its
+BMI270, and Debian's `bmc150_magn` and `bmi270` drivers publish both under
+`/sys/bus/iio/devices` as world-readable `in_magn_*_raw` and `in_accel_*_raw`
+files, with the driver's scale and mount matrix beside them. GNDHOG reads them
+five times a second while a screen is showing a heading, projects the field
+onto the plane the accelerometer says is level, and smooths the result on the
+unit circle so 359 and 1 average to 0. **Menu → Position & GNSS → Compass**
+shows the live heading, field strength, tilt, and calibration state:
+
+- **C** starts a calibration. Turn the device slowly through a full circle,
+  level, and press **C** again. That measures the board's own magnetism (the
+  hard-iron offset of every ferrous thing soldered next to the chip) and the
+  Earth's field strength here, which is how a car bonnet or a motor is later
+  recognised as *disturbed* rather than believed. Fewer than three quarters of
+  a circle is refused, with the count so far.
+- **A**, while walking straight at more than 2.5 km/h with a GNSS fix and the
+  device pointed the way you are going, aligns the chip's x axis with
+  "forward". Until then the heading is a rotation of the truth by however the
+  chip happens to sit on the PCB.
+- `compass.declination` in `config.ini` (degrees, east positive) turns
+  magnetic into true; `compass.mirror = 1` is for a chip mounted upside down,
+  which reads as a compass that turns the wrong way.
+
+Both calibrations are saved to `config.ini` the moment they succeed. A heading
+is only offered to the Locate screen when it is calibrated, fresh, level
+within 40 degrees, and undisturbed; otherwise Locate falls back to the GNSS
+track and says which it is using.
+
+**Marks.** **Menu → Position & GNSS → Mark this spot** names your own fix; on
+the Locate screen, **M** names that node's last position instead, so a quad
+tracker's final report survives the radio's node database forgetting it (or
+the tracker's battery). The **M** key on the node list opens the saved places
+with their range and bearing from where you stand; **Enter** locates one and
+**D** deletes it. Marks are stored in `~/.local/share/bfcli/marks.txt`, one
+tab-separated line per place, and are never transmitted.
+
+**Quick messages.** **Tab** in any conversation. The built-in set is what gets
+said on a flight line or a trail: "OK, all good here", "Landed safe", "Crashed,
+going to look for it", "Need help at {pos}", "Heading back to the car", "On my
+way to you", "Stay put, I will come to you", "Battery low, going quiet", "Copy
+that", "Flying now, off the radio". `{pos}` expands to your coordinate when the
+receiver has a fix and to "(no GNSS fix)" when it does not; it never expands to
+a coordinate you no longer have. Replace any slot in `config.ini`:
+
+```ini
+quickmsg.3 = Need a spotter at the gate
+quickmsg.9 =
+```
+
+A blank slot removes that line; a slot past the built-in ten appends one.
+
+**SOS.** **Menu → Position & GNSS → SOS broadcast** composes
+`SOS from <name>: need help at <lat>, <lon> alt <m> <hh:mm:ss> UTC`, shows it,
+and on **Enter** broadcasts the text and a position packet to everyone on the
+primary channel, then opens the broadcast conversation so a reply is seen.
+Without a fix it says so in the text, gives the last known coordinate if there
+ever was one, and sends no position packet. The mesh does not acknowledge a
+broadcast; if nobody answers, send it again.
+
+**Auto-share.** **Menu → Position & GNSS → Auto-share position** is off.
+Switching it on asks first, then transmits your fix every 2 minutes whenever
+there is a current one; Enter steps it to 5, then 15, then off. It is a
+session setting that is never saved, so a device picked up tomorrow is as quiet
+as it was shipped. Closing the radio link switches it off too.
+
 The receiver is read only. GNDHOG never writes to the GNSS UART and never
 configures the receiver.
 
@@ -447,9 +580,10 @@ with `tools/validate-app-store.py`. Run only the metadata check with
 `make store-check`.
 
 The permission manifest enables `additional_hardware` for the framebuffer,
-evdev keyboard, backlight, and USB or UART serial device. Camera, microphone,
-IMU, network, background service, and external display stay disabled. The app
-is a serial terminal, not a hardware buffet.
+evdev keyboard, backlight, and USB or UART serial device, and `imu` for the
+BMM150 magnetometer and BMI270 accelerometer the compass reads through IIO.
+Camera, microphone, network, background service, and external display stay
+disabled. The app is a serial terminal with a compass, not a hardware buffet.
 
 Install a built package for a device smoke test with:
 
@@ -498,7 +632,8 @@ Inspect available ports before launching:
 ## Backups
 
 Backups live under `~/.local/share/bfcli/backups`, unless `BFCLI_DATA_DIR`
-points elsewhere. Mesh conversations live beside them in `mesh/`. Names follow
+points elsewhere. Mesh conversations live beside them in `mesh/`, and saved
+places in `marks.txt`. Names follow
 `BTFL_cli_<craft>_<timestamp>_<board>_backup.txt`, matching Betaflight
 Configurator so files can be copied between them.
 
@@ -535,10 +670,14 @@ Enter harder does not change the storage model.
   capability/readback sequence and one `status` temperature capture. None of
   it writes flash. Pit mode is requested only after operator confirmation and
   must be reported back before success.
-- On a mesh link, **nothing is transmitted that you did not type**. The only
+- On a mesh link, **nothing is transmitted that you did not ask for**. The only
   automatic traffic is the configuration request and a five-minute heartbeat,
-  and both stay inside the USB cable. Position sharing is a separate, confirmed
-  action; there is no periodic beacon.
+  and both stay inside the USB cable. Position sharing, a quick message, and an
+  SOS are each a separate, confirmed action. The only periodic transmission is
+  the auto-share beacon, which is off until switched on, asks before it starts,
+  and is never saved: the next launch starts with it off.
+- A mark is a file on this device. Saving one, or locating one, transmits
+  nothing.
 - A mesh conversation is deleted from this device only. The mesh has no recall,
   and the other station keeps its copy.
 
@@ -587,6 +726,9 @@ flight controller. Even imaginary hardware has a job description.
 | `src/meshtastic.cpp` | Meshtastic framing, messages, helpers, transcripts |
 | `src/meshsession.cpp` | radio link, node database, chat, delivery state |
 | `src/gnss.cpp` | NMEA 0183 parser for the LoRa Cap receiver |
+| `src/compass.cpp` | BMM150 through IIO: tilt compensation, calibration, alignment |
+| `src/marks.cpp` | saved places: the file format and its limits |
+| `src/quickmsg.cpp` | canned messages, their config overrides, and `{pos}` |
 | `src/diagnostics.cpp` | version-tolerant field evidence parser and saved report formatter |
 | `src/term.cpp` | scrollback, wrapping, and line editing |
 | `src/bfcommands.cpp` | command tables, completion, and risk classification |

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 
 namespace bf {
 
@@ -43,6 +44,10 @@ void fillRect(Surface& s, int x, int y, int w, int h, Color c) {
     if (!s.valid()) return;
     const int x0 = std::max(0, x), y0 = std::max(0, y);
     const int x1 = std::min(s.w, x + w), y1 = std::min(s.h, y + h);
+    // A rectangle entirely outside the surface clips to an inverted span,
+    // and std::fill with first > last walks off the end of the buffer. Glyphs
+    // never hit this because they plot per pixel; scaled text does.
+    if (x0 >= x1 || y0 >= y1) return;
     for (int yy = y0; yy < y1; ++yy) {
         Color* p = s.row(yy);
         std::fill(p + x0, p + x1, c);
@@ -73,6 +78,62 @@ void rect(Surface& s, int x, int y, int w, int h, Color c) {
     hLine(s, x, y + h - 1, w, c);
     vLine(s, x, y, h, c);
     vLine(s, x + w - 1, y, h, c);
+}
+
+namespace {
+
+inline void plot(Surface& s, int x, int y, Color c) {
+    if (x < 0 || y < 0 || x >= s.w || y >= s.h) return;
+    s.row(y)[x] = c;
+}
+
+} // namespace
+
+void drawLine(Surface& s, int x0, int y0, int x1, int y1, Color c) {
+    if (!s.valid()) return;
+    // Bresenham. Integer only, one plot per step, no float error to
+    // accumulate into a wobble on a 40px compass needle.
+    const int dx = std::abs(x1 - x0);
+    const int dy = -std::abs(y1 - y0);
+    const int sx = x0 < x1 ? 1 : -1;
+    const int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        plot(s, x0, y0, c);
+        if (x0 == x1 && y0 == y1) break;
+        const int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+void drawCircle(Surface& s, int cx, int cy, int r, Color c) {
+    if (!s.valid() || r < 0) return;
+    // Midpoint circle, eight-way symmetric.
+    int x = r, y = 0;
+    int err = 1 - r;
+    while (x >= y) {
+        plot(s, cx + x, cy + y, c); plot(s, cx - x, cy + y, c);
+        plot(s, cx + x, cy - y, c); plot(s, cx - x, cy - y, c);
+        plot(s, cx + y, cy + x, c); plot(s, cx - y, cy + x, c);
+        plot(s, cx + y, cy - x, c); plot(s, cx - y, cy - x, c);
+        ++y;
+        if (err < 0) {
+            err += 2 * y + 1;
+        } else {
+            --x;
+            err += 2 * (y - x) + 1;
+        }
+    }
+}
+
+void fillCircle(Surface& s, int cx, int cy, int r, Color c) {
+    if (!s.valid() || r < 0) return;
+    for (int dy = -r; dy <= r; ++dy) {
+        for (int dx = -r; dx <= r; ++dx) {
+            if (dx * dx + dy * dy <= r * r) plot(s, cx + dx, cy + dy, c);
+        }
+    }
 }
 
 void drawChar(Surface& s, int x, int y, char c, Color fg) {
@@ -119,6 +180,25 @@ int drawTextClipped(Surface& s, int x, int y, const std::string& t, int maxChars
 }
 
 int textWidth(const std::string& t) { return static_cast<int>(t.size()) * kGlyphW; }
+
+int drawTextScaled(Surface& s, int x, int y, const std::string& t, int scale, Color fg) {
+    if (scale <= 1) return drawText(s, x, y, t, fg);
+    if (!s.valid()) return x;
+    int cx = x;
+    for (char ch : t) {
+        const uint8_t* g = glyph(ch);
+        for (int col = 0; col < kGlyphCols; ++col) {
+            const uint8_t bits = g[col];
+            if (!bits) continue;
+            for (int rowIdx = 0; rowIdx < 7; ++rowIdx) {
+                if (!(bits & (1u << rowIdx))) continue;
+                fillRect(s, cx + col * scale, y + (rowIdx + 1) * scale, scale, scale, fg);
+            }
+        }
+        cx += kGlyphW * scale;
+    }
+    return cx;
+}
 
 void drawScrollbar(Surface& s, int x, int y, int h, int first, int visible, int total) {
     if (h <= 0) return;

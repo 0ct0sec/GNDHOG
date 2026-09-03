@@ -244,6 +244,16 @@ void Gnss::close() {
     openedMs_ = 0;
 }
 
+void Gnss::adoptFix(const GnssFix& fix, uint64_t nowMs) {
+    fix_ = fix;
+    if (fix_.valid) {
+        fix_.everValid = true;
+        fix_.updatedMs = nowMs;
+    }
+    ++sentences_;
+    lastSentenceMs_ = nowMs;
+}
+
 void Gnss::consumeLine(const std::string& line, uint64_t nowMs) {
     if (line.empty() || line[0] != '$') return;
     if (!parseNmeaSentence(line, fix_, nowMs)) return;

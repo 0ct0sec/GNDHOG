@@ -3,13 +3,16 @@
 #include "battery.h"
 #include "bfcommands.h"
 #include "bfsession.h"
+#include "compass.h"
 #include "diagnostics.h"
 #include "display.h"
 #include "gfx.h"
 #include "gnss.h"
 #include "input.h"
+#include "marks.h"
 #include "meshsession.h"
 #include "meshtastic.h"
+#include "quickmsg.h"
 #include "serialport.h"
 #include "storage.h"
 #include "term.h"
@@ -42,6 +45,10 @@ enum class Screen {
     About,
     Nodes,      // mesh: discovered radios and the broadcast channel
     Chat,       // mesh: one conversation
+    Locate,     // mesh: range, bearing and a compass rose to a node or a mark
+    Marks,      // mesh: saved places
+    QuickMsg,   // mesh: canned messages for the open conversation
+    Compass,    // the BMM150: heading, calibration, alignment
 };
 
 enum class MenuPage {
@@ -113,6 +120,7 @@ public:
 private:
     friend int runSelfTest();
     friend void testMeshApp();   // selftest.cpp: drives the mesh screens
+    friend void testFieldTools(); // selftest.cpp: locate, marks, quick messages, SOS
     friend void testBattery();   // selftest.cpp: paints the gauge indicator
     friend void testLinkBaud();  // selftest.cpp: drives the saved link rates
     // ---- lifecycle
@@ -137,6 +145,9 @@ private:
     void onAboutKey(const KeyEvent& e);
     void onNodesKey(const KeyEvent& e);
     void onChatKey(const KeyEvent& e);
+    void onLocateKey(const KeyEvent& e);
+    void onMarksKey(const KeyEvent& e);
+    void onCompassKey(const KeyEvent& e);
     bool handleModalKey(const KeyEvent& e);
 
     // ---- screens
@@ -156,6 +167,17 @@ private:
     void drawAbout(Surface& s);
     void drawNodes(Surface& s);
     void drawChat(Surface& s);
+    void drawLocate(Surface& s);
+    void drawMarks(Surface& s);
+    void drawQuickMsg(Surface& s);
+    void drawCompassScreen(Surface& s);
+    // The rose. Every angle is drawn relative to `rotationDeg`, the true
+    // bearing at the top: zero is north-up, the operator's own heading is
+    // heading-up. The target arrow is a true bearing; the dot on the rim is
+    // the direction this station is facing or moving.
+    void drawCompass(Surface& s, int cx, int cy, int r, bool haveBearing,
+                     double bearingDeg, bool haveHeading, double headingDeg,
+                     double rotationDeg);
     void drawModal(Surface& s);
     void drawList(Surface& s, const std::vector<MenuItem>& items, ListState& st,
                   int visibleRows, bool showSelection = true);
@@ -224,6 +246,34 @@ private:
     int nodeRowCount() const;
     uint32_t peerForNodeRow(int row) const;
     std::string peerTitle(uint32_t peer) const;
+    // This radio's own short name, for messages that name their sender.
+    std::string myStationLabel() const;
+
+    // ---- field tools: locate, marks, quick messages, SOS, auto-share
+    void openLocateNode(uint32_t node);
+    void openLocateMark(int index);
+    // Where Escape goes from a screen that may have been reached from itself
+    // (Locate opens Chat, Chat returns to Locate, Locate must not return to
+    // Locate). `fallback` is the screen's natural parent.
+    Screen escapeTarget(Screen self, Screen fallback) const;
+    void loadMarks();
+    bool saveMarks();
+    void addMark(Mark mark);
+    void markHere();
+    void markNodePosition(uint32_t node);
+    void deleteMark(int index);
+    void openQuickMessages();
+    void sendQuickMessage(int index);
+    void sendSos();
+    void cycleAutoShare();
+    void tickAutoShare(uint64_t now);
+
+    // ---- compass
+    void loadCompassCalibration();
+    void saveCompassCalibration();
+    void pollCompass(uint64_t now);
+    void toggleCompassCalibration();
+    void alignCompassToTrack();
 
     // ---- modal helpers
     void confirm(const std::string& title, const std::string& body,
@@ -231,6 +281,11 @@ private:
                  std::function<void()> onNo = nullptr);
     void notice(const std::string& title, const std::string& body,
                 HudCue cue = HudCue::Error);
+    // A one-line text entry. Enter hands the text to `onSubmit`; Escape
+    // discards it. Empty text is submitted as empty and the caller decides.
+    void prompt(const std::string& title, const std::string& body,
+                const std::string& initial, size_t maxBytes,
+                std::function<void(const std::string&)> onSubmit);
     void closeModal();
     void setScreen(Screen s);
     void openReturnableScreen(Screen s);
@@ -253,6 +308,7 @@ private:
     Session session_{term_, completer_};
     MeshSession mesh_{term_};
     Gnss gnss_;
+    Compass compass_;
     ThermalTrip thermalTrip_;
 
     Screen screen_ = Screen::Ports;
@@ -319,6 +375,26 @@ private:
     bool meshFailureReported_ = false;
     int meshUnreadSeen_ = 0;
 
+    // ---- field tools state
+    std::vector<Mark> marks_;
+    ListState markList_;
+    std::vector<std::string> quickMessages_;
+    std::vector<MenuItem> quickMsgMenu_;
+    ListState quickMsgList_;
+    // Exactly one of these names the Locate target: a node number, or an
+    // index into marks_. Zero and -1 mean "not that kind of target".
+    uint32_t locateNode_ = 0;
+    int locateMark_ = -1;
+    // Session-only. Never written to config.ini: the next launch starts with
+    // it off, so nothing is ever transmitted that somebody did not switch on
+    // during this very session.
+    int autoShareMinutes_ = 0;
+    uint64_t lastAutoShareMs_ = 0;
+    // Ages on the node list and the Locate screen tick over without a key
+    // press; this paces those repaints.
+    uint64_t lastAgeRepaintMs_ = 0;
+    uint64_t compassSampleSeen_ = 0;
+
     int brightness_ = 100;
     int soundVolume_ = 70;
     bool soundEnabled_ = true;
@@ -342,9 +418,13 @@ private:
     // Modal dialog.
     bool modal_ = false;
     bool modalIsConfirm_ = false;
+    bool modalIsInput_ = false;
     std::string modalTitle_, modalBody_, modalYes_;
     std::function<void()> modalAction_;
     std::function<void()> modalCancelAction_;
+    LineEditor modalEditor_;
+    size_t modalInputMax_ = 0;
+    std::function<void(const std::string&)> modalInputAction_;
 
     std::string status_;
     uint64_t statusUntil_ = 0;

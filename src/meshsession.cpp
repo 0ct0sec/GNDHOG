@@ -421,7 +421,12 @@ void MeshSession::handlePacket(const MeshFromRadio& frame, uint64_t now) {
     case MeshPort::Position: {
         MeshPosition position;
         if (decodeMeshPosition(frame.payload, position) && position.valid) {
-            nodeSlot(frame.from).position = position;
+            MeshNode& node = nodeSlot(frame.from);
+            node.position = position;
+            // Heard by this station, now. The sender's own stamp may be zero
+            // (a tracker with no clock) and this is the age that matters when
+            // somebody is walking towards it.
+            node.positionLocalMs = now;
         }
         break;
     }
@@ -499,9 +504,17 @@ void MeshSession::handleFrame(const std::string& body, uint64_t now) {
         MeshNode& node = nodeSlot(frame.node.num);
         const uint64_t heard = node.heardLocalMs;
         const uint32_t num = node.num;
+        // A database record that repeats the position we already heard live
+        // keeps the moment we heard it; a different coordinate is news from
+        // the radio's memory and its arrival time here is unknown.
+        const bool samePosition = node.position.valid && frame.node.position.valid &&
+                                  node.position.latitude == frame.node.position.latitude &&
+                                  node.position.longitude == frame.node.position.longitude;
+        const uint64_t positionHeard = samePosition ? node.positionLocalMs : 0;
         node = frame.node;
         node.num = num;
         node.heardLocalMs = heard;
+        node.positionLocalMs = positionHeard;
         node.isSelf = (radio_.myNodeNum != 0 && num == radio_.myNodeNum);
         ++configItems_;
         break;

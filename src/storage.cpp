@@ -143,6 +143,7 @@ std::vector<std::string> Storage::listMeshChatFiles() const {
 
 std::string Storage::configPath() const { return dataDir_ + "/config.ini"; }
 std::string Storage::historyPath() const { return dataDir_ + "/history.txt"; }
+std::string Storage::marksPath() const { return dataDir_ + "/marks.txt"; }
 
 bool Storage::writeAtomic(const std::string& path, const std::string& content,
                           std::string& error) const {

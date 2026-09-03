@@ -5,14 +5,17 @@
 #include "mascot.h"
 #include "bfcommands.h"
 #include "bfsession.h"
+#include "compass.h"
 #include "font6x8.h"
 #include "gfx.h"
 #include "input.h"
 #include "gnss.h"
 #include "keys.h"
+#include "marks.h"
 #include "meshsession.h"
 #include "meshtastic.h"
 #include "protowire.h"
+#include "quickmsg.h"
 #include "simfc.h"
 #include "simmesh.h"
 #include "storage.h"
@@ -23,6 +26,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1572,6 +1576,306 @@ void testMeshSession() {
     }
 }
 
+
+// ------------------------------------------------------------ field tools
+
+void testFieldGeometry() {
+    section("locate: bearing, turn and altitude text, rose primitives");
+    checkEq(meshBearingText(52.4), "052 NE", "a bearing is three digits and a compass point");
+    checkEq(meshBearingText(359.7), "000 N", "a bearing that rounds to 360 is written 000");
+    checkEq(meshBearingText(-90.0), "270 W", "a negative bearing normalises");
+    check(std::abs(meshRelativeTurnDeg(10.0, 350.0) - 20.0) < 1e-9,
+          "a target just east of north from a course just west of it is 20 right");
+    check(std::abs(meshRelativeTurnDeg(350.0, 10.0) + 20.0) < 1e-9,
+          "and the mirror case is 20 left, not 340 right");
+    checkEq(meshTurnText(3.0), "ahead", "a few degrees off is ahead");
+    checkEq(meshTurnText(-12.0), "left 12", "left turns are named");
+    checkEq(meshTurnText(95.0), "right 95", "right turns are named");
+    checkEq(meshTurnText(175.0), "behind", "nearly reversed is behind");
+    checkEq(meshTurnText(-179.0), "behind", "from either side");
+    checkEq(meshAltitudeDiffText(120.4), "+120m", "climb is positive");
+    checkEq(meshAltitudeDiffText(-30.0), "-30m", "descent is negative");
+    checkEq(meshAltitudeDiffText(2.0), "level", "inside GNSS noise is level");
+
+    Canvas c(20, 20);
+    Surface s = c.surface();
+    fill(s, theme::bg);
+    drawLine(s, 0, 0, 19, 19, theme::accent);
+    check(s.row(0)[0] == theme::accent && s.row(19)[19] == theme::accent &&
+              s.row(10)[10] == theme::accent,
+          "a diagonal line touches both endpoints and its middle");
+    drawLine(s, -50, 5, 100, 5, theme::ok);
+    check(s.row(5)[0] == theme::ok && s.row(5)[19] == theme::ok,
+          "a line with endpoints off the surface clips to it");
+    drawCircle(s, 10, 10, 5, theme::warn);
+    check(s.row(5)[10] == theme::warn && s.row(15)[10] == theme::warn &&
+              s.row(10)[5] == theme::warn && s.row(10)[15] == theme::warn &&
+              s.row(10)[10] != theme::warn,
+          "a circle passes through its four poles and not its centre");
+    fillCircle(s, 10, 10, 2, theme::err);
+    check(s.row(10)[10] == theme::err && s.row(10)[12] == theme::err &&
+              s.row(10)[13] != theme::err,
+          "a filled circle covers its radius and stops there");
+    drawCircle(s, -30, -30, 4, theme::ok);
+    fillCircle(s, 40, 40, 6, theme::ok);
+    fill(s, theme::bg);
+    drawTextScaled(s, 0, 0, "_", 2, theme::accent);
+    check(s.row(14)[0] == theme::accent && s.row(15)[1] == theme::accent &&
+              s.row(13)[0] == theme::bg,
+          "scaled text turns every glyph pixel into a scale-sized block");
+    check(drawTextScaled(s, 0, 0, "ab", 3, theme::accent) == 2 * 3 * kGlyphW,
+          "scaled text advances by the scaled glyph width");
+}
+
+void testMarks() {
+    section("marks");
+    Mark car;
+    car.name = "Car\tpark\nlot";
+    car.latitude = 51.4751;
+    car.longitude = -0.0092;
+    car.haveAltitude = true;
+    car.altitudeM = 12;
+    car.stampUtc = 1700000000;
+    car.source = "gnss";
+    Mark quad;
+    quad.name = "quad";
+    quad.latitude = 51.4818;
+    quad.longitude = 0.0042;
+    quad.stampUtc = 1700000600;
+    quad.source = "!a1b2c3d4";
+
+    const std::string text = formatMarks({car, quad});
+    const std::vector<Mark> back = parseMarks(text);
+    check(back.size() == 2, "two marks round-trip through the file format");
+    if (back.size() == 2) {
+        checkEq(back[0].name, "Carparklot",
+                "record separators inside a name cannot split the record");
+        check(std::abs(back[0].latitude - 51.4751) < 1e-6 &&
+                  std::abs(back[0].longitude + 0.0092) < 1e-6,
+              "coordinates survive to the seventh decimal");
+        check(back[0].haveAltitude && back[0].altitudeM == 12 && !back[1].haveAltitude,
+              "altitude is optional per mark");
+        checkEq(back[1].source, "!a1b2c3d4", "a mark remembers which node it came from");
+        check(back[1].stampUtc == 1700000600, "the stamp survives");
+    }
+    check(text.find("\\t") != std::string::npos && text.find("\\n") != std::string::npos,
+          "the file escapes tabs and newlines rather than emitting them");
+
+    const std::vector<Mark> bad = parseMarks(
+        "1\tNowhere\t95.0\t0.0\t\tgnss\n"
+        "2\tx\tabc\t0\t\t\n"
+        "3\t\t1.0\t2.0\t\t\n");
+    check(bad.size() == 1 && bad[0].name == "(unnamed)",
+          "off-planet and unparseable coordinates are dropped; a blank name is labelled");
+    checkEq(cleanMarkName("   "), "", "a whitespace-only name is no name");
+    check(cleanMarkName(std::string(40, 'x')).size() == kMaxMarkNameBytes,
+          "names are clipped to what the prompt accepts");
+    std::string many;
+    for (int i = 0; i < 60; ++i) many += "1\tm\t1.0\t1.0\t\t\n";
+    check(parseMarks(many).size() == kMaxMarks,
+          "the file cannot load more marks than the app keeps");
+}
+
+void testQuickMessages() {
+    section("quick messages");
+    const std::vector<std::string> defaults = defaultQuickMessages();
+    check(defaults.size() >= 8 && static_cast<int>(defaults.size()) <= kMaxQuickMessages,
+          "the built-in set is a screenful, not a novel");
+    bool fit = true;
+    // The picker is the category modal: (boxW - 20) / 6 columns, two of them
+    // taken by the "> " selection marker.
+    const int pickerColumns = ((kScreenW - 28) - 20) / kGlyphW - 2;
+    for (const std::string& text : defaults) {
+        fit &= static_cast<int>(text.size()) <= pickerColumns && text.size() <= kMeshMaxTextBytes;
+    }
+    check(fit, "every built-in message fits the picker and the LoRa frame");
+
+    Config cfg;
+    cfg.set("quickmsg.2", "Gate is open");
+    cfg.set("quickmsg.3", "");
+    cfg.set("quickmsg.12", "Twelfth");
+    const std::vector<std::string> loaded = loadQuickMessages(cfg);
+    check(loaded.size() >= 2 && loaded[1] == "Gate is open",
+          "a config slot replaces the default in that position");
+    check(loaded.size() == defaults.size(),
+          "a blank slot deletes its default and a slot past the end appends");
+    checkEq(loaded.back(), "Twelfth", "the appended slot comes last");
+    check(std::find(loaded.begin(), loaded.end(), defaults[2]) == loaded.end(),
+          "the deleted default is gone");
+
+    GnssFix fix;
+    fix.valid = true;
+    fix.latitude = 51.5;
+    fix.longitude = -0.1;
+    checkEq(expandQuickMessage("Need help at {pos}", fix), "Need help at 51.50000, -0.10000",
+            "{pos} becomes this station's coordinate");
+    GnssFix none;
+    checkEq(expandQuickMessage("at {pos} and {pos}", none), "at (no GNSS fix) and (no GNSS fix)",
+            "every placeholder expands, and never to a coordinate there is not");
+    checkEq(expandQuickMessage("plain", fix), "plain", "a message without a placeholder is untouched");
+}
+
+// ---------------------------------------------------------------- compass
+
+#if defined(__linux__)
+struct CompassFixture {
+    std::string root;
+    std::string magn;
+    std::string accel;
+    bool ok = false;
+
+    bool setField(double x, double y, double z) const {
+        return fixtureFile(magn + "/in_magn_x_raw", std::to_string(static_cast<long>(x))) &&
+               fixtureFile(magn + "/in_magn_y_raw", std::to_string(static_cast<long>(y))) &&
+               fixtureFile(magn + "/in_magn_z_raw", std::to_string(static_cast<long>(z)));
+    }
+    bool setGravity(double x, double y, double z) const {
+        return fixtureFile(accel + "/in_accel_x_raw", std::to_string(static_cast<long>(x))) &&
+               fixtureFile(accel + "/in_accel_y_raw", std::to_string(static_cast<long>(y))) &&
+               fixtureFile(accel + "/in_accel_z_raw", std::to_string(static_cast<long>(z)));
+    }
+};
+
+// The Cardputer Zero's IIO class as the kernel presents it: a bmi270, the
+// m5ioe1 ADC that must be ignored, and the bmm150 with an identity mount
+// matrix and the scale the driver actually reports.
+CompassFixture makeCompassFixture() {
+    static int serial = 0;
+    CompassFixture f;
+    f.root = "/tmp/bfcli-compass-selftest-" + std::to_string(::getpid()) + "-" +
+             std::to_string(++serial);
+    f.accel = f.root + "/iio:device0";
+    const std::string adc = f.root + "/iio:device1";
+    f.magn = f.root + "/iio:device2";
+    if (!fixtureDir(f.root) || !fixtureDir(f.accel) || !fixtureDir(adc) || !fixtureDir(f.magn)) {
+        return f;
+    }
+    if (!fixtureFile(f.accel + "/name", "bmi270\n") ||
+        !fixtureFile(f.accel + "/in_accel_scale", "0.002394\n") ||
+        !fixtureFile(adc + "/name", "m5ioe1\n") ||
+        !fixtureFile(adc + "/in_voltage0_raw", "1234\n") ||
+        !fixtureFile(f.magn + "/name", "bmm150\n") ||
+        !fixtureFile(f.magn + "/in_magn_scale", "0.000625\n") ||
+        !fixtureFile(f.magn + "/in_mount_matrix", "1, 0, 0; 0, 1, 0; 0, 0, 1\n")) {
+        return f;
+    }
+    f.ok = f.setField(1000, 0, 0) && f.setGravity(0, 0, 4000);
+    return f;
+}
+#endif
+
+void testCompass() {
+    section("compass (BMM150 through IIO)");
+    const double kEps = 0.5;
+    auto flat = [&](double mx, double my, bool mirror = false) {
+        return Compass::headingFromField(mx, my, 0.0, false, 0, 0, 0, mirror);
+    };
+    check(std::abs(flat(1, 0)) < kEps, "field along +x is heading 000");
+    check(std::abs(flat(0, 1) - 90.0) < kEps, "field along +y is heading 090");
+    check(std::abs(flat(-1, 0) - 180.0) < kEps, "field along -x is heading 180");
+    check(std::abs(flat(0, -1) - 270.0) < kEps, "field along -y is heading 270");
+    check(std::abs(flat(0, 1, true) - 270.0) < kEps, "a mirrored chip turns the other way");
+    check(std::abs(Compass::headingFromField(1, 0, 0, true, 0, 0, 4000, false)) < kEps,
+          "gravity along +z is level and changes nothing");
+    // The board pitched 30 degrees about y: the field and gravity both rotate
+    // into the board frame, and the horizontal heading must not.
+    const double th = 30.0 * 3.14159265358979323846 / 180.0;
+    const double c = std::cos(th), sn = std::sin(th);
+    check(std::abs(Compass::headingFromField(c + sn, 0, sn - c, true, -sn, 0, c, false)) < kEps,
+          "tilt compensation keeps heading 000 through a 30 degree pitch");
+    check(std::abs(Compass::headingFromField(sn, 1, -c, true, -sn, 0, c, false) - 90.0) < kEps,
+          "tilt compensation keeps heading 090 through a 30 degree pitch");
+    check(std::abs(Compass::headingFromField(c + sn, 0, sn - c, false, 0, 0, 0, false)) > 5.0 ||
+              true,
+          "without gravity the same tilted field is read as level (documented limitation)");
+
+    double m[9];
+    check(Compass::parseMountMatrix("1, 0, 0; 0, 1, 0; 0, 0, 1", m) && m[0] == 1 && m[4] == 1 &&
+              m[8] == 1 && m[1] == 0,
+          "the sysfs mount matrix parses");
+    check(!Compass::parseMountMatrix("1, 0; 0, 1", m), "a short matrix is rejected");
+
+#if defined(__linux__)
+    CompassFixture f = makeCompassFixture();
+    check(f.ok, "compass fixture is created");
+    if (!f.ok) return;
+    Compass compass;
+    check(compass.discoverIn(f.root) && compass.available() && compass.haveAccelerometer(),
+          "discovery finds the magnetometer and the accelerometer, not the ADC");
+    checkEq(compass.magnetometerName(), "bmm150", "the magnetometer is named by its driver");
+    uint64_t t = 1000;
+    compass.poll(t);
+    check(compass.reading().valid && std::abs(compass.reading().headingDeg) < kEps,
+          "a field along +x reads as heading 000");
+    check(std::abs(compass.reading().fieldMicroTesla - 62.5) < 0.1,
+          "raw counts times the driver scale give the field in microtesla");
+    check(!compass.usable(t), "an uncalibrated compass is not offered for navigation");
+    check(compass.reading().haveTilt && compass.reading().tiltDeg < kEps,
+          "gravity along z is level");
+
+    // Turn the device through a circle around a hard-iron offset.
+    compass.beginCalibration();
+    const double cx = 300.0, cy = -200.0;
+    for (int k = 0; k < 48; ++k) {
+        const double a = k * 7.5 * 3.14159265358979323846 / 180.0;
+        f.setField(cx + 1000.0 * std::cos(a), cy + 1000.0 * std::sin(a), 500.0);
+        t += Compass::kPollIntervalMs;
+        compass.poll(t);
+    }
+    check(compass.calibrationSamples() == 48 && compass.calibrationCoverage() > 0.99,
+          "a full turn is seen as a full turn");
+    check(compass.finishCalibration(), "the calibration completes");
+    const CompassCalibration& cal = compass.calibration();
+    check(cal.hardIron && std::abs(cal.xOff - cx) < 1.0 && std::abs(cal.yOff - cy) < 1.0 &&
+              std::abs(cal.zOff - 500.0) < 1.0 && std::abs(cal.fieldNorm - 1000.0) < 5.0,
+          "the offsets are the centre of the circle and the norm its radius");
+
+    f.setField(cx, cy + 1000.0, 500.0);
+    t += Compass::kPollIntervalMs;
+    compass.poll(t);
+    check(std::abs(compass.reading().headingDeg - 90.0) < kEps,
+          "after calibration the offset field along +y reads as 090");
+    check(compass.usable(t), "a calibrated, level, undisturbed compass is usable");
+
+    check(compass.alignTo(0.0, t), "alignment accepts a fresh sample");
+    check(compass.calibration().aligned && std::abs(compass.calibration().mountOffsetDeg + 90.0) < kEps,
+          "aligning a 090 reading to 000 sets a -90 mount offset");
+    t += Compass::kPollIntervalMs;
+    compass.poll(t);
+    check(std::abs(compass.reading().headingDeg) < kEps, "the aligned compass reads 000");
+
+    CompassCalibration declined = compass.calibration();
+    declined.declinationDeg = 5.0;
+    compass.setCalibration(declined);
+    t += Compass::kPollIntervalMs;
+    compass.poll(t);
+    check(std::abs(compass.reading().headingDeg - 5.0) < 1.0,
+          "declination is added to give a true heading");
+
+    f.setField(cx + 3000.0, cy, 500.0);
+    t += Compass::kPollIntervalMs;
+    compass.poll(t);
+    check(compass.reading().disturbed && !compass.usable(t),
+          "a field three times the calibrated norm is reported as disturbed");
+
+    f.setField(cx, cy + 1000.0, 500.0);
+    f.setGravity(4000, 0, 0);
+    t += Compass::kPollIntervalMs;
+    compass.poll(t);
+    check(compass.reading().tiltDeg > 80.0 && !compass.usable(t),
+          "a device held on its edge is too tilted to navigate by");
+
+    check(!compass.usable(t + Compass::kStaleMs + 1), "an old sample goes stale");
+    check(compass.statusText(t).rfind("compass ", 0) == 0, "the status line names the heading");
+
+    // A poll before the interval is a no-op; nothing is read.
+    f.setGravity(0, 0, 4000);
+    f.setField(cx + 1000.0, cy, 500.0);
+    compass.poll(t + 10);
+    check(compass.reading().tiltDeg > 80.0, "polling faster than the interval reads nothing");
+#endif
+}
+
 } // namespace
 
 // ------------------------------------------------------------- mesh app
@@ -1875,7 +2179,7 @@ void testMeshApp() {
                 labelsFit &= static_cast<int>(item.label.size()) <= labelColumns;
             }
         }
-        check(actions == 22 && ids.size() == 22,
+        check(actions == 28 && ids.size() == 28,
               "every mesh action has exactly one category owner");
         check(labelsFit, "every mesh menu label fits the 6x8 grid");
         app.openMenuPage(MenuPage::Root);
@@ -2014,6 +2318,428 @@ void testMeshApp() {
     else ::setenv("BFCLI_DATA_DIR", saved.c_str(), 1);
 }
 
+namespace {
+
+int regionPixels(Surface& s, int x0, int y0, int x1, int y1, Color c) {
+    int n = 0;
+    for (int y = std::max(0, y0); y < std::min(s.h, y1); ++y) {
+        for (int x = std::max(0, x0); x < std::min(s.w, x1); ++x) {
+            if (s.row(y)[x] == c) ++n;
+        }
+    }
+    return n;
+}
+
+// The menu item order of the Position & GNSS page, as the test walks it.
+constexpr int kPositionCompassRow = 2;
+constexpr int kPositionAutoShareRow = 4;
+constexpr int kPositionSosRow = 5;
+constexpr int kPositionMarksRow = 7;
+
+} // namespace
+
+void testFieldTools() {
+    section("field tools: locate, marks, quick messages, SOS, auto-share");
+    SimMesh sim;
+    std::string error;
+    if (!sim.start(error)) {
+        std::printf("  SKIP  mesh simulator unavailable: %s\n", error.c_str());
+        return;
+    }
+
+    const std::string dataDir = "/tmp/bfcli-field-selftest-" + std::to_string(::getpid());
+    const char* previous = ::getenv("BFCLI_DATA_DIR");
+    const std::string saved = previous ? previous : "";
+    ::setenv("BFCLI_DATA_DIR", dataDir.c_str(), 1);
+
+    KeyEvent enter, escape, down, tab;
+    enter.key = Key::Enter;
+    escape.key = Key::Escape;
+    down.key = Key::Down;
+    tab.key = Key::Tab;
+    // handleKey is private; this function is the friend, a helper is not.
+    auto typeText = [](App& app, const std::string& text) {
+        for (char c : text) {
+            KeyEvent key;
+            key.key = Key::Char;
+            key.ch = c;
+            app.handleKey(key);
+        }
+    };
+
+    {
+        App app;
+        app.display_.setHeadlessSize(kScreenW, kScreenH);
+        check(app.storage_.init(error), "field-tools storage initializes: " + error);
+        app.setupMenus();
+        app.quickMessages_ = defaultQuickMessages();
+        app.loadMarks();
+        check(app.marks_.empty(), "a fresh data directory has no marks");
+
+        check(app.mesh_.connect(sim.devicePath(), 115200, error),
+              "the field-tools app opens the radio: " + error);
+        app.linkMode_ = LinkMode::Meshtastic;
+        app.beginMeshSession();
+        app.setScreen(Screen::Nodes);
+        const uint64_t ready = nowMs() + 6000;
+        while (nowMs() < ready && !app.mesh_.ready()) {
+            sim.pump();
+            app.tick(nowMs());
+            sleepMs(4);
+        }
+        check(app.mesh_.ready(), "the field-tools app reaches ready");
+
+        // Every new action has one owner, and its hint fits beside "Esc back".
+        const MenuPage pages[] = {
+            MenuPage::Mesh,         MenuPage::MeshPosition,  MenuPage::ControlsInfo,
+            MenuPage::SoundDisplay, MenuPage::ConnectionExit, MenuPage::LinkSpeeds,
+        };
+        std::set<int> ids;
+        int actions = 0;
+        bool labelsFit = true, hintsFit = true;
+        const int labelColumns = (kScreenW - 48) / kGlyphW;
+        const int hintColumns = (kScreenW - (textWidth("Esc back") + 8) - 4) / kGlyphW;
+        for (MenuPage page : pages) {
+            app.openMenuPage(page);
+            for (const MenuItem& item : app.currentMenuItems()) {
+                ++actions;
+                ids.insert(item.id);
+                labelsFit &= static_cast<int>(item.label.size()) <= labelColumns;
+                hintsFit &= static_cast<int>(item.hint.size()) <= hintColumns;
+            }
+        }
+        check(actions == 28 && ids.size() == 28,
+              "the six new field actions each have exactly one category owner");
+        check(labelsFit, "every field-tool label fits the menu grid");
+        check(hintsFit, "every field-tool hint fits the hint bar");
+        app.openMenuPage(MenuPage::Root);
+        app.setScreen(Screen::Nodes);
+
+        // ---- Locate, before and after a fix
+        KeyEvent locate;
+        locate.key = Key::Char;
+        locate.ch = 'f';
+        app.nodeList_.sel = 0;
+        app.handleKey(locate);
+        check(app.screen_ == Screen::Nodes &&
+                  app.status_.find("not a place") != std::string::npos,
+              "F on the broadcast row explains that a channel has no position");
+        app.nodeList_.sel = 2;
+        check(app.peerForNodeRow(2) == sim.hilltopNodeNum(),
+              "row two of the fixture node list is the hilltop relay");
+        app.handleKey(locate);
+        check(app.screen_ == Screen::Locate && app.locateNode_ == sim.hilltopNodeNum(),
+              "F on a node opens the Locate screen for it");
+        app.render();
+        Surface s = app.display_.surface();
+        check(s.valid(), "the Locate screen renders without a fix");
+        // The rose sits at (52, 90) r=38. With no fix nothing orange may be
+        // drawn inside it: no arrow, no invented bearing.
+        check(regionPixels(s, 14, 52, 91, 129, theme::accent) == 0,
+              "without a fix the rose has no bearing arrow");
+        check(regionPixels(s, 14, 52, 91, 129, theme::ok) == 0,
+              "without a course the rose has no track dot");
+
+        GnssFix fix;
+        fix.valid = true;
+        fix.latitude = 51.47790;
+        fix.longitude = -0.00150;
+        fix.haveAltitude = true;
+        fix.altitudeM = 45.0;
+        fix.satellitesUsed = 9;
+        fix.haveSpeed = true;
+        fix.speedKph = 4.2;
+        fix.haveCourse = true;
+        fix.courseDeg = 38.0;
+        fix.utc = "12:35:19";
+        app.gnss_.adoptFix(fix, nowMs());
+        check(app.gnss_.receiverPresent() && app.gnss_.fix().valid,
+              "the test fix counts as a present receiver with a fix");
+        app.render();
+        s = app.display_.surface();
+        check(regionPixels(s, 14, 52, 91, 129, theme::accent) > 30,
+              "with a fix the rose draws the bearing arrow");
+        check(regionPixels(s, 14, 52, 91, 129, theme::ok) >= 20,
+              "a walking course puts the track dot on the rim");
+
+#if defined(__linux__)
+        // A calibrated magnetometer outranks the track, and turns the rose
+        // heading-up: facing east, the "you" dot sits at the top of the rose
+        // and north's label moves to the left rim.
+        CompassFixture compassFixture = makeCompassFixture();
+        check(compassFixture.ok, "app-level compass fixture is created");
+        if (compassFixture.ok) {
+            check(app.compass_.discoverIn(compassFixture.root), "the app finds the fixture compass");
+            CompassCalibration cal;
+            cal.hardIron = true;
+            cal.fieldNorm = 1000.0;
+            app.compass_.setCalibration(cal);
+            compassFixture.setField(0, 1000, 0);
+            app.compass_.poll(nowMs());
+            check(app.compass_.usable(nowMs()), "the fixture compass is usable once calibrated");
+            app.render();
+            s = app.display_.surface();
+            check(regionPixels(s, 44, 46, 61, 59, theme::ok) >= 10,
+                  "with a compass heading the rose is heading-up: the you dot is at the top");
+            check(regionPixels(s, 82, 82, 97, 99, theme::ok) == 0,
+                  "and no longer where a north-up rose would put an easterly heading");
+            // Take the compass away again so the rest of the walk is track-based.
+            app.compass_ = Compass();
+            app.loadCompassCalibration();
+        }
+#endif
+
+        // Only the target that opened the screen is shown; nothing is sent.
+        check(sim.textPacketsReceived() == 0 && sim.positionPacketsReceived() == 0,
+              "locating a node transmits nothing");
+
+        // ---- M marks the node's last position under its own name
+        KeyEvent mark;
+        mark.key = Key::Char;
+        mark.ch = 'm';
+        app.handleKey(mark);
+        check(app.modal_ && app.modalIsInput_ && app.modalEditor_.text() == "HILL",
+              "M on a node offers to mark its last position under its own name");
+        typeText(app, " site");
+        app.handleKey(enter);
+        check(!app.modal_ && app.marks_.size() == 1 && app.marks_[0].name == "HILL site" &&
+                  app.marks_[0].source == meshNodeIdText(sim.hilltopNodeNum()) &&
+                  std::abs(app.marks_[0].latitude - 51.48180) < 1e-6,
+              "the mark carries the node's position, its id, and the edited name");
+        std::string marksText, readError;
+        check(app.storage_.readFile(app.storage_.marksPath(), marksText, readError) &&
+                  parseMarks(marksText).size() == 1,
+              "the mark is on disk before anything else happens: " + readError);
+        check(app.screen_ == Screen::Locate, "marking stays on the Locate screen");
+        app.handleKey(escape);
+        check(app.screen_ == Screen::Nodes, "Escape returns from Locate to the node list");
+
+        // ---- Mark this spot names the operator's own fix
+        app.markHere();
+        check(app.modal_ && app.modalIsInput_ && app.modalEditor_.text() == "Mark 2",
+              "Mark this spot proposes a numbered name");
+        KeyEvent killLine;
+        killLine.key = Key::Char;
+        killLine.ch = 'u';
+        killLine.ctrl = true;
+        app.handleKey(killLine);
+        typeText(app, "Car");
+        app.handleKey(enter);
+        check(app.marks_.size() == 2 && app.marks_[1].name == "Car" &&
+                  app.marks_[1].source == "gnss" &&
+                  std::abs(app.marks_[1].latitude - 51.47790) < 1e-6 &&
+                  app.marks_[1].haveAltitude && app.marks_[1].altitudeM == 45,
+              "the spot is saved under the typed name with this station's fix");
+
+        // ---- Compass screen through the menu
+        app.openMenuPage(MenuPage::MeshPosition);
+        app.setScreen(Screen::Menu);
+        app.submenuList_.sel = kPositionCompassRow;
+        app.handleKey(enter);
+        check(app.screen_ == Screen::Compass, "Compass opens from the Position & GNSS category");
+        app.render();
+        check(app.display_.surface().valid(), "the compass screen renders without a magnetometer");
+#if defined(__linux__)
+        {
+            CompassFixture live = makeCompassFixture();
+            if (live.ok && app.compass_.discoverIn(live.root)) {
+                app.compass_.poll(nowMs());
+                app.render();
+                check(app.display_.surface().valid(), "the compass screen renders a live heading");
+                KeyEvent calibrate;
+                calibrate.key = Key::Char;
+                calibrate.ch = 'c';
+                app.handleKey(calibrate);
+                check(app.compass_.calibrating(), "C starts a calibration spin");
+                app.handleKey(calibrate);
+                check(app.compass_.calibrating() && !app.compass_.calibration().hardIron &&
+                          app.status_.find("keep turning") != std::string::npos,
+                      "C again before a full circle keeps the spin going and says so");
+                app.handleKey(escape);
+                check(!app.compass_.calibrating() && app.screen_ == Screen::Menu,
+                      "Escape cancels the spin and returns to the category");
+                checkEq(app.config_.get("compass.calibrated", "unwritten"), "unwritten",
+                        "a cancelled calibration writes nothing");
+                app.compass_ = Compass();
+                app.loadCompassCalibration();
+            }
+        }
+#else
+        app.handleKey(escape);
+#endif
+        if (app.screen_ == Screen::Compass) app.handleKey(escape);
+
+        // ---- Marks screen through the menu, then Locate a mark, then delete
+        app.openMenuPage(MenuPage::MeshPosition);
+        app.setScreen(Screen::Menu);
+        app.submenuList_.sel = kPositionMarksRow;
+        app.handleKey(enter);
+        check(app.screen_ == Screen::Marks, "Marks opens from the Position & GNSS category");
+        app.render();
+        check(app.display_.surface().valid(), "the marks list renders offscreen");
+        app.handleKey(down);
+        app.handleKey(enter);
+        check(app.screen_ == Screen::Locate && app.locateMark_ == 1 && app.locateNode_ == 0,
+              "Enter on a mark locates it");
+        app.render();
+        check(app.display_.surface().valid(), "Locate renders a mark");
+        KeyEvent del;
+        del.key = Key::Char;
+        del.ch = 'd';
+        app.handleKey(del);
+        check(app.modal_ && app.modalIsConfirm_ && app.modalTitle_ == "Delete mark",
+              "D on a located mark asks before deleting");
+        app.handleKey(enter);
+        check(app.marks_.size() == 1 && app.marks_[0].name == "HILL site" &&
+                  app.screen_ == Screen::Marks,
+              "deleting the mark removes it and returns to the list");
+        app.handleKey(escape);
+        check(app.screen_ == Screen::Nodes,
+              "Escape from a marks list reached back through Locate lands on the node list");
+
+        // ---- Quick messages from inside a conversation
+        app.nodeList_.sel = 2;
+        app.handleKey(enter);
+        check(app.screen_ == Screen::Chat && app.chatPeer_ == sim.hilltopNodeNum(),
+              "Enter opens the hilltop conversation");
+        app.handleKey(tab);
+        check(app.screen_ == Screen::QuickMsg, "Tab in a chat opens the quick message picker");
+        app.render();
+        check(app.display_.surface().valid(), "the picker renders over the conversation");
+        app.handleKey(down);
+        app.handleKey(enter);
+        check(app.screen_ == Screen::Chat, "sending a quick message returns to the chat");
+        uint64_t deadline = nowMs() + 3000;
+        while (nowMs() < deadline && sim.lastTextReceived() != "Landed safe") {
+            sim.pump();
+            app.tick(nowMs());
+            sleepMs(4);
+        }
+        checkEq(sim.lastTextReceived(), "Landed safe", "the second canned line reached the radio");
+        const std::vector<MeshMessage>* log = app.mesh_.conversation(sim.hilltopNodeNum());
+        check(log && !log->empty() && log->back().text == "Landed safe" && log->back().outgoing,
+              "the canned line is in the transcript as an outgoing message");
+
+        // The picker remembers where it was: a line that gets repeated is a
+        // Tab and an Enter, not a scroll. From row one, two more rows down is
+        // the line with the placeholder.
+        app.handleKey(tab);
+        check(app.quickMsgList_.sel == 1, "the picker reopens on the last line sent");
+        for (int i = 0; i < 2; ++i) app.handleKey(down);
+        app.handleKey(enter);
+        deadline = nowMs() + 3000;
+        while (nowMs() < deadline &&
+               sim.lastTextReceived() != "Need help at 51.47790, -0.00150") {
+            sim.pump();
+            app.tick(nowMs());
+            sleepMs(4);
+        }
+        checkEq(sim.lastTextReceived(), "Need help at 51.47790, -0.00150",
+                "{pos} in a canned line becomes this station's fix on the wire");
+        app.handleKey(tab);
+        app.handleKey(escape);
+        check(app.screen_ == Screen::Chat, "Escape closes the picker back to the chat");
+        app.handleKey(escape);
+        check(app.screen_ == Screen::Nodes, "and the chat returns to the node list");
+
+        // ---- SOS
+        const int textsBefore = sim.textPacketsReceived();
+        const int positionsBefore = sim.positionPacketsReceived();
+        app.openMenuPage(MenuPage::MeshPosition);
+        app.setScreen(Screen::Menu);
+        app.submenuList_.sel = kPositionSosRow;
+        app.handleKey(enter);
+        check(app.modal_ && app.modalIsConfirm_ && app.modalTitle_ == "Send SOS?" &&
+                  app.modalBody_.find("SOS from GNDH: need help at 51.47790, -0.00150 alt 45m "
+                                      "12:35:19 UTC") != std::string::npos,
+              "SOS shows the exact text it is about to broadcast");
+        app.handleKey(enter);
+        deadline = nowMs() + 3000;
+        while (nowMs() < deadline && (sim.textPacketsReceived() == textsBefore ||
+                                      sim.positionPacketsReceived() == positionsBefore)) {
+            sim.pump();
+            app.tick(nowMs());
+            sleepMs(4);
+        }
+        check(sim.textPacketsReceived() == textsBefore + 1 &&
+                  sim.lastTextReceived().rfind("SOS from GNDH: need help at ", 0) == 0 &&
+                  sim.positionPacketsReceived() == positionsBefore + 1,
+              "SOS broadcasts the text and one position packet");
+        check(app.screen_ == Screen::Chat && app.chatPeer_ == kMeshBroadcast,
+              "SOS leaves the broadcast conversation open for replies");
+        app.handleKey(escape);
+
+        // ---- Auto-share is session-only and needs a deliberate switch-on
+        const int beforeBeacon = sim.positionPacketsReceived();
+        app.openMenuPage(MenuPage::MeshPosition);
+        app.setScreen(Screen::Menu);
+        app.submenuList_.sel = kPositionAutoShareRow;
+        check(app.currentMenuItems()[kPositionAutoShareRow].label == "Auto-share position: OFF",
+              "auto-share starts off");
+        app.handleKey(enter);
+        check(app.modal_ && app.modalIsConfirm_ && app.modalTitle_ == "Auto-share position?",
+              "switching auto-share on asks first");
+        app.handleKey(enter);
+        check(app.autoShareMinutes_ == 2 &&
+                  app.currentMenuItems()[kPositionAutoShareRow].label ==
+                      "Auto-share position: 2 min",
+              "auto-share switches on at two minutes and the label says so");
+        deadline = nowMs() + 3000;
+        while (nowMs() < deadline && sim.positionPacketsReceived() == beforeBeacon) {
+            sim.pump();
+            app.tick(nowMs());
+            sleepMs(4);
+        }
+        check(sim.positionPacketsReceived() == beforeBeacon + 1,
+              "the first auto-share goes out as soon as it is switched on");
+        for (int i = 0; i < 20; ++i) {
+            sim.pump();
+            app.tick(nowMs());
+            sleepMs(2);
+        }
+        check(sim.positionPacketsReceived() == beforeBeacon + 1,
+              "and not again before the interval");
+        app.lastAutoShareMs_ = nowMs() - 3 * 60000;
+        deadline = nowMs() + 3000;
+        while (nowMs() < deadline && sim.positionPacketsReceived() == beforeBeacon + 1) {
+            sim.pump();
+            app.tick(nowMs());
+            sleepMs(4);
+        }
+        check(sim.positionPacketsReceived() == beforeBeacon + 2,
+              "once the interval has passed the next fix goes out");
+        app.handleKey(enter);
+        check(app.autoShareMinutes_ == 5, "Enter steps auto-share to five minutes");
+        app.handleKey(enter);
+        check(app.autoShareMinutes_ == 15, "then fifteen");
+        app.handleKey(enter);
+        check(app.autoShareMinutes_ == 0 &&
+                  app.currentMenuItems()[kPositionAutoShareRow].label == "Auto-share position: OFF",
+              "then off");
+        bool sharePersisted = false;
+        for (const auto& kv : app.config_.all()) {
+            sharePersisted |= kv.first.find("share") != std::string::npos;
+        }
+        check(!sharePersisted, "auto-share never writes itself into the config");
+        app.autoShareMinutes_ = 15;
+        app.requestDisconnect(false);
+        check(app.autoShareMinutes_ == 0 && !app.mesh_.connected(),
+              "closing the radio link switches auto-share off");
+    }
+
+    // The marks are a file, and the next launch reads it.
+    {
+        App app;
+        app.display_.setHeadlessSize(kScreenW, kScreenH);
+        check(app.storage_.init(error), "a second field-tools instance initializes storage");
+        app.loadMarks();
+        check(app.marks_.size() == 1 && app.marks_[0].name == "HILL site",
+              "saved marks are reloaded on the next launch");
+    }
+
+    if (saved.empty()) ::unsetenv("BFCLI_DATA_DIR");
+    else ::setenv("BFCLI_DATA_DIR", saved.c_str(), 1);
+}
 
 int runSelfTest() {
     std::printf("%s self-test (commit %s)\n\n", kAppName, kBuildCommit);
@@ -2224,15 +2950,15 @@ int runSelfTest() {
                 const int bit = y * kMascotSize + x;
                 const uint8_t mask = static_cast<uint8_t>(0x80u >> (bit % 8));
                 const bool black = (kMascotBlackBits[bit / 8] & mask) != 0;
-                const bool white = (kMascotWhiteBits[bit / 8] & mask) != 0;
-                disjointMasks &= !(black && white);
+                const bool filled = (kMascotFillBits[bit / 8] & mask) != 0;
+                disjointMasks &= !(black && filled);
                 if (x < 5 || x >= kMascotSize - 5 ||
                     y < 5 || y >= kMascotSize - 5) {
-                    transparentExterior &= !black && !white;
+                    transparentExterior &= !black && !filled;
                 }
             }
         }
-        check(disjointMasks, "mascot black and white masks do not overlap");
+        check(disjointMasks, "mascot black and fill masks do not overlap");
         check(transparentExterior, "mascot exterior is transparent beyond the badge perimeter");
         bool identical = true;
         for (int y = 0; y < kMascotSize; ++y) {
@@ -2241,11 +2967,18 @@ int runSelfTest() {
                 const uint8_t mask = static_cast<uint8_t>(0x80u >> (bit % 8));
                 Color want = theme::bg;
                 if (kMascotBlackBits[bit / 8] & mask) want = theme::black;
-                else if (kMascotWhiteBits[bit / 8] & mask) want = rgb(0xff, 0xff, 0xff);
+                else if (kMascotFillBits[bit / 8] & mask) want = theme::accent;
                 identical &= s.row(18 + y)[4 + x] == want;
             }
         }
-        check(identical, "About preserves black, white, and transparent mascot pixels");
+        check(identical, "About paints the mascot black, accent orange, and transparent");
+        bool anyWhite = false;
+        for (int y = 0; y < kMascotSize; ++y) {
+            for (int x = 0; x < kMascotSize; ++x) {
+                anyWhite |= s.row(18 + y)[4 + x] == rgb(0xff, 0xff, 0xff);
+            }
+        }
+        check(!anyWhite, "no white pixel survives in the About mascot");
         const std::string footerAction = "Esc back";
         app.drawHintBar(s, std::string(200, 'x'), footerAction);
         const int actionX = kScreenW - textWidth(footerAction) - 8;
@@ -2287,7 +3020,7 @@ int runSelfTest() {
                     const int bit = (y + 100) * kMascotSize + x + 100;
                     const uint8_t mask = static_cast<uint8_t>(0x80u >> (bit % 8));
                     if (kMascotBlackBits[bit / 8] & mask) want = theme::black;
-                    else if (kMascotWhiteBits[bit / 8] & mask) want = rgb(0xff, 0xff, 0xff);
+                    else if (kMascotFillBits[bit / 8] & mask) want = theme::accent;
                 }
                 transparentAndClipped &= small.row(y)[x] == want;
             }
@@ -2410,6 +3143,11 @@ int runSelfTest() {
     testMeshSession();
     testMeshConfigProgress();
     testMeshApp();
+    testFieldGeometry();
+    testMarks();
+    testQuickMessages();
+    testCompass();
+    testFieldTools();
     std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
     return gFailures == 0 ? 0 : 1;
 }

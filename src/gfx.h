@@ -66,6 +66,12 @@ void dimSurface(Surface& s, Color toward);
 void hLine(Surface& s, int x, int y, int w, Color c);
 void vLine(Surface& s, int x, int y, int h, Color c);
 void rect(Surface& s, int x, int y, int w, int h, Color c);
+// Arbitrary-angle line and circles, for the compass rose on the Locate
+// screen. Every pixel is clipped individually, so an endpoint off the surface
+// costs nothing but the pixels that were never going to be visible.
+void drawLine(Surface& s, int x0, int y0, int x1, int y1, Color c);
+void drawCircle(Surface& s, int cx, int cy, int r, Color c);
+void fillCircle(Surface& s, int cx, int cy, int r, Color c);
 
 // Text. All coordinates are the glyph cell's top-left corner.
 void drawChar(Surface& s, int x, int y, char c, Color fg);
@@ -75,6 +81,10 @@ int  drawText(Surface& s, int x, int y, const std::string& t, Color fg, Color bg
 // Clipped to `maxChars`, appending an ellipsis when it had to cut.
 int  drawTextClipped(Surface& s, int x, int y, const std::string& t, int maxChars, Color fg);
 int  textWidth(const std::string& t);
+// The same 6x8 glyphs at an integer multiple, for the one or two numbers an
+// operator has to read at arm's length in sunlight. Returns the x after the
+// last glyph, as drawText does.
+int  drawTextScaled(Surface& s, int x, int y, const std::string& t, int scale, Color fg);
 
 // Small chrome helpers shared by the screens.
 void drawScrollbar(Surface& s, int x, int y, int h, int first, int visible, int total);

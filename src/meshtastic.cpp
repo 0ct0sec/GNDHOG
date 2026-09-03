@@ -106,39 +106,6 @@ constexpr double kEarthRadiusM = 6371000.0;
 double toRadians(double degrees) { return degrees * kPi / 180.0; }
 double toDegrees(double radians) { return radians * 180.0 / kPi; }
 
-std::string escapeField(const std::string& in) {
-    std::string out;
-    out.reserve(in.size());
-    for (char c : in) {
-        switch (c) {
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default: out.push_back(c); break;
-        }
-    }
-    return out;
-}
-
-std::string unescapeField(const std::string& in) {
-    std::string out;
-    out.reserve(in.size());
-    for (size_t i = 0; i < in.size(); ++i) {
-        if (in[i] != '\\' || i + 1 >= in.size()) {
-            out.push_back(in[i]);
-            continue;
-        }
-        switch (in[++i]) {
-        case 'n': out.push_back('\n'); break;
-        case 'r': out.push_back('\r'); break;
-        case 't': out.push_back('\t'); break;
-        case '\\': out.push_back('\\'); break;
-        default: out.push_back(in[i]); break;
-        }
-    }
-    return out;
-}
 
 const char* stateText(MeshMessageState state) {
     switch (state) {
@@ -743,6 +710,71 @@ std::string meshRangeText(double metres) {
     return buf;
 }
 
+std::string meshBearingText(double bearingDeg) {
+    if (!(bearingDeg >= 0.0) && !(bearingDeg <= 0.0)) return "---";   // NaN
+    double normalised = std::fmod(bearingDeg, 360.0);
+    if (normalised < 0.0) normalised += 360.0;
+    int whole = static_cast<int>(normalised + 0.5);
+    if (whole >= 360) whole = 0;
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%03d %s", whole, meshCompassPoint(normalised));
+    return buf;
+}
+
+double meshRelativeTurnDeg(double bearingDeg, double courseDeg) {
+    double turn = std::fmod(bearingDeg - courseDeg, 360.0);
+    if (turn > 180.0) turn -= 360.0;
+    if (turn <= -180.0) turn += 360.0;
+    return turn;
+}
+
+std::string meshTurnText(double relativeDeg) {
+    const int whole = static_cast<int>(std::fabs(relativeDeg) + 0.5);
+    if (whole <= 5) return "ahead";
+    if (whole >= 170) return "behind";
+    return std::string(relativeDeg < 0.0 ? "left " : "right ") + std::to_string(whole);
+}
+
+std::string meshAltitudeDiffText(double metres) {
+    const int whole = static_cast<int>(std::fabs(metres) + 0.5);
+    if (whole < 5) return "level";
+    return std::string(metres < 0.0 ? "-" : "+") + std::to_string(whole) + "m";
+}
+
+std::string meshEscapeField(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in) {
+        switch (c) {
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out.push_back(c); break;
+        }
+    }
+    return out;
+}
+
+std::string meshUnescapeField(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] != '\\' || i + 1 >= in.size()) {
+            out.push_back(in[i]);
+            continue;
+        }
+        switch (in[++i]) {
+        case 'n': out.push_back('\n'); break;
+        case 'r': out.push_back('\r'); break;
+        case 't': out.push_back('\t'); break;
+        case '\\': out.push_back('\\'); break;
+        default: out.push_back(in[i]); break;
+        }
+    }
+    return out;
+}
+
 // -------------------------------------------------------- chat persistence
 
 std::string formatMeshChat(const std::vector<MeshMessage>& messages) {
@@ -755,9 +787,9 @@ std::string formatMeshChat(const std::vector<MeshMessage>& messages) {
                       static_cast<long long>(m.stampUtc), m.outgoing ? "out" : "in",
                       m.from, m.to, m.id, m.channel, stateText(m.state));
         out += head;
-        out += escapeField(m.text);
+        out += meshEscapeField(m.text);
         out.push_back('\t');
-        out += escapeField(m.note);
+        out += meshEscapeField(m.note);
         out.push_back('\n');
     }
     return out;
@@ -794,8 +826,8 @@ std::vector<MeshMessage> parseMeshChat(const std::string& text) {
         m.id = parseHex32(fields[4]);
         m.channel = static_cast<uint32_t>(std::strtoul(fields[5].c_str(), nullptr, 10));
         m.state = stateFromText(fields[6]);
-        m.text = unescapeField(fields[7]);
-        if (fields.size() > 8) m.note = unescapeField(fields[8]);
+        m.text = meshUnescapeField(fields[7]);
+        if (fields.size() > 8) m.note = meshUnescapeField(fields[8]);
         // A message that was still waiting for an ack when the app closed did
         // not become delivered by being written to disk.
         if (m.outgoing && m.state == MeshMessageState::Queued) {

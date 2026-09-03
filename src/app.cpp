@@ -4,7 +4,9 @@
 #include "simmesh.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <sstream>
@@ -42,6 +44,12 @@ enum MenuId {
     MenuFcBaud,
     MenuMeshBaud,
     MenuGnssBaud,
+    MenuMeshQuickMsg,
+    MenuMeshSos,
+    MenuMarkHere,
+    MenuMarks,
+    MenuAutoShare,
+    MenuCompass,
     MenuOpenFlightController = 100,
     MenuOpenBackupRestore,
     MenuOpenMesh,
@@ -125,6 +133,7 @@ void App::setupMenus() {
     meshMenu_ = {
         {"Node list", "radios this device has heard", MenuMeshNodes, true},
         {"Broadcast channel", "message everyone on the channel", MenuMeshBroadcast, true},
+        {"Quick messages", "canned lines for the open conversation", MenuMeshQuickMsg, true},
         {"Radio info", "firmware, region, preset, channel", MenuMeshRadioInfo, true},
         {"Export conversation", "write the open chat to a text file", MenuMeshExport, true},
         {"Clear conversation", "delete the open chat history", MenuMeshClear, true},
@@ -132,7 +141,13 @@ void App::setupMenus() {
     meshPositionMenu_ = {
         {"LoRa Cap GNSS", "AT6668 NMEA receiver on the cap", MenuGnssToggle, true},
         {"GNSS status", "fix, satellites, and coordinates", MenuGnssStatus, true},
+        {"Compass", "BMM150 heading, calibration, alignment", MenuCompass, true},
         {"Share my position", "transmits this station's own fix", MenuMeshShare, true},
+        {"Auto-share position: OFF", "session only; off again at the next launch",
+         MenuAutoShare, true},
+        {"SOS broadcast", "help request with your fix, to everyone", MenuMeshSos, true},
+        {"Mark this spot", "save your fix as a place to walk back to", MenuMarkHere, true},
+        {"Marks", "saved places: locate or delete", MenuMarks, true},
     };
     controlsMenu_ = {
         {"Keymap & key test", "find a symbol key", MenuKeymap, true},
@@ -179,7 +194,7 @@ void App::refreshMeshMenus() {
     if (meshMode()) {
         menu_ = {
             {"Mesh network", "nodes, messages, and radio identity", MenuOpenMesh, true},
-            {"Position & GNSS", "LoRa Cap satellite fix and sharing", MenuOpenMeshPosition, true},
+            {"Position & GNSS", "fix, sharing, marks, and SOS", MenuOpenMeshPosition, true},
             {"Controls & info", "keymap, help, and build identity", MenuOpenControlsInfo, true},
             {"Sound & display", "HUD audio, volume, and brightness", MenuOpenSoundDisplay, true},
             {"Connection & exit", "close the radio link or return to launcher",
@@ -198,20 +213,54 @@ void App::refreshMeshMenus() {
     }
 
     for (MenuItem& item : meshPositionMenu_) {
-        if (item.id != MenuGnssToggle) continue;
-        item.label = opt_.gnssEnabled
-                         ? std::string("LoRa Cap GNSS: ") + (gnssWanted_ ? "ON" : "OFF")
-                         : std::string("LoRa Cap GNSS: OFF (--no-gnss)");
-        if (!opt_.gnssEnabled) item.hint = "session override; restart without --no-gnss";
-        else if (!gnssWanted_) item.hint = "receiver not opened this session";
-        else if (!gnss_.isOpen()) item.hint = "no receiver on " + gnssDevice_;
-        else if (!gnss_.receiverPresent()) item.hint = "open, waiting for NMEA";
-        else if (gnss_.fix().valid) item.hint = gnss_.fix().coordText();
-        else item.hint = "receiver present, searching for a fix";
+        if (item.id == MenuGnssToggle) {
+            item.label = opt_.gnssEnabled
+                             ? std::string("LoRa Cap GNSS: ") + (gnssWanted_ ? "ON" : "OFF")
+                             : std::string("LoRa Cap GNSS: OFF (--no-gnss)");
+            if (!opt_.gnssEnabled) item.hint = "session override; restart without --no-gnss";
+            else if (!gnssWanted_) item.hint = "receiver not opened this session";
+            else if (!gnss_.isOpen()) item.hint = "no receiver on " + gnssDevice_;
+            else if (!gnss_.receiverPresent()) item.hint = "open, waiting for NMEA";
+            else if (gnss_.fix().valid) item.hint = gnss_.fix().coordText();
+            else item.hint = "receiver present, searching for a fix";
+        } else if (item.id == MenuAutoShare) {
+            item.label = autoShareMinutes_ > 0
+                             ? "Auto-share position: " + std::to_string(autoShareMinutes_) +
+                                   " min"
+                             : std::string("Auto-share position: OFF");
+            item.hint = autoShareMinutes_ > 0
+                            ? "Enter: 2 > 5 > 15 min > off; never saved"
+                            : "session only; off again at the next launch";
+        } else if (item.id == MenuMarks) {
+            item.hint = marks_.empty()
+                            ? std::string("no saved places yet")
+                            : std::to_string(marks_.size()) + " saved: locate or delete";
+        } else if (item.id == MenuCompass) {
+            if (!compass_.available()) {
+                item.label = "Compass: none found";
+                item.hint = "no IIO magnetometer on this machine";
+            } else if (!compass_.reading().valid) {
+                item.label = "Compass: " + compass_.magnetometerName();
+                item.hint = "open it to read a heading";
+            } else {
+                char buf[48];
+                std::snprintf(buf, sizeof(buf), "Compass: %03d%s",
+                              static_cast<int>(compass_.reading().headingDeg + 0.5) % 360,
+                              compass_.calibration().hardIron ? "" : " uncalibrated");
+                item.label = buf;
+                item.hint = compass_.calibration().hardIron
+                                ? (compass_.calibration().aligned
+                                       ? "calibrated and aligned; C or A redo either"
+                                       : "calibrated; A while walking aligns forward")
+                                : "C on the compass screen calibrates it";
+            }
+        }
     }
     for (MenuItem& item : meshMenu_) {
         if (item.id == MenuMeshBroadcast && !mesh_.radio().primaryChannel.empty()) {
             item.hint = "channel " + mesh_.radio().primaryChannel;
+        } else if (item.id == MenuMeshQuickMsg) {
+            item.hint = "sends to " + peerTitle(chatPeer_);
         }
     }
     dirty_ = true;
@@ -301,10 +350,33 @@ void App::notice(const std::string& title, const std::string& body, HudCue cue) 
     dirty_ = true;
 }
 
-void App::closeModal() {
-    modal_ = false;
+void App::prompt(const std::string& title, const std::string& body,
+                 const std::string& initial, size_t maxBytes,
+                 std::function<void(const std::string&)> onSubmit) {
+    modal_ = true;
+    modalIsConfirm_ = false;
+    modalIsInput_ = true;
+    modalTitle_ = title;
+    modalBody_ = body;
+    modalYes_.clear();
     modalAction_ = nullptr;
     modalCancelAction_ = nullptr;
+    modalInputAction_ = std::move(onSubmit);
+    modalInputMax_ = maxBytes;
+    modalEditor_.setText(initial.size() > maxBytes ? initial.substr(0, maxBytes) : initial);
+    keyboard_.releaseAll();
+    audio_.play(HudCue::Prompt);
+    dirty_ = true;
+}
+
+void App::closeModal() {
+    modal_ = false;
+    modalIsConfirm_ = false;
+    modalIsInput_ = false;
+    modalAction_ = nullptr;
+    modalCancelAction_ = nullptr;
+    modalInputAction_ = nullptr;
+    modalEditor_.clear();
     keyboard_.releaseAll();
     dirty_ = true;
 }
@@ -320,6 +392,8 @@ bool App::setup(const Options& opt, std::string& error) {
         return false;
     }
     config_.load(storage_);
+    loadMarks();
+    quickMessages_ = loadQuickMessages(config_);
 
     soundVolume_ = std::clamp(config_.getInt("sound.volume", 70), 0, 100);
     soundEnabled_ = config_.getBool("sound.enabled", true) && !opt_.muteSound;
@@ -393,6 +467,10 @@ bool App::setup(const Options& opt, std::string& error) {
     // wired up before anything is connected. No gauge is a normal outcome.
     battery_.discover();
     battery_.poll(nowMs());
+    // The magnetometer is read only when a screen will show the heading.
+    // Discovery is a directory listing; absence is the host build's normal.
+    compass_.discover();
+    loadCompassCalibration();
 
     setupMenus();
     refreshSoundMenu();
@@ -946,6 +1024,11 @@ void App::finishDisconnect(bool exitAfter) {
         // has no business reading them.
         gnss_.close();
         gnssProbeDeadlineMs_ = 0;
+        // Session-only by contract, and the session is over.
+        autoShareMinutes_ = 0;
+        lastAutoShareMs_ = 0;
+        locateNode_ = 0;
+        locateMark_ = -1;
         linkMode_ = LinkMode::Betaflight;
         portLinkModeForced_ = false;
         refreshMeshMenus();
@@ -1446,6 +1529,25 @@ void App::applyMenu(int id) {
     case MenuMeshShare:
         shareMyPosition(chatPeer_);
         break;
+    case MenuMeshQuickMsg:
+        openQuickMessages();
+        break;
+    case MenuMeshSos:
+        sendSos();
+        break;
+    case MenuMarkHere:
+        markHere();
+        break;
+    case MenuMarks:
+        markList_.clamp(static_cast<int>(marks_.size()), bodyRows(false));
+        openReturnableScreen(Screen::Marks);
+        break;
+    case MenuAutoShare:
+        cycleAutoShare();
+        break;
+    case MenuCompass:
+        openReturnableScreen(Screen::Compass);
+        break;
     case MenuOpenControlsInfo:
         openMenuPage(MenuPage::ControlsInfo);
         break;
@@ -1502,10 +1604,464 @@ void App::applyMenu(int id) {
     }
 }
 
+
+// ------------------------------------------------------------- field tools
+
+std::string App::myStationLabel() const {
+    const MeshNode* self = mesh_.findNode(mesh_.radio().myNodeNum);
+    if (self && !self->label().empty()) return self->label();
+    return meshNodeIdText(mesh_.radio().myNodeNum);
+}
+
+Screen App::escapeTarget(Screen self, Screen fallback) const {
+    if (returnScreen_ == self) return fallback;
+    // A screen that was reached through Locate hands back to Locate's own
+    // parent, not to Locate, or Escape would walk in a circle of two.
+    if (returnScreen_ == Screen::Locate && self != Screen::Chat) return fallback;
+    return returnScreen_;
+}
+
+void App::openLocateNode(uint32_t node) {
+    if (node == 0 || node == kMeshBroadcast) {
+        status_ = "the broadcast channel is not a place";
+        statusUntil_ = nowMs() + 3000;
+        dirty_ = true;
+        return;
+    }
+    locateNode_ = node;
+    locateMark_ = -1;
+    audio_.play(HudCue::Select);
+    openReturnableScreen(Screen::Locate);
+}
+
+void App::openLocateMark(int index) {
+    if (index < 0 || index >= static_cast<int>(marks_.size())) return;
+    locateMark_ = index;
+    locateNode_ = 0;
+    audio_.play(HudCue::Select);
+    openReturnableScreen(Screen::Locate);
+}
+
+void App::loadMarks() {
+    std::string text, error;
+    marks_.clear();
+    if (storage_.readFile(storage_.marksPath(), text, error)) marks_ = parseMarks(text);
+    markList_.clamp(static_cast<int>(marks_.size()), bodyRows(false));
+}
+
+bool App::saveMarks() {
+    std::string error;
+    if (storage_.writeAtomic(storage_.marksPath(), formatMarks(marks_), error)) return true;
+    status_ = "marks not saved: " + error;
+    statusUntil_ = nowMs() + 6000;
+    dirty_ = true;
+    return false;
+}
+
+void App::addMark(Mark mark) {
+    mark.name = cleanMarkName(mark.name);
+    if (mark.name.empty()) mark.name = "Mark " + std::to_string(marks_.size() + 1);
+    if (mark.stampUtc == 0) mark.stampUtc = static_cast<int64_t>(std::time(nullptr));
+    if (marks_.size() >= kMaxMarks) {
+        notice("Marks full",
+               std::to_string(kMaxMarks) + " places are saved already. Delete one from "
+               "Menu > Position & GNSS > Marks before adding another.");
+        return;
+    }
+    marks_.push_back(std::move(mark));
+    const bool saved = saveMarks();
+    markList_.sel = static_cast<int>(marks_.size()) - 1;
+    markList_.clamp(static_cast<int>(marks_.size()), bodyRows(false));
+    if (saved) {
+        status_ = "marked " + marks_.back().name;
+        statusUntil_ = nowMs() + 3000;
+        audio_.play(HudCue::Success);
+    }
+    refreshMeshMenus();
+}
+
+void App::markHere() {
+    const GnssFix fix = gnss_.fix();
+    if (!gnss_.receiverPresent()) {
+        notice("No LoRa Cap GNSS",
+               "A mark is this station's own fix, and there is no receiver reporting on " +
+                   gnssDevice_ + ".");
+        return;
+    }
+    if (!fix.valid) {
+        notice("No fix yet",
+               "The receiver is present but has no current fix.\n\n" +
+                   gnss_.statusText(nowMs()) +
+                   "\n\nGNDHOG will not save a stale or invented coordinate as a place.");
+        return;
+    }
+    if (marks_.size() >= kMaxMarks) {
+        notice("Marks full",
+               std::to_string(kMaxMarks) + " places are saved already. Delete one before "
+               "adding another.");
+        return;
+    }
+    // The fix is captured when the key is pressed. The operator is naming the
+    // spot they were standing on, not wherever they wander while typing.
+    prompt("Mark this spot", fix.coordText() + "\n\nName this place:",
+           "Mark " + std::to_string(marks_.size() + 1), kMaxMarkNameBytes,
+           [this, fix](const std::string& name) {
+               Mark mark;
+               mark.name = name;
+               mark.latitude = fix.latitude;
+               mark.longitude = fix.longitude;
+               mark.haveAltitude = fix.haveAltitude;
+               mark.altitudeM = static_cast<int32_t>(fix.altitudeM);
+               mark.source = "gnss";
+               addMark(std::move(mark));
+           });
+}
+
+void App::markNodePosition(uint32_t nodeNum) {
+    const MeshNode* node = mesh_.findNode(nodeNum);
+    if (!node || !node->position.valid) {
+        notice("No position",
+               "That node has not reported a position, so there is nothing to mark.");
+        return;
+    }
+    if (marks_.size() >= kMaxMarks) {
+        notice("Marks full",
+               std::to_string(kMaxMarks) + " places are saved already. Delete one before "
+               "adding another.");
+        return;
+    }
+    // Copied now: the node table can evict or update the entry while the
+    // dialog is open, and the point of a mark is that it does not move.
+    const MeshPosition position = node->position;
+    const std::string id = node->idText();
+    prompt("Mark " + node->label() + "'s position",
+           position.coordText() + "\n\nThis is the last position " + node->title() +
+               " reported. It stays on this device after the radio forgets it.\n\n"
+               "Name this place:",
+           node->label(), kMaxMarkNameBytes, [this, position, id](const std::string& name) {
+               Mark mark;
+               mark.name = name;
+               mark.latitude = position.latitude;
+               mark.longitude = position.longitude;
+               mark.haveAltitude = position.haveAltitude;
+               mark.altitudeM = position.altitudeM;
+               mark.source = id;
+               addMark(std::move(mark));
+           });
+}
+
+void App::deleteMark(int index) {
+    if (index < 0 || index >= static_cast<int>(marks_.size())) return;
+    const Mark mark = marks_[static_cast<size_t>(index)];
+    confirm("Delete mark",
+            mark.name + "\n" + mark.coordText() +
+                "\n\nThe saved place is removed from this device. Nothing was ever "
+                "transmitted, so there is nothing else to undo.",
+            "Delete", [this, index]() {
+                if (index >= static_cast<int>(marks_.size())) return;
+                const std::string name = marks_[static_cast<size_t>(index)].name;
+                marks_.erase(marks_.begin() + index);
+                saveMarks();
+                markList_.clamp(static_cast<int>(marks_.size()), bodyRows(false));
+                if (locateMark_ == index) locateMark_ = -1;
+                else if (locateMark_ > index) --locateMark_;
+                status_ = "deleted mark " + name;
+                statusUntil_ = nowMs() + 3000;
+                refreshMeshMenus();
+                if (screen_ == Screen::Locate) setScreen(Screen::Marks);
+            });
+}
+
+void App::openQuickMessages() {
+    if (quickMessages_.empty()) {
+        notice("No quick messages",
+               "Every quickmsg.N slot in config.ini is blank. Remove those lines to get "
+               "the built-in set back.");
+        return;
+    }
+    quickMsgMenu_.clear();
+    const std::string hint = "Enter sends to " + peerTitle(chatPeer_);
+    for (size_t i = 0; i < quickMessages_.size(); ++i) {
+        quickMsgMenu_.push_back(MenuItem{quickMessages_[i], hint, static_cast<int>(i), true});
+    }
+    quickMsgList_.clamp(static_cast<int>(quickMsgMenu_.size()), bodyRows(false));
+    openReturnableScreen(Screen::QuickMsg);
+}
+
+void App::sendQuickMessage(int index) {
+    if (index < 0 || index >= static_cast<int>(quickMessages_.size())) return;
+    const std::string text =
+        expandQuickMessage(quickMessages_[static_cast<size_t>(index)], gnss_.fix());
+    std::string error;
+    if (!mesh_.sendText(chatPeer_, text, error)) {
+        notice("Not sent", error, HudCue::Error);
+        return;
+    }
+    audio_.play(HudCue::Command);
+    chatFollow_ = true;
+    chatRowsValid_ = false;
+    mesh_.markRead(chatPeer_);
+    setScreen(Screen::Chat);
+}
+
+void App::sendSos() {
+    if (!meshMode() || !mesh_.ready()) {
+        notice("Not ready", "Connect a Meshtastic radio first.");
+        return;
+    }
+    const GnssFix fix = gnss_.fix();
+    std::string text = "SOS from " + myStationLabel() + ": need help";
+    if (fix.valid) {
+        text += " at " + fix.coordText();
+        if (fix.haveAltitude) {
+            text += " alt " + std::to_string(static_cast<int>(fix.altitudeM)) + "m";
+        }
+        if (!fix.utc.empty()) text += " " + fix.utc + " UTC";
+    } else if (fix.everValid) {
+        // Old is not the same as invented. A last known position, labelled
+        // as such, is what a search party asks for first.
+        text += ". No current fix; last known " + fix.coordText();
+        if (!fix.utc.empty()) text += " at " + fix.utc + " UTC";
+    } else {
+        text += ". No GNSS position";
+    }
+    const std::string& channel = mesh_.radio().primaryChannel;
+    std::string body = "Broadcast to everyone on " +
+                       (channel.empty() ? std::string("the primary channel") : channel) +
+                       ":\n\n" + text + "\n\n";
+    body += fix.valid ? "A position packet goes with it."
+                      : "No position packet: there is no current fix to put in one.";
+    confirm("Send SOS?", body, "Send SOS", [this, text, fix]() {
+        std::string error;
+        if (!mesh_.sendText(kMeshBroadcast, text, error)) {
+            notice("SOS not sent", error, HudCue::Error);
+            return;
+        }
+        if (fix.valid) {
+            std::string positionError;
+            mesh_.sendPosition(kMeshBroadcast, fix, positionError);
+        }
+        audio_.play(HudCue::Success);
+        openChat(kMeshBroadcast);
+        // A broadcast is not acknowledged, so the only proof of rescue is a
+        // reply. The conversation stays open to receive one.
+        status_ = "SOS sent - repeat from the menu if nobody answers";
+        statusUntil_ = nowMs() + 8000;
+    });
+}
+
+void App::cycleAutoShare() {
+    if (!meshMode() || !mesh_.ready()) {
+        notice("Not ready", "Connect a Meshtastic radio first.");
+        return;
+    }
+    if (autoShareMinutes_ == 0) {
+        if (!gnss_.receiverPresent()) {
+            notice("No LoRa Cap GNSS",
+                   "Auto-share transmits this station's own fix, and there is no receiver "
+                   "reporting on " + gnssDevice_ + ".");
+            return;
+        }
+        confirm("Auto-share position?",
+                "Transmit this station's GNSS fix to the whole mesh every 2 minutes, "
+                "whenever there is a current fix, until it is switched off or GNDHOG "
+                "exits.\n\nThis is never saved: the next launch starts with it off.",
+                "Switch on", [this]() {
+                    autoShareMinutes_ = 2;
+                    lastAutoShareMs_ = 0;
+                    status_ = "auto-share every 2 min - first fix goes out now";
+                    statusUntil_ = nowMs() + 4000;
+                    refreshMeshMenus();
+                });
+        return;
+    }
+    // 2 -> 5 -> 15 -> off. Every step is one press; off is never more than
+    // three away, and the label says which it is.
+    if (autoShareMinutes_ < 5) autoShareMinutes_ = 5;
+    else if (autoShareMinutes_ < 15) autoShareMinutes_ = 15;
+    else autoShareMinutes_ = 0;
+    status_ = autoShareMinutes_ > 0
+                  ? "auto-share every " + std::to_string(autoShareMinutes_) + " min"
+                  : "auto-share off";
+    statusUntil_ = nowMs() + 3000;
+    refreshMeshMenus();
+}
+
+void App::tickAutoShare(uint64_t now) {
+    if (autoShareMinutes_ <= 0 || !mesh_.ready()) return;
+    const uint64_t interval = static_cast<uint64_t>(autoShareMinutes_) * 60000u;
+    if (lastAutoShareMs_ != 0 && now - lastAutoShareMs_ < interval) return;
+    // No fix, no packet. The timer simply keeps waiting for one; a beacon
+    // that repeats a coordinate it no longer has is a lie on a schedule.
+    if (!gnss_.fix().valid) return;
+    std::string error;
+    if (!mesh_.sendPosition(kMeshBroadcast, gnss_.fix(), error)) {
+        autoShareMinutes_ = 0;
+        status_ = "auto-share off: " + error;
+        statusUntil_ = now + 6000;
+        refreshMeshMenus();
+        return;
+    }
+    lastAutoShareMs_ = now;
+}
+
+
+// ------------------------------------------------------------------ compass
+
+void App::loadCompassCalibration() {
+    CompassCalibration cal;
+    cal.hardIron = config_.getBool("compass.calibrated", false);
+    cal.xOff = std::atof(config_.get("compass.xoff", "0").c_str());
+    cal.yOff = std::atof(config_.get("compass.yoff", "0").c_str());
+    cal.zOff = std::atof(config_.get("compass.zoff", "0").c_str());
+    cal.fieldNorm = std::atof(config_.get("compass.norm", "0").c_str());
+    cal.aligned = config_.getBool("compass.aligned", false);
+    cal.mountOffsetDeg = std::atof(config_.get("compass.offset", "0").c_str());
+    // Hand-set: the local magnetic declination, east positive, and a chip
+    // that turns out to be mounted with its z axis into the board.
+    cal.declinationDeg = std::atof(config_.get("compass.declination", "0").c_str());
+    cal.mirror = config_.getBool("compass.mirror", false);
+    compass_.setCalibration(cal);
+}
+
+void App::saveCompassCalibration() {
+    const CompassCalibration& cal = compass_.calibration();
+    char buf[32];
+    auto put = [&](const char* key, double value) {
+        std::snprintf(buf, sizeof(buf), "%.3f", value);
+        config_.set(key, buf);
+    };
+    config_.setBool("compass.calibrated", cal.hardIron);
+    put("compass.xoff", cal.xOff);
+    put("compass.yoff", cal.yOff);
+    put("compass.zoff", cal.zOff);
+    put("compass.norm", cal.fieldNorm);
+    config_.setBool("compass.aligned", cal.aligned);
+    put("compass.offset", cal.mountOffsetDeg);
+    std::string error;
+    if (!config_.save(storage_, error)) {
+        status_ = "compass calibration not saved: " + error;
+        statusUntil_ = nowMs() + 6000;
+    }
+}
+
+void App::pollCompass(uint64_t now) {
+    if (!compass_.available()) return;
+    // Six sysfs reads per sample, five times a second: cheap, but only worth
+    // it while something on screen is going to use the answer.
+    const bool wanted = screen_ == Screen::Locate || screen_ == Screen::Compass ||
+                        compass_.calibrating() ||
+                        (screen_ == Screen::Menu && menuPage_ == MenuPage::MeshPosition);
+    if (!wanted) return;
+    compass_.poll(now);
+    if (compass_.reading().sampledMs != compassSampleSeen_) {
+        compassSampleSeen_ = compass_.reading().sampledMs;
+        if (screen_ == Screen::Menu) refreshMeshMenus();
+        dirty_ = true;
+    }
+}
+
+void App::toggleCompassCalibration() {
+    if (!compass_.available()) {
+        notice("No magnetometer", "No IIO device on this machine reports a magnetic field.");
+        return;
+    }
+    if (!compass_.calibrating()) {
+        compass_.beginCalibration();
+        status_ = "turn the device slowly through a full circle, then press C";
+        statusUntil_ = nowMs() + 8000;
+        dirty_ = true;
+        return;
+    }
+    if (!compass_.finishCalibration()) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "keep turning: %d samples, %d%% of a circle so far",
+                      compass_.calibrationSamples(),
+                      static_cast<int>(compass_.calibrationCoverage() * 100.0 + 0.5));
+        status_ = buf;
+        statusUntil_ = nowMs() + 4000;
+        dirty_ = true;
+        return;
+    }
+    saveCompassCalibration();
+    audio_.play(HudCue::Success);
+    status_ = "compass calibrated; press A while walking to align it";
+    statusUntil_ = nowMs() + 6000;
+    refreshMeshMenus();
+}
+
+void App::alignCompassToTrack() {
+    if (!compass_.available()) {
+        notice("No magnetometer", "No IIO device on this machine reports a magnetic field.");
+        return;
+    }
+    const GnssFix& fix = gnss_.fix();
+    const bool moving = fix.valid && fix.haveCourse && fix.haveSpeed && fix.speedKph >= 2.5;
+    if (!moving) {
+        notice("Walk first",
+               "Alignment sets the chip's forward direction from the GNSS track, so it "
+               "needs a fix and a straight walk of a few steps at more than 2.5 km/h, "
+               "holding the device pointed the way you are going.\n\n" +
+                   gnss_.statusText(nowMs()));
+        return;
+    }
+    if (!compass_.alignTo(fix.courseDeg, nowMs())) {
+        notice("No compass sample", "The magnetometer has not produced a fresh reading.");
+        return;
+    }
+    saveCompassCalibration();
+    audio_.play(HudCue::Success);
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "compass aligned to track %03d",
+                  static_cast<int>(std::lround(fix.courseDeg)) % 360);
+    status_ = buf;
+    statusUntil_ = nowMs() + 5000;
+    refreshMeshMenus();
+}
+
 // -------------------------------------------------------------------- input
 
 bool App::handleModalKey(const KeyEvent& e) {
     if (!modal_) return false;
+
+    if (modalIsInput_) {
+        // Editing keys may repeat; the two that decide the dialog may not.
+        switch (e.key) {
+        case Key::Enter: {
+            if (e.repeat) return true;
+            auto action = modalInputAction_;
+            const std::string text = modalEditor_.text();
+            audio_.play(HudCue::Select);
+            closeModal();
+            if (action) action(text);
+            return true;
+        }
+        case Key::Escape:
+            if (e.repeat) return true;
+            audio_.play(HudCue::Back);
+            closeModal();
+            return true;
+        case Key::Backspace: modalEditor_.backspace(); break;
+        case Key::Delete:    modalEditor_.del(); break;
+        case Key::Left:      modalEditor_.left(e.ctrl); break;
+        case Key::Right:     modalEditor_.right(e.ctrl); break;
+        case Key::Home:      modalEditor_.home(); break;
+        case Key::End:       modalEditor_.end(); break;
+        case Key::Char:
+            if (e.ctrl) {
+                if (e.ch == 'u') modalEditor_.killToStart();
+                else if (e.ch == 'k') modalEditor_.killToEnd();
+                else if (e.ch == 'w') modalEditor_.killWordBack();
+                break;
+            }
+            if (modalEditor_.text().size() < modalInputMax_) modalEditor_.insert(e.ch);
+            break;
+        default: break;
+        }
+        dirty_ = true;
+        return true;
+    }
+
     // A repeat cannot answer a dialog; only a deliberate fresh press.
     if (e.repeat) return true;
 
@@ -1705,8 +2261,9 @@ void App::onTerminalKey(const KeyEvent& e) {
 
 void App::onMenuKey(const KeyEvent& e) {
     const bool quick = (screen_ == Screen::Quick);
-    std::vector<MenuItem>& items = quick ? quick_ : currentMenuItems();
-    ListState& st = quick ? quickList_ : currentMenuList();
+    const bool quickMsg = (screen_ == Screen::QuickMsg);
+    std::vector<MenuItem>& items = quick ? quick_ : quickMsg ? quickMsgMenu_ : currentMenuItems();
+    ListState& st = quick ? quickList_ : quickMsg ? quickMsgList_ : currentMenuList();
     const int rows = bodyRows(false);
     const int n = static_cast<int>(items.size());
 
@@ -1720,6 +2277,8 @@ void App::onMenuKey(const KeyEvent& e) {
         if (quick) {
             audio_.play(HudCue::Select);
             applyQuick(items[static_cast<size_t>(st.sel)].id);
+        } else if (quickMsg) {
+            sendQuickMessage(items[static_cast<size_t>(st.sel)].id);
         } else {
             const int id = items[static_cast<size_t>(st.sel)].id;
             if (id != MenuSoundToggle && id != MenuSoundDown && id != MenuSoundUp) {
@@ -1732,6 +2291,8 @@ void App::onMenuKey(const KeyEvent& e) {
         audio_.play(HudCue::Back);
         if (quick) {
             setScreen(Screen::Menu);
+        } else if (quickMsg) {
+            setScreen(escapeTarget(Screen::QuickMsg, Screen::Chat));
         } else if (menuPage_ == MenuPage::LinkSpeeds) {
             // The only page two levels deep. Escape gives back the category it
             // was opened from rather than dropping the operator at the root.
@@ -1868,6 +2429,7 @@ void App::onNodesKey(const KeyEvent& e) {
         break;
     case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); break;
     case Key::F2: showRadioInfo(); break;
+    case Key::F4: openLocateNode(peerForNodeRow(nodeList_.sel)); break;
     case Key::F5:
         shareMyPosition(peerForNodeRow(nodeList_.sel));
         break;
@@ -1886,7 +2448,118 @@ void App::onNodesKey(const KeyEvent& e) {
             openReturnableScreen(Screen::Terminal);
         } else if (e.ch == 'p' || e.ch == 'P') {
             shareMyPosition(peerForNodeRow(nodeList_.sel));
+        } else if (e.ch == 'f' || e.ch == 'F') {
+            openLocateNode(peerForNodeRow(nodeList_.sel));
+        } else if (e.ch == 'm' || e.ch == 'M') {
+            markList_.clamp(static_cast<int>(marks_.size()), bodyRows(false));
+            openReturnableScreen(Screen::Marks);
         }
+        break;
+    default: break;
+    }
+}
+
+void App::onLocateKey(const KeyEvent& e) {
+    switch (e.key) {
+    case Key::Escape:
+        audio_.play(HudCue::Back);
+        setScreen(escapeTarget(Screen::Locate,
+                               locateMark_ >= 0 ? Screen::Marks : Screen::Nodes));
+        return;
+    case Key::Enter:
+        if (locateNode_ != 0) {
+            audio_.play(HudCue::Select);
+            openChat(locateNode_);
+        }
+        return;
+    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
+    case Key::F2: showRadioInfo(); return;
+    case Key::F3: openReturnableScreen(Screen::Nodes); return;
+    case Key::F5:
+        if (locateNode_ != 0) shareMyPosition(locateNode_);
+        return;
+    case Key::F6: showGnssStatus(); return;
+    case Key::F9:
+        openMenuPage(MenuPage::Root);
+        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
+        setScreen(Screen::Menu);
+        return;
+    case Key::F10: requestDisconnect(false); return;
+    case Key::BrightUp:   adjustBrightness(+10); return;
+    case Key::BrightDown: adjustBrightness(-10); return;
+    case Key::Char:
+        if (e.ch == 'p' || e.ch == 'P') {
+            if (locateNode_ != 0) shareMyPosition(locateNode_);
+        } else if (e.ch == 'm' || e.ch == 'M') {
+            if (locateNode_ != 0) markNodePosition(locateNode_);
+            else markHere();
+        } else if (e.ch == 'd' || e.ch == 'D') {
+            if (locateMark_ >= 0) deleteMark(locateMark_);
+        } else if (e.ch == 'g' || e.ch == 'G') {
+            showGnssStatus();
+        } else if (e.ch == 'n' || e.ch == 'N') {
+            openReturnableScreen(Screen::Nodes);
+        }
+        return;
+    default: return;
+    }
+}
+
+void App::onCompassKey(const KeyEvent& e) {
+    switch (e.key) {
+    case Key::Escape:
+        if (e.repeat) return;
+        audio_.play(HudCue::Back);
+        if (compass_.calibrating()) {
+            compass_.cancelCalibration();
+            status_ = "compass calibration cancelled";
+            statusUntil_ = nowMs() + 3000;
+        }
+        setScreen(escapeTarget(Screen::Compass, Screen::Nodes));
+        return;
+    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
+    case Key::F6: showGnssStatus(); return;
+    case Key::F9:
+        openMenuPage(MenuPage::Root);
+        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
+        setScreen(Screen::Menu);
+        return;
+    case Key::Char:
+        if (e.repeat) return;
+        if (e.ch == 'c' || e.ch == 'C') toggleCompassCalibration();
+        else if (e.ch == 'a' || e.ch == 'A') alignCompassToTrack();
+        else if (e.ch == 'g' || e.ch == 'G') showGnssStatus();
+        return;
+    default: return;
+    }
+}
+
+void App::onMarksKey(const KeyEvent& e) {
+    const int rows = bodyRows(false);
+    const int n = static_cast<int>(marks_.size());
+    switch (e.key) {
+    case Key::Up:   markList_.move(-1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Down: markList_.move(+1, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageUp:   markList_.move(-rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::PageDown: markList_.move(+rows, n, rows); audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Enter:
+        if (n > 0) openLocateMark(markList_.sel);
+        break;
+    case Key::Escape:
+        audio_.play(HudCue::Back);
+        setScreen(escapeTarget(Screen::Marks, Screen::Nodes));
+        break;
+    case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); break;
+    case Key::F6: showGnssStatus(); break;
+    case Key::F9:
+        openMenuPage(MenuPage::Root);
+        menuList_.clamp(static_cast<int>(menu_.size()), bodyRows(false));
+        setScreen(Screen::Menu);
+        break;
+    case Key::Char:
+        if (e.ch == 'n' || e.ch == 'N') markHere();
+        else if (e.ch == 'd' || e.ch == 'D') { if (n > 0) deleteMark(markList_.sel); }
+        else if (e.ch == 'g' || e.ch == 'G') showGnssStatus();
         break;
     default: break;
     }
@@ -1913,6 +2586,15 @@ void App::onChatKey(const KeyEvent& e) {
         submitChatLine();
         dirty_ = true;
         return;
+    case Key::Tab:
+        // Every printable key types; Tab is the one that does not, so it is
+        // the one key a cold thumb can find for a canned line.
+        audio_.play(HudCue::Select);
+        openQuickMessages();
+        return;
+    case Key::F4:
+        openLocateNode(chatPeer_);
+        return;
     case Key::Backspace: chatEditor_.backspace(); dirty_ = true; return;
     case Key::Delete:    chatEditor_.del(); dirty_ = true; return;
     case Key::Left:      chatEditor_.left(e.ctrl); dirty_ = true; return;
@@ -1935,7 +2617,7 @@ void App::onChatKey(const KeyEvent& e) {
     }
     case Key::Escape:
         audio_.play(HudCue::Back);
-        setScreen(returnScreen_ == Screen::Chat ? Screen::Nodes : returnScreen_);
+        setScreen(escapeTarget(Screen::Chat, Screen::Nodes));
         return;
     case Key::F1: helpScroll_ = 0; openReturnableScreen(Screen::Help); return;
     case Key::F2: showRadioInfo(); return;
@@ -1977,6 +2659,10 @@ void App::handleKey(const KeyEvent& e) {
     case Screen::About:    onAboutKey(e); break;
     case Screen::Nodes:    onNodesKey(e); break;
     case Screen::Chat:     onChatKey(e); break;
+    case Screen::Locate:   onLocateKey(e); break;
+    case Screen::Marks:    onMarksKey(e); break;
+    case Screen::QuickMsg: onMenuKey(e); break;
+    case Screen::Compass:  onCompassKey(e); break;
     }
 }
 
@@ -1991,6 +2677,7 @@ void App::onAboutKey(const KeyEvent& e) {
 
 void App::tick(uint64_t now) {
     pollGnss(now);
+    pollCompass(now);
     if (meshMode()) {
         tickMesh(now);
         return;
@@ -2245,6 +2932,20 @@ void App::tickMesh(uint64_t now) {
         dirty_ = true;
     }
 
+    tickAutoShare(now);
+
+    // "heard 4m ago" and "my fix 12s" go stale sitting still. The node list
+    // ticks every ten seconds; the Locate screen, which somebody is walking
+    // behind, every second.
+    if (screen_ == Screen::Locate || screen_ == Screen::Nodes || screen_ == Screen::Marks ||
+        screen_ == Screen::Compass) {
+        const uint64_t period = screen_ == Screen::Nodes ? 10000 : 1000;
+        if (now - lastAgeRepaintMs_ >= period) {
+            lastAgeRepaintMs_ = now;
+            dirty_ = true;
+        }
+    }
+
     if (mesh_.state() == MeshState::Failed && !meshFailureReported_ && !modal_) {
         meshFailureReported_ = true;
         audio_.play(HudCue::Error);
@@ -2401,6 +3102,40 @@ int App::run(const Options& opt) {
             chatRowsValid_ = false;
             chatFollow_ = true;
 
+            // A fix from a spot south-west of the fixture's hilltop relay, so
+            // the Locate screen has a real range and bearing to draw, and a
+            // walking course so the turn advice has something to say.
+            GnssFix previewFix;
+            previewFix.valid = true;
+            previewFix.latitude = 51.47790;
+            previewFix.longitude = -0.00150;
+            previewFix.haveAltitude = true;
+            previewFix.altitudeM = 45.0;
+            previewFix.satellitesUsed = 9;
+            previewFix.satellitesInView = 14;
+            previewFix.hdop = 0.9;
+            previewFix.haveSpeed = true;
+            previewFix.speedKph = 4.2;
+            previewFix.haveCourse = true;
+            previewFix.courseDeg = 38.0;
+            previewFix.utc = "12:35:19";
+            gnss_.adoptFix(previewFix, nowMs());
+            Mark previewMark;
+            previewMark.name = "Car";
+            previewMark.latitude = 51.47510;
+            previewMark.longitude = -0.00920;
+            previewMark.haveAltitude = true;
+            previewMark.altitudeM = 12;
+            previewMark.stampUtc = static_cast<int64_t>(std::time(nullptr)) - 5400;
+            previewMark.source = "gnss";
+            // In memory only: the preview must not write into the operator's
+            // real marks file.
+            marks_.push_back(previewMark);
+            locateNode_ = previewMesh.hilltopNodeNum();
+            locateMark_ = -1;
+            quickMessages_ = defaultQuickMessages();
+            refreshMeshMenus();
+
             const struct { Screen screen; MenuPage page; const char* name; } kMeshShots[] = {
                 {Screen::Nodes, MenuPage::Root, "20-mesh-nodes"},
                 {Screen::Chat, MenuPage::Root, "21-mesh-chat"},
@@ -2408,6 +3143,8 @@ int App::run(const Options& opt) {
                 {Screen::Menu, MenuPage::Mesh, "23-mesh-network"},
                 {Screen::Menu, MenuPage::MeshPosition, "24-mesh-position-gnss"},
                 {Screen::Terminal, MenuPage::Root, "25-mesh-radio-log"},
+                {Screen::Locate, MenuPage::Root, "26-mesh-locate"},
+                {Screen::Marks, MenuPage::Root, "27-mesh-marks"},
             };
             for (const auto& shot : kMeshShots) {
                 screen_ = shot.screen;
@@ -2417,6 +3154,23 @@ int App::run(const Options& opt) {
                     ++written;
                 }
             }
+            screen_ = Screen::Chat;
+            openQuickMessages();
+            render();
+            if (display_.canvas().writePpm(opt.previewDir + "/28-mesh-quick-messages.ppm")) {
+                ++written;
+            }
+            screen_ = Screen::Locate;
+            markNodePosition(locateNode_);
+            render();
+            if (display_.canvas().writePpm(opt.previewDir + "/29-mesh-mark-prompt.ppm")) {
+                ++written;
+            }
+            closeModal();
+            screen_ = Screen::Compass;
+            render();
+            if (display_.canvas().writePpm(opt.previewDir + "/30-compass.ppm")) ++written;
+            marks_.clear();
             menuPage_ = MenuPage::Root;
             mesh_.disconnect();
         } else if (!previewError.empty()) {

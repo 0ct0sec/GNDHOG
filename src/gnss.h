@@ -50,6 +50,10 @@ public:
     void poll(uint64_t nowMs);
 
     const GnssFix& fix() const { return fix_; }
+    // For the self-test and --preview only: installs a fix as if the receiver
+    // had reported it, and counts as one sentence so the receiver reads as
+    // present. The next real sentence overwrites it.
+    void adoptFix(const GnssFix& fix, uint64_t nowMs);
     // Presence is proved by NMEA arriving, never by the device node opening: a
     // UART exists on this board whether or not a cap is clipped to it.
     bool receiverPresent() const { return sentences_ > 0; }

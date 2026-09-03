@@ -3,6 +3,7 @@
 #include "mascot.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 
@@ -206,11 +207,56 @@ const char* const kHelpText[] = {
     "",
     "MESH KEYS",
     "  Enter        open the highlighted conversation",
+    "  F / Fn+4     locate: range, bearing, compass rose",
+    "  M            saved marks",
     "  I            radio firmware, region, and preset",
     "  G            LoRa Cap GNSS status",
     "  P / Fn+5     transmit this station's own position",
     "  L            the radio's console log",
     "  N            back to the node list from the log",
+    "  Tab          quick messages, from inside a chat",
+    "",
+    "LOCATE",
+    "  Range and true bearing from this station's fix to",
+    "  a node's last reported position, on a compass",
+    "  rose. With the BMM150 calibrated the rose turns",
+    "  heading-up and the arrow points where to walk;",
+    "  otherwise it is north-up and the dot on the rim",
+    "  is your GNSS track, real only once you move. The",
+    "  age of their position is shown, because a tracker",
+    "  that stopped reporting is a place, not a node.",
+    "",
+    "COMPASS",
+    "  Menu > Position & GNSS > Compass reads the",
+    "  BMM150 through the accelerometer for tilt. Press",
+    "  C and turn the device slowly through a full",
+    "  circle, then C again: that measures the board's",
+    "  own magnetism. Press A while walking straight",
+    "  with a GNSS fix to align the chip's x axis with",
+    "  forward. Both are saved to config.ini, with",
+    "  compass.declination (east positive) hand-set.",
+    "",
+    "MARKS",
+    "  Menu > Position & GNSS > Mark this spot saves",
+    "  your own fix under a name: the car, the launch",
+    "  pad. M on the Locate screen saves that node's",
+    "  last position instead, which outlives the",
+    "  radio's memory of it. Marks stay on this device",
+    "  and are never transmitted.",
+    "",
+    "QUICK MESSAGES",
+    "  Tab in a chat opens canned lines; Enter sends",
+    "  one. {pos} becomes your coordinate, or an honest",
+    "  (no GNSS fix). Replace any slot in config.ini:",
+    "    quickmsg.3 = Need a spotter at the gate",
+    "",
+    "SOS AND AUTO-SHARE",
+    "  SOS broadcast sends a help request naming this",
+    "  station, with its fix in the text and a position",
+    "  packet, to everyone on the channel. It asks",
+    "  first. Auto-share repeats your position every",
+    "  2, 5 or 15 minutes for this session only; it is",
+    "  never saved, and the next launch starts off.",
     "",
     "LORA CAP GNSS",
     "  If a Cap LoRa868 / Cap LoRa-1262 is fitted, its",
@@ -271,6 +317,10 @@ void App::drawTopBar(Surface& s) {
     case Screen::Help:   mid = "help"; break;
     case Screen::About:  mid = "about"; break;
     case Screen::Nodes:  mid = "mesh nodes"; break;
+    case Screen::Locate: mid = "locate"; break;
+    case Screen::Marks:  mid = "marks"; break;
+    case Screen::QuickMsg: mid = "quick messages"; break;
+    case Screen::Compass: mid = "compass"; break;
     case Screen::Chat:
         mid = peerTitle(chatPeer_);
         break;
@@ -1063,12 +1113,447 @@ void App::drawChat(Surface& s) {
         hints = mesh_.radio().region == 0 ? "no LoRa region set - the radio will not transmit"
                                           : "transmit is disabled on this radio";
     } else {
-        hints = std::to_string(text.size()) + "/" + std::to_string(kMeshMaxTextBytes);
-        if (chatPeer_ == kMeshBroadcast) hints += "  broadcast, no ack";
+        hints = std::to_string(text.size()) + "/" + std::to_string(kMeshMaxTextBytes) +
+                "  Tab quick msgs";
+        if (chatPeer_ == kMeshBroadcast) hints += "  no ack";
         // Only offer the key that can actually do something right now.
-        if (gnss_.receiverPresent()) hints += "  Fn+5 position";
+        if (gnss_.receiverPresent()) hints += "  Fn+5 pos";
     }
     drawHintBar(s, hints, "Esc back");
+}
+
+// ------------------------------------------------------------ field tools
+
+void App::drawCompass(Surface& s, int cx, int cy, int r, bool haveBearing,
+                      double bearingDeg, bool haveHeading, double headingDeg,
+                      double rotationDeg) {
+    constexpr double kPi = 3.14159265358979323846;
+    // Bearings are clockwise from north; the screen's y axis points down; the
+    // whole rose is turned so that `rotationDeg` sits at the top.
+    auto px = [&](double deg, double len) {
+        return cx + static_cast<int>(std::lround(std::sin((deg - rotationDeg) * kPi / 180.0) * len));
+    };
+    auto py = [&](double deg, double len) {
+        return cy - static_cast<int>(std::lround(std::cos((deg - rotationDeg) * kPi / 180.0) * len));
+    };
+
+    drawCircle(s, cx, cy, r, theme::rule);
+    for (int i = 0; i < 8; ++i) {
+        const double deg = i * 45.0;
+        const int len = (i % 2 == 0) ? 5 : 3;
+        drawLine(s, px(deg, r - len), py(deg, r - len), px(deg, r), py(deg, r), theme::textDim);
+    }
+    // The cardinal letters ride the rim, so a heading-up rose keeps N where
+    // north actually is rather than where the label used to be.
+    const struct { double deg; const char* label; Color color; } kCardinals[] = {
+        {0.0, "N", theme::accent}, {90.0, "E", theme::textDim},
+        {180.0, "S", theme::textDim}, {270.0, "W", theme::textDim},
+    };
+    for (const auto& c : kCardinals) {
+        drawText(s, px(c.deg, r + 9) - 3, py(c.deg, r + 9) - 4, c.label, c.color);
+    }
+
+    // The direction this station is facing (magnetometer) or moving (GNSS
+    // track), on the rim. Nothing is drawn when neither is known: a
+    // stationary receiver has no heading and nothing here pretends it has.
+    if (haveHeading) fillCircle(s, px(headingDeg, r), py(headingDeg, r), 3, theme::ok);
+
+    if (!haveBearing) {
+        drawText(s, cx - 3, cy - 4, "?", theme::textDim);
+        return;
+    }
+    const int tipX = px(bearingDeg, r - 6);
+    const int tipY = py(bearingDeg, r - 6);
+    // A three-pixel shaft reads from arm's length; one pixel does not.
+    const double screenRad = (bearingDeg - rotationDeg) * kPi / 180.0;
+    const int ox = static_cast<int>(std::lround(std::cos(screenRad)));
+    const int oy = static_cast<int>(std::lround(std::sin(screenRad)));
+    drawLine(s, cx, cy, tipX, tipY, theme::accent);
+    drawLine(s, cx + ox, cy + oy, tipX + ox, tipY + oy, theme::accent);
+    drawLine(s, cx - ox, cy - oy, tipX - ox, tipY - oy, theme::accent);
+    for (double side : {150.0, -150.0}) {
+        drawLine(s, tipX, tipY, tipX + (px(bearingDeg + side, 10) - cx),
+                 tipY + (py(bearingDeg + side, 10) - cy), theme::accent);
+    }
+    fillCircle(s, cx, cy, 2, theme::accent);
+}
+
+namespace {
+
+std::string coordPair(double latitude, double longitude) {
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%.5f, %.5f", latitude, longitude);
+    return buf;
+}
+
+std::string heardAgeText(const MeshNode& node, uint64_t now) {
+    if (node.heardLocalMs != 0) return meshAgeText((now - node.heardLocalMs) / 1000);
+    if (node.lastHeard != 0) {
+        const int64_t age = static_cast<int64_t>(::time(nullptr)) -
+                            static_cast<int64_t>(node.lastHeard);
+        return age > 0 ? meshAgeText(static_cast<uint64_t>(age)) : "now";
+    }
+    return "-";
+}
+
+} // namespace
+
+void App::drawLocate(Surface& s) {
+    const uint64_t now = nowMs();
+    const GnssFix& fix = gnss_.fix();
+    const int textX = 108;
+    const int textCols = std::max(1, (s.w - textX - 2) / kGlyphW);
+
+    // Resolve the target. Everything below is drawn from these, so a node
+    // and a mark get the same screen and the same honesty about what is
+    // missing.
+    std::string title, subtitle, positionAge, evidence;
+    bool havePosition = false, haveAltitude = false;
+    double latitude = 0.0, longitude = 0.0, altitudeM = 0.0;
+    const bool isMark = locateMark_ >= 0 && locateMark_ < static_cast<int>(marks_.size());
+    if (locateNode_ != 0) {
+        const MeshNode* node = mesh_.findNode(locateNode_);
+        if (!node) {
+            title = meshNodeIdText(locateNode_);
+            subtitle = "no longer in the radio's node table";
+        } else {
+            title = node->title();
+            subtitle = node->idText() + "  " + meshRoleName(node->user.role);
+            havePosition = node->position.valid;
+            latitude = node->position.latitude;
+            longitude = node->position.longitude;
+            haveAltitude = node->position.haveAltitude;
+            altitudeM = node->position.altitudeM;
+            if (havePosition) {
+                if (node->positionLocalMs != 0) {
+                    positionAge = "their fix heard " +
+                                  meshAgeText((now - node->positionLocalMs) / 1000) + " ago";
+                } else if (node->position.time != 0) {
+                    const int64_t age = static_cast<int64_t>(::time(nullptr)) -
+                                        static_cast<int64_t>(node->position.time);
+                    positionAge = age > 0 ? "their fix stamped " +
+                                                meshAgeText(static_cast<uint64_t>(age)) + " ago"
+                                          : std::string("their fix stamped now");
+                } else {
+                    positionAge = "their fix age unknown (node db)";
+                }
+            }
+            evidence = "heard " + heardAgeText(*node, now);
+            if (node->haveSnr) {
+                char buf[24];
+                std::snprintf(buf, sizeof(buf), "  snr %.1f", static_cast<double>(node->snr));
+                evidence += buf;
+            }
+            if (node->haveHops) {
+                evidence += "  " + std::to_string(node->hopsAway) +
+                            (node->hopsAway == 1 ? " hop" : " hops");
+            }
+            if (node->haveBattery) evidence += "  " + std::to_string(node->batteryLevel) + "%";
+        }
+    } else if (isMark) {
+        const Mark& mark = marks_[static_cast<size_t>(locateMark_)];
+        title = mark.name;
+        subtitle = "mark from " + (mark.source.empty() ? std::string("?") : mark.source);
+        havePosition = true;
+        latitude = mark.latitude;
+        longitude = mark.longitude;
+        haveAltitude = mark.haveAltitude;
+        altitudeM = mark.altitudeM;
+        if (mark.stampUtc > 0) {
+            const std::time_t stamp = static_cast<std::time_t>(mark.stampUtc);
+            std::tm tmv{};
+            ::localtime_r(&stamp, &tmv);
+            char when[32];
+            std::strftime(when, sizeof(when), "%a %d %b %H:%M", &tmv);
+            positionAge = std::string("marked ") + when;
+        }
+    } else {
+        title = "Nothing to locate";
+        subtitle = "F on a node, or Enter on a mark";
+    }
+
+    const bool haveRange = fix.valid && havePosition;
+    double metres = 0.0, bearing = 0.0;
+    if (haveRange) {
+        metres = meshDistanceM(fix.latitude, fix.longitude, latitude, longitude);
+        bearing = meshBearingDeg(fix.latitude, fix.longitude, latitude, longitude);
+    }
+    // A course over ground only means something while moving. Below a slow
+    // walk the receiver reports whatever it drifted through last.
+    const bool moving = fix.valid && fix.haveCourse && fix.haveSpeed && fix.speedKph >= 1.5;
+    // Where this station is pointing, from the magnetometer once it has been
+    // calibrated, else where it is moving, from the receiver. With a real
+    // heading the rose turns heading-up and the arrow says where to walk.
+    bool haveHeading = false;
+    double heading = 0.0;
+    const char* headingSource = "";
+    const bool headingUp = compass_.usable(now);
+    if (headingUp) {
+        haveHeading = true;
+        heading = compass_.reading().headingDeg;
+        headingSource = "mag";
+    } else if (moving) {
+        haveHeading = true;
+        heading = fix.courseDeg;
+        headingSource = "track";
+    }
+
+    drawCompass(s, 52, 90, 38, haveRange, bearing, haveHeading, heading,
+                headingUp ? heading : 0.0);
+    drawText(s, 8, 142, "-> them", theme::accent);
+    drawText(s, 62, 142, "o you", haveHeading ? theme::ok : theme::textDim);
+    drawText(s, 8, 151, headingUp ? "rose: heading up" : "rose: north up", theme::textDim);
+
+    int y = kBodyY;
+    drawTextClipped(s, textX, y, title, textCols, theme::accent);
+    y += kGlyphH;
+    drawTextClipped(s, textX, y, subtitle, textCols, theme::textDim);
+    y += kGlyphH + 3;
+
+    // The two numbers that get read at arm's length, in sunlight.
+    std::string range;
+    Color rangeColor = theme::accent;
+    if (haveRange) {
+        range = meshRangeText(metres);
+    } else if (!havePosition) {
+        range = "NO POS";
+        rangeColor = theme::warn;
+    } else {
+        range = "NO FIX";
+        rangeColor = theme::warn;
+    }
+    drawTextScaled(s, textX, y, range, 3, rangeColor);
+    y += 3 * kGlyphH + 2;
+    drawTextScaled(s, textX, y, haveRange ? meshBearingText(bearing) : std::string("--- --"), 2,
+                   haveRange ? theme::text : theme::textDim);
+    y += 2 * kGlyphH + 3;
+
+    std::string turn;
+    Color turnColor = theme::text;
+    if (haveRange && haveHeading) {
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%03d", static_cast<int>(std::lround(heading)) % 360);
+        turn = std::string("you ") + buf + " " + headingSource + "  " +
+               meshTurnText(meshRelativeTurnDeg(bearing, heading));
+    } else if (haveRange && compass_.available() && !compass_.calibration().hardIron) {
+        turn = "compass needs calibrating (menu)";
+        turnColor = theme::textDim;
+    } else if (haveRange) {
+        turn = "walk a few steps for turn advice";
+        turnColor = theme::textDim;
+    }
+    drawTextClipped(s, textX, y, turn, textCols, turnColor);
+    y += kGlyphH + 2;
+
+    std::string altitude;
+    if (havePosition && haveAltitude && fix.valid && fix.haveAltitude) {
+        altitude = "alt " + meshAltitudeDiffText(altitudeM - fix.altitudeM) + "  theirs " +
+                   std::to_string(static_cast<int>(altitudeM)) + "m";
+    } else if (havePosition && haveAltitude) {
+        altitude = "alt theirs " + std::to_string(static_cast<int>(altitudeM)) + "m";
+    } else if (havePosition) {
+        altitude = "alt not reported";
+    }
+    drawTextClipped(s, textX, y, altitude, textCols, theme::textDim);
+    y += kGlyphH;
+
+    drawTextClipped(s, textX, y,
+                    havePosition ? "them " + coordPair(latitude, longitude)
+                                 : std::string("no position reported"),
+                    textCols, havePosition ? theme::text : theme::warn);
+    y += kGlyphH;
+    drawTextClipped(s, textX, y, positionAge, textCols, theme::textDim);
+    y += kGlyphH + 2;
+
+    if (fix.valid) {
+        drawTextClipped(s, textX, y,
+                        "me   " + fix.coordText() + "  " +
+                            std::to_string(fix.satellitesUsed) + " sat",
+                        textCols, theme::text);
+        y += kGlyphH;
+        std::string mine = "my fix " + meshAgeText((now - fix.updatedMs) / 1000);
+        if (fix.haveSpeed) {
+            char buf[24];
+            std::snprintf(buf, sizeof(buf), "  %.1f km/h", fix.speedKph);
+            mine += buf;
+        }
+        drawTextClipped(s, textX, y, mine, textCols, theme::textDim);
+    } else {
+        drawTextClipped(s, textX, y, gnss_.statusText(now), textCols, theme::warn);
+        y += kGlyphH;
+    }
+    y += kGlyphH + 2;
+    drawTextClipped(s, textX, y, evidence, textCols, theme::textDim);
+
+    std::string hint;
+    if (locateNode_ != 0) hint = "Enter chat  P share my fix  M mark theirs";
+    else if (isMark) hint = "D delete  M mark here";
+    else hint = "F on a node, or Enter on a mark";
+    drawHintBar(s, hint, "Esc back");
+}
+
+
+void App::drawCompassScreen(Surface& s) {
+    const uint64_t now = nowMs();
+    const int textX = 108;
+    const int textCols = std::max(1, (s.w - textX - 2) / kGlyphW);
+    const CompassReading& reading = compass_.reading();
+    const CompassCalibration& cal = compass_.calibration();
+    const bool fresh = reading.valid && now - reading.sampledMs <= Compass::kStaleMs;
+
+    // Heading-up, so the N rides the rim like a real compass card. No target
+    // here: this screen is about trusting the needle, not following it.
+    drawCompass(s, 52, 90, 38, false, 0.0, fresh, reading.headingDeg,
+                fresh ? reading.headingDeg : 0.0);
+    drawText(s, 8, 142, "o you", fresh ? theme::ok : theme::textDim);
+    drawText(s, 8, 151, fresh ? "rose: heading up" : "rose: north up", theme::textDim);
+
+    int y = kBodyY;
+    if (!compass_.available()) {
+        drawTextClipped(s, textX, y, "No magnetometer found", textCols, theme::warn);
+        y += kGlyphH;
+        drawTextClipped(s, textX, y, "no in_magn_*_raw under IIO here", textCols,
+                        theme::textDim);
+        y += kGlyphH + 4;
+        drawTextClipped(s, textX, y, "The Cardputer Zero exposes its", textCols, theme::textDim);
+        y += kGlyphH;
+        drawTextClipped(s, textX, y, "BMM150 under /sys/bus/iio/devices;", textCols, theme::textDim);
+        y += kGlyphH;
+        drawTextClipped(s, textX, y, "Locate uses the GNSS track instead.", textCols,
+                        theme::textDim);
+        drawHintBar(s, "G GNSS status", "Esc back");
+        return;
+    }
+
+    std::string title = compass_.magnetometerName().empty() ? "magnetometer"
+                                                            : compass_.magnetometerName();
+    title += " via IIO";
+    if (compass_.haveAccelerometer()) title += " + accel tilt";
+    drawTextClipped(s, textX, y, title, textCols, theme::accent);
+    y += kGlyphH + 3;
+
+    char buf[64];
+    if (fresh) {
+        std::snprintf(buf, sizeof(buf), "%03d", static_cast<int>(reading.headingDeg + 0.5) % 360);
+    } else {
+        std::snprintf(buf, sizeof(buf), "---");
+    }
+    drawTextScaled(s, textX, y, buf, 3, fresh ? theme::accent : theme::textDim);
+    y += 3 * kGlyphH + 2;
+
+    std::string kind;
+    if (!fresh) kind = reading.valid ? "stale sample" : "no sample yet";
+    else if (cal.declinationDeg != 0.0) {
+        std::snprintf(buf, sizeof(buf), "true; declination %+.1f", cal.declinationDeg);
+        kind = buf;
+    } else kind = "magnetic (compass.declination = 0)";
+    drawTextClipped(s, textX, y, kind, textCols, theme::textDim);
+    y += kGlyphH + 2;
+
+    if (fresh) {
+        std::snprintf(buf, sizeof(buf), "field %.0f uT", reading.fieldMicroTesla);
+        std::string field = buf;
+        if (reading.disturbed) field += "  DISTURBED";
+        if (reading.haveTilt) {
+            std::snprintf(buf, sizeof(buf), "  %s %.0f", reading.tiltDeg > 40.0 ? "TILTED" : "tilt",
+                          reading.tiltDeg);
+            field += buf;
+        }
+        drawTextClipped(s, textX, y, field, textCols,
+                        reading.disturbed || (reading.haveTilt && reading.tiltDeg > 40.0)
+                            ? theme::warn : theme::text);
+    }
+    y += kGlyphH + 3;
+
+    drawTextClipped(s, textX, y,
+                    cal.hardIron ? "hard iron: calibrated" : "hard iron: NOT calibrated",
+                    textCols, cal.hardIron ? theme::ok : theme::warn);
+    y += kGlyphH;
+    std::snprintf(buf, sizeof(buf), "mount offset %+.0f  %s", cal.mountOffsetDeg,
+                  cal.aligned ? "aligned" : "not aligned");
+    drawTextClipped(s, textX, y, buf, textCols, cal.aligned ? theme::ok : theme::textDim);
+    y += kGlyphH + 3;
+
+    if (compass_.calibrating()) {
+        std::snprintf(buf, sizeof(buf), "turning: %d samples  %d%% of circle",
+                      compass_.calibrationSamples(),
+                      static_cast<int>(compass_.calibrationCoverage() * 100.0 + 0.5));
+        drawTextClipped(s, textX, y, buf, textCols, theme::accent);
+        y += kGlyphH;
+    }
+    drawTextClipped(s, textX, y, "C: turn a full circle, then C again", textCols, theme::textDim);
+    y += kGlyphH;
+    drawTextClipped(s, textX, y, "A: walking straight, with a fix", textCols, theme::textDim);
+    y += kGlyphH;
+    drawTextClipped(s, textX, y, "config.ini: compass.declination", textCols, theme::textDim);
+
+    drawHintBar(s, compass_.calibrating() ? "turn slowly through a full circle, then C"
+                                          : "C calibrate  A align to GNSS track  G GNSS",
+                "Esc back");
+}
+
+void App::drawMarks(Surface& s) {
+    const int rows = bodyRows(false);
+    const int cols = columns();
+    markList_.clamp(static_cast<int>(marks_.size()), rows);
+
+    if (marks_.empty()) {
+        drawText(s, 4, kBodyY, "No saved places yet.", theme::warn);
+        drawText(s, 4, kBodyY + 2 * kGlyphH, "N marks this station's own GNSS fix.",
+                 theme::textDim);
+        drawText(s, 4, kBodyY + 3 * kGlyphH, "M on the Locate screen marks a node's fix.",
+                 theme::textDim);
+        drawText(s, 4, kBodyY + 5 * kGlyphH, "Marks stay on this device. Nothing is sent.",
+                 theme::textDim);
+        drawHintBar(s, "N new mark", "Esc back");
+        return;
+    }
+
+    const GnssFix& fix = gnss_.fix();
+    for (int i = 0; i < rows; ++i) {
+        const int idx = markList_.top + i;
+        if (idx >= static_cast<int>(marks_.size())) break;
+        const Mark& mark = marks_[static_cast<size_t>(idx)];
+        const int y = kBodyY + i * kGlyphH;
+        const bool selected = (idx == markList_.sel);
+        if (selected) {
+            fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
+            fillRect(s, 0, y, 2, kGlyphH, theme::accent);
+        }
+        drawText(s, 2, y, selected ? ">" : " ", theme::accent);
+        std::string right;
+        if (fix.valid) {
+            right = meshRangeText(meshDistanceM(fix.latitude, fix.longitude, mark.latitude,
+                                                mark.longitude)) +
+                    " " +
+                    meshCompassPoint(meshBearingDeg(fix.latitude, fix.longitude, mark.latitude,
+                                                    mark.longitude));
+        } else {
+            right = mark.coordText();
+        }
+        drawTextClipped(s, 2 + kGlyphW, y, mark.name,
+                        cols - 4 - static_cast<int>(right.size()),
+                        selected ? theme::accent : theme::text);
+        drawText(s, s.w - 4 - textWidth(right), y, right, theme::textDim);
+    }
+    drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, markList_.top, rows,
+                  static_cast<int>(marks_.size()));
+
+    // The coordinate is on the row when there is no fix and on the Locate
+    // screen always; the hint bar has room for the keys, not for both.
+    drawHintBar(s, "Enter locate  N new mark  D delete", "Esc back");
+}
+
+void App::drawQuickMsg(Surface& s) {
+    // The conversation it will send into stays visible behind the picker.
+    drawChat(s);
+    drawMenuModal(s, "Quick messages", quickMsgMenu_, quickMsgList_);
+    std::string hint = "Enter select   Esc back";
+    if (!quickMsgMenu_.empty()) {
+        const std::string& h = quickMsgMenu_[static_cast<size_t>(quickMsgList_.sel)].hint;
+        if (!h.empty()) hint = h;
+    }
+    drawHintBar(s, hint, "Esc back");
 }
 
 void App::drawModal(Surface& s) {
@@ -1078,7 +1563,8 @@ void App::drawModal(Surface& s) {
     std::vector<std::string> body = wrapText(modalBody_, innerCols);
     if (body.size() > 9) body.resize(9);
 
-    const int h = static_cast<int>(body.size()) * kGlyphH + 3 * kGlyphH + 10;
+    const int inputH = modalIsInput_ ? kGlyphH + 6 : 0;
+    const int h = static_cast<int>(body.size()) * kGlyphH + 3 * kGlyphH + 10 + inputH;
     const int w = s.w - 20;
     const int x = 10;
     const int y = std::max(2, (s.h - h) / 2);
@@ -1088,8 +1574,9 @@ void App::drawModal(Surface& s) {
 
     fillRect(s, x + 3, y + 3, w, h, theme::black);
     fillRect(s, x, y, w, h, theme::panel);
-    rect(s, x, y, w, h, modalIsConfirm_ ? theme::accent : theme::rule);
-    fillRect(s, x + 1, y + 1, w - 2, kGlyphH + 2, modalIsConfirm_ ? theme::accentDim : theme::panelHi);
+    rect(s, x, y, w, h, modalIsConfirm_ || modalIsInput_ ? theme::accent : theme::rule);
+    fillRect(s, x + 1, y + 1, w - 2, kGlyphH + 2,
+             modalIsConfirm_ || modalIsInput_ ? theme::accentDim : theme::panelHi);
     drawTextClipped(s, x + 4, y + 2, modalTitle_, innerCols, theme::text);
 
     int ty = y + kGlyphH + 6;
@@ -1100,9 +1587,34 @@ void App::drawModal(Surface& s) {
         ty += kGlyphH;
     }
 
+    if (modalIsInput_) {
+        // One editable line, with the same block cursor as the terminal so
+        // it is obviously the thing the keyboard is talking to.
+        const int iy = ty + 2;
+        fillRect(s, x + 4, iy, w - 8, kGlyphH + 2, theme::bg);
+        rect(s, x + 4, iy, w - 8, kGlyphH + 2, theme::accent);
+        const std::string& text = modalEditor_.text();
+        const int avail = innerCols - 3;
+        int scroll = 0;
+        if (modalEditor_.cursor() >= avail) scroll = modalEditor_.cursor() - avail + 1;
+        const std::string shown = text.substr(static_cast<size_t>(scroll),
+                                              static_cast<size_t>(avail));
+        drawText(s, x + 8, iy + 1, ">", theme::accent);
+        drawText(s, x + 8 + 2 * kGlyphW, iy + 1, shown, theme::text);
+        if (frame_ % 30 < 20) {
+            const int ci = modalEditor_.cursor();
+            const char under = ci < static_cast<int>(text.size())
+                                   ? text[static_cast<size_t>(ci)] : ' ';
+            const int cx = x + 8 + (2 + ci - scroll) * kGlyphW;
+            fillRect(s, cx, iy + 1, kGlyphW, kGlyphH, theme::accent);
+            drawChar(s, cx, iy + 1, under, theme::bg);
+        }
+    }
+
     const std::string prompt = modalIsConfirm_
                                    ? "Enter/Y " + modalYes_ + "     Esc/N cancel"
-                                   : "Enter or Esc to close";
+                                   : modalIsInput_ ? "Enter save     Esc cancel"
+                                                   : "Enter or Esc to close";
     const int promptY = y + h - kGlyphH - 3;
     hLine(s, x + 1, promptY - 3, w - 2, theme::rule);
     drawText(s, x + 4, promptY, prompt, theme::accent);
@@ -1126,6 +1638,10 @@ void App::render() {
     case Screen::About:    drawAbout(s); break;
     case Screen::Nodes:    drawNodes(s); break;
     case Screen::Chat:     drawChat(s); break;
+    case Screen::Locate:   drawLocate(s); break;
+    case Screen::Marks:    drawMarks(s); break;
+    case Screen::QuickMsg: drawQuickMsg(s); break;
+    case Screen::Compass:  drawCompassScreen(s); break;
     }
     drawModal(s);
 }

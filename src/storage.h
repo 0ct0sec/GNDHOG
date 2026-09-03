@@ -31,6 +31,9 @@ public:
     std::vector<std::string> listMeshChatFiles() const;
     std::string configPath() const;
     std::string historyPath() const;
+    // Saved places: the car, the launch pad, a crash site. One file, beside
+    // the config, because it is the one thing worth copying off by hand.
+    std::string marksPath() const;
 
     // Durable replacement: temp file, fsync, rename, then fsync the directory.
     bool writeAtomic(const std::string& path, const std::string& content,

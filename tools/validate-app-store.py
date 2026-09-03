@@ -179,7 +179,7 @@ def validate_manifest(errors: list[str]) -> dict:
     elif permissions != {
         "camera": False,
         "microphone": False,
-        "imu": False,
+        "imu": True,
         "network": False,
         "additional_hardware": True,
         "background_service": False,
