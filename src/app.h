@@ -197,6 +197,10 @@ private:
                        const char* prompt, Color promptColor, bool tallCursor);
     // The highlight behind the selected row of a list screen.
     void drawRowSelection(Surface& s, int y, bool selected);
+    // A row with a name on the left and a dim figure on the right: a backup's
+    // size, a mark's range from here.
+    void drawSplitRow(Surface& s, int y, bool selected, const std::string& left,
+                      const std::string& right);
 
     void setupMenus();
     std::vector<MenuItem>& currentMenuItems();

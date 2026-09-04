@@ -137,6 +137,34 @@ std::string nodeEvidenceText(const MeshNode& node) {
     return out;
 }
 
+// The rows of a list screen: `draw(index, y, selected)` for each row that
+// fits from st.top down, then the scrollbar beside them. Every list screen
+// is this loop around a row of its own.
+template <class Draw>
+void drawListRows(Surface& s, int y0, const ListState& st, int rows, int count, Draw draw) {
+    for (int i = 0; i < rows; ++i) {
+        const int index = st.top + i;
+        if (index >= count) break;
+        draw(index, y0 + i * kGlyphH, index == st.sel);
+    }
+    drawScrollbar(s, s.w - 2, y0, rows * kGlyphH, st.top, rows, count);
+}
+
+// The highlighted item's own hint, or the generic one when it has none.
+std::string selectedHint(const std::vector<MenuItem>& items, const ListState& st) {
+    if (!items.empty()) {
+        const std::string& hint = items[static_cast<size_t>(st.sel)].hint;
+        if (!hint.empty()) return hint;
+    }
+    return "Enter select   Esc back";
+}
+
+// "1.4km NE": how far a place is from this station's fix, and which way.
+std::string rangeText(const GnssFix& fix, double latitude, double longitude) {
+    return meshRangeText(meshDistanceM(fix.latitude, fix.longitude, latitude, longitude)) + " " +
+           meshCompassPoint(meshBearingDeg(fix.latitude, fix.longitude, latitude, longitude));
+}
+
 const char* const kHelpText[] = {
     "GNDHOG ZERO - Betaflight CLI for Cardputer Zero",
     "",
@@ -439,24 +467,15 @@ void App::drawList(Surface& s, const std::vector<MenuItem>& items, ListState& st
         drawText(s, 4, kBodyY, "(nothing here)", theme::textDim);
         return;
     }
-    for (int i = 0; i < visibleRows; ++i) {
-        const int idx = st.top + i;
-        if (idx >= static_cast<int>(items.size())) break;
-        const int y = kBodyY + i * kGlyphH;
-        const bool selected = showSelection && (idx == st.sel);
-        if (selected) {
-            fillRect(s, 0, y, s.w - 3, kGlyphH, theme::accent);
-        }
-        const Color fg = items[static_cast<size_t>(idx)].enabled
-                             ? (selected ? theme::bg : theme::text)
-                             : theme::textDim;
-        drawTextClipped(s, 4, y, items[static_cast<size_t>(idx)].label,
-                        cols - 4, fg);
-        drawText(s, s.w - kGlyphW - 4, y, ">",
-                 selected ? theme::bg : theme::accent);
-    }
-    drawScrollbar(s, s.w - 2, kBodyY, visibleRows * kGlyphH, st.top, visibleRows,
-                  static_cast<int>(items.size()));
+    const auto row = [&](int idx, int y, bool highlighted) {
+        const bool selected = showSelection && highlighted;
+        if (selected) fillRect(s, 0, y, s.w - 3, kGlyphH, theme::accent);
+        const MenuItem& item = items[static_cast<size_t>(idx)];
+        const Color fg = item.enabled ? (selected ? theme::bg : theme::text) : theme::textDim;
+        drawTextClipped(s, 4, y, item.label, cols - 4, fg);
+        drawText(s, s.w - kGlyphW - 4, y, ">", selected ? theme::bg : theme::accent);
+    };
+    drawListRows(s, kBodyY, st, visibleRows, static_cast<int>(items.size()), row);
 }
 
 void App::drawMenuModal(Surface& s, const std::string& title,
@@ -512,12 +531,8 @@ void App::drawPorts(Surface& s) {
         drawText(s, 4, kBodyY + 3 * kGlyphH, "plug the FC or radio into USB-A,", theme::textDim);
         drawText(s, 4, kBodyY + 4 * kGlyphH, "then press R to rescan.", theme::textDim);
     } else {
-        for (int i = 0; i < rows; ++i) {
-            const int idx = portList_.top + i;
-            if (idx >= static_cast<int>(ports_.size())) break;
+        const auto row = [&](int idx, int y, bool selected) {
             const PortInfo& p = ports_[static_cast<size_t>(idx)];
-            const int y = kBodyY + i * kGlyphH;
-            const bool selected = (idx == portList_.sel);
             drawRowSelection(s, y, selected);
             drawText(s, 2, y, selected ? ">" : " ", theme::accent);
             Color fg = theme::text;
@@ -538,9 +553,8 @@ void App::drawPorts(Surface& s) {
                 else if (p.looksLikeFlightController()) fg = theme::ok;
             }
             drawTextClipped(s, 2 + kGlyphW, y, text, cols - 3, fg);
-        }
-        drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, portList_.top, rows,
-                      static_cast<int>(ports_.size()));
+        };
+        drawListRows(s, kBodyY, portList_, rows, static_cast<int>(ports_.size()), row);
     }
 
     std::string hint = "R scan  M protocol  F files  G GNSS  H help  A about";
@@ -668,17 +682,11 @@ void App::drawMenu(Surface& s) {
         drawMenuModal(s, title, items, st);
     }
 
-    std::string hint = "Enter select   Esc back";
-    if (!items.empty()) {
-        const std::string& h = items[static_cast<size_t>(st.sel)].hint;
-        if (!h.empty()) hint = h;
-    }
-    drawHintBar(s, hint, "Esc back");
+    drawHintBar(s, selectedHint(items, st), "Esc back");
 }
 
 void App::drawFiles(Surface& s) {
     const int rows = bodyRows(false);
-    const int cols = columns();
     fileList_.clamp(static_cast<int>(files_.size()), rows);
 
     if (files_.empty()) {
@@ -691,25 +699,15 @@ void App::drawFiles(Surface& s) {
         return;
     }
 
-    for (int i = 0; i < rows; ++i) {
-        const int idx = fileList_.top + i;
-        if (idx >= static_cast<int>(files_.size())) break;
+    const auto row = [&](int idx, int y, bool selected) {
         const BackupFile& f = files_[static_cast<size_t>(idx)];
-        const int y = kBodyY + i * kGlyphH;
-        const bool selected = (idx == fileList_.sel);
-        drawRowSelection(s, y, selected);
-        drawText(s, 2, y, selected ? ">" : " ", theme::accent);
         // Trim the fixed BTFL_cli_ prefix: it is on every file and wastes width.
         std::string name = f.name;
         if (startsWith(name, "BTFL_cli_")) name = name.substr(9);
         if (name.size() > 11 && endsWith(name, "_backup.txt")) name.resize(name.size() - 11);
-        const std::string size = f.sizeText();
-        drawTextClipped(s, 2 + kGlyphW, y, name, cols - 4 - static_cast<int>(size.size()),
-                        selected ? theme::accent : theme::text);
-        drawText(s, s.w - 4 - textWidth(size), y, size, theme::textDim);
-    }
-    drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, fileList_.top, rows,
-                  static_cast<int>(files_.size()));
+        drawSplitRow(s, y, selected, name, f.sizeText());
+    };
+    drawListRows(s, kBodyY, fileList_, rows, static_cast<int>(files_.size()), row);
 
     const BackupFile& sel = files_[static_cast<size_t>(fileList_.sel)];
     drawHintBar(s, sel.dateText() + "   Enter restore   V view   D delete", "Esc back");
@@ -791,21 +789,16 @@ void App::drawDiagnostics(Surface& s) {
     }
     drawTextClipped(s, 4, kBodyY + 13, sub, cols - 2, subColor);
 
-    for (int i = 0; i < rows; ++i) {
-        const int index = diagnosticList_.top + i;
-        if (index >= count) break;
+    const auto row = [&](int index, int y, bool selected) {
         const DiagnosticFinding& finding = diagnosticReport_.findings[static_cast<size_t>(index)];
-        const int y = listY + i * kGlyphH;
-        const bool selected = index == diagnosticList_.sel;
         if (selected) fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
         const Color c = colorFor(finding.level);
         drawText(s, 2, y, markerFor(finding.level), c);
         drawTextClipped(s, 2 + 3 * kGlyphW, y,
                         finding.title + "  " + finding.detail, cols - 5,
                         selected ? c : (finding.level == DiagnosticLevel::Info ? theme::textDim : c));
-    }
-    drawScrollbar(s, s.w - 2, listY, rows * kGlyphH,
-                  diagnosticList_.top, rows, count);
+    };
+    drawListRows(s, listY, diagnosticList_, rows, count, row);
     drawHintBar(s, "R rerun  S save report  V raw terminal", "Esc back");
 }
 
@@ -907,11 +900,7 @@ void App::drawNodes(Surface& s) {
     const uint64_t now = nowMs();
     const GnssFix& fix = gnss_.fix();
 
-    for (int i = 0; i < rows; ++i) {
-        const int index = nodeList_.top + i;
-        if (index >= count) break;
-        const int y = kBodyY + i * kGlyphH;
-        const bool selected = index == nodeList_.sel;
+    const auto row = [&](int index, int y, bool selected) {
         drawRowSelection(s, y, selected);
 
         const uint32_t peer = peerForNodeRow(index);
@@ -954,8 +943,8 @@ void App::drawNodes(Surface& s) {
         if (!right.empty()) {
             drawText(s, s.w - 6 - textWidth(right), y, right, theme::textDim);
         }
-    }
-    drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, nodeList_.top, rows, count);
+    };
+    drawListRows(s, kBodyY, nodeList_, rows, count, row);
 
     // While the database is still arriving, say so rather than presenting a
     // one-row list as if that were the whole mesh.
@@ -980,13 +969,7 @@ void App::drawNodes(Surface& s) {
             if (node->viaMqtt) hint += "  mqtt";
             // Range needs two real fixes: ours from the cap, theirs from the mesh.
             if (fix.valid && node->position.valid) {
-                const double metres = meshDistanceM(fix.latitude, fix.longitude,
-                                                    node->position.latitude,
-                                                    node->position.longitude);
-                const double bearing = meshBearingDeg(fix.latitude, fix.longitude,
-                                                      node->position.latitude,
-                                                      node->position.longitude);
-                hint += "  " + meshRangeText(metres) + " " + meshCompassPoint(bearing);
+                hint += "  " + rangeText(fix, node->position.latitude, node->position.longitude);
             } else if (node->position.valid) {
                 hint += "  " + node->position.coordText();
             }
@@ -1437,7 +1420,6 @@ void App::drawCompassScreen(Surface& s) {
 
 void App::drawMarks(Surface& s) {
     const int rows = bodyRows(false);
-    const int cols = columns();
     markList_.clamp(static_cast<int>(marks_.size()), rows);
 
     if (marks_.empty()) {
@@ -1453,31 +1435,15 @@ void App::drawMarks(Surface& s) {
     }
 
     const GnssFix& fix = gnss_.fix();
-    for (int i = 0; i < rows; ++i) {
-        const int idx = markList_.top + i;
-        if (idx >= static_cast<int>(marks_.size())) break;
+    const auto row = [&](int idx, int y, bool selected) {
         const Mark& mark = marks_[static_cast<size_t>(idx)];
-        const int y = kBodyY + i * kGlyphH;
-        const bool selected = (idx == markList_.sel);
-        drawRowSelection(s, y, selected);
-        drawText(s, 2, y, selected ? ">" : " ", theme::accent);
-        std::string right;
-        if (fix.valid) {
-            right = meshRangeText(meshDistanceM(fix.latitude, fix.longitude, mark.latitude,
-                                                mark.longitude)) +
-                    " " +
-                    meshCompassPoint(meshBearingDeg(fix.latitude, fix.longitude, mark.latitude,
-                                                    mark.longitude));
-        } else {
-            right = mark.coordText();
-        }
-        drawTextClipped(s, 2 + kGlyphW, y, mark.name,
-                        cols - 4 - static_cast<int>(right.size()),
-                        selected ? theme::accent : theme::text);
-        drawText(s, s.w - 4 - textWidth(right), y, right, theme::textDim);
-    }
-    drawScrollbar(s, s.w - 2, kBodyY, rows * kGlyphH, markList_.top, rows,
-                  static_cast<int>(marks_.size()));
+        // Range and direction from here while there is a fix; the coordinate
+        // itself when there is not.
+        const std::string right = fix.valid ? rangeText(fix, mark.latitude, mark.longitude)
+                                            : mark.coordText();
+        drawSplitRow(s, y, selected, mark.name, right);
+    };
+    drawListRows(s, kBodyY, markList_, rows, static_cast<int>(marks_.size()), row);
 
     // The coordinate is on the row when there is no fix and on the Locate
     // screen always; the hint bar has room for the keys, not for both.
@@ -1488,12 +1454,7 @@ void App::drawQuickMsg(Surface& s) {
     // The conversation it will send into stays visible behind the picker.
     drawChat(s);
     drawMenuModal(s, "Quick messages", quickMsgMenu_, quickMsgList_);
-    std::string hint = "Enter select   Esc back";
-    if (!quickMsgMenu_.empty()) {
-        const std::string& h = quickMsgMenu_[static_cast<size_t>(quickMsgList_.sel)].hint;
-        if (!h.empty()) hint = h;
-    }
-    drawHintBar(s, hint, "Esc back");
+    drawHintBar(s, selectedHint(quickMsgMenu_, quickMsgList_), "Esc back");
 }
 
 void App::drawInputLine(Surface& s, int x, int y, const LineEditor& editor, int avail,
@@ -1520,6 +1481,17 @@ void App::drawRowSelection(Surface& s, int y, bool selected) {
     if (!selected) return;
     fillRect(s, 0, y, s.w - 3, kGlyphH, theme::panelHi);
     fillRect(s, 0, y, 2, kGlyphH, theme::accent);
+}
+
+// A list row with a name on the left and a dim figure on the right: a backup's
+// size, a mark's range. The name gives way to the figure, never the reverse.
+void App::drawSplitRow(Surface& s, int y, bool selected, const std::string& left,
+                       const std::string& right) {
+    drawRowSelection(s, y, selected);
+    drawText(s, 2, y, selected ? ">" : " ", theme::accent);
+    drawTextClipped(s, 2 + kGlyphW, y, left, columns() - 4 - static_cast<int>(right.size()),
+                    selected ? theme::accent : theme::text);
+    drawText(s, s.w - 4 - textWidth(right), y, right, theme::textDim);
 }
 
 void App::drawModal(Surface& s) {
