@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <sstream>
 
 namespace bf {
 namespace {
@@ -92,12 +91,10 @@ void Completer::addParam(const std::string& name) {
 }
 
 void Completer::harvest(const std::string& text) {
-    std::istringstream in(text);
-    std::string line;
-    while (std::getline(in, line)) {
+    for (const std::string& line : splitLines(text)) {
         std::string s = trim(line);
         if (s.empty() || s[0] == '#') continue;
-        if (s.rfind("set ", 0) == 0) s = trim(s.substr(4));
+        if (startsWith(s, "set ")) s = trim(s.substr(4));
         // Both `name = value` (dump) and `name = value` (get) reduce to this.
         const size_t eq = s.find('=');
         if (eq == std::string::npos) continue;
@@ -183,17 +180,15 @@ RiskNote riskFor(const std::string& line) {
 }
 
 std::string craftNameFromDump(const std::string& dump) {
-    std::istringstream in(dump);
-    std::string line;
     std::string name;
-    while (std::getline(in, line)) {
+    for (const std::string& line : splitLines(dump)) {
         const std::string s = trim(line);
-        if (s.rfind("set craft_name", 0) == 0) {
+        if (startsWith(s, "set craft_name")) {
             const size_t eq = s.find('=');
             if (eq != std::string::npos) name = trim(s.substr(eq + 1));
-        } else if (s.rfind("# name:", 0) == 0 && name.empty()) {
+        } else if (startsWith(s, "# name:") && name.empty()) {
             name = trim(s.substr(7));
-        } else if (s.rfind("name ", 0) == 0 && name.empty()) {
+        } else if (startsWith(s, "name ") && name.empty()) {
             name = trim(s.substr(5));
         }
     }
@@ -202,11 +197,9 @@ std::string craftNameFromDump(const std::string& dump) {
 }
 
 std::string boardNameFromDump(const std::string& dump) {
-    std::istringstream in(dump);
-    std::string line;
-    while (std::getline(in, line)) {
+    for (const std::string& line : splitLines(dump)) {
         const std::string s = trim(line);
-        if (s.rfind("board_name ", 0) == 0) return trim(s.substr(11));
+        if (startsWith(s, "board_name ")) return trim(s.substr(11));
     }
     return {};
 }

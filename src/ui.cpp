@@ -701,10 +701,8 @@ void App::drawFiles(Surface& s) {
         drawText(s, 2, y, selected ? ">" : " ", theme::accent);
         // Trim the fixed BTFL_cli_ prefix: it is on every file and wastes width.
         std::string name = f.name;
-        if (name.rfind("BTFL_cli_", 0) == 0) name = name.substr(9);
-        if (name.size() > 11 && name.compare(name.size() - 11, 11, "_backup.txt") == 0) {
-            name.resize(name.size() - 11);
-        }
+        if (startsWith(name, "BTFL_cli_")) name = name.substr(9);
+        if (name.size() > 11 && endsWith(name, "_backup.txt")) name.resize(name.size() - 11);
         const std::string size = f.sizeText();
         drawTextClipped(s, 2 + kGlyphW, y, name, cols - 4 - static_cast<int>(size.size()),
                         selected ? theme::accent : theme::text);
@@ -933,8 +931,7 @@ void App::drawNodes(Surface& s) {
         } else {
             const MeshNode& node = nodes[static_cast<size_t>(index - 1)];
             tag = node.label();
-            if (tag.size() > 4) tag.resize(4);
-            while (tag.size() < 4) tag.push_back(' ');
+            tag.resize(4, ' ');
             title = node.title();
             if (node.isSelf) {
                 title += "  (this radio)";
@@ -1043,8 +1040,7 @@ void App::rebuildChatRows() {
         } else {
             const MeshNode* from = mesh_.findNode(message.from);
             tag = from ? from->label() : meshNodeIdText(message.from).substr(1, 4);
-            if (tag.size() > 4) tag.resize(4);
-            while (tag.size() < 4) tag.push_back(' ');
+            tag.resize(4, ' ');
             kind = LineKind::Fc;
         }
 
@@ -1284,9 +1280,7 @@ void App::drawLocate(Surface& s) {
     std::string turn;
     Color turnColor = theme::text;
     if (haveRange && haveHeading) {
-        char buf[8];
-        std::snprintf(buf, sizeof(buf), "%03d", static_cast<int>(std::lround(heading)) % 360);
-        turn = std::string("you ") + buf + " " + headingSource + "  " +
+        turn = "you " + formatHeading(heading) + " " + headingSource + "  " +
                meshTurnText(meshRelativeTurnDeg(bearing, heading));
     } else if (haveRange && compass_.available() && !compass_.calibration().hardIron) {
         turn = "compass needs calibrating (menu)";
@@ -1385,15 +1379,11 @@ void App::drawCompassScreen(Surface& s) {
     drawTextClipped(s, textX, y, title, textCols, theme::accent);
     y += kGlyphH + 3;
 
-    char buf[64];
-    if (fresh) {
-        std::snprintf(buf, sizeof(buf), "%03d", static_cast<int>(reading.headingDeg + 0.5) % 360);
-    } else {
-        std::snprintf(buf, sizeof(buf), "---");
-    }
-    drawTextScaled(s, textX, y, buf, 3, fresh ? theme::accent : theme::textDim);
+    drawTextScaled(s, textX, y, fresh ? formatHeading(reading.headingDeg) : std::string("---"),
+                   3, fresh ? theme::accent : theme::textDim);
     y += 3 * kGlyphH + 2;
 
+    char buf[64];
     std::string kind;
     if (!fresh) kind = reading.valid ? "stale sample" : "no sample yet";
     else if (cal.declinationDeg != 0.0) {

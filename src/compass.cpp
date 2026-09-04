@@ -1,13 +1,12 @@
 #include "compass.h"
 #include "storage.h"
+#include "strutil.h"
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
-#include <dirent.h>
 #include <sys/stat.h>
 
 namespace bf {
@@ -49,17 +48,7 @@ bool Compass::discoverIn(const std::string& root) {
     magnDir_.clear();
     accelDir_.clear();
     magnName_.clear();
-    DIR* d = ::opendir(root.c_str());
-    if (!d) return false;
-    std::vector<std::string> entries;
-    while (dirent* e = ::readdir(d)) {
-        const std::string name = e->d_name;
-        if (name == "." || name == "..") continue;
-        entries.push_back(name);
-    }
-    ::closedir(d);
-    std::sort(entries.begin(), entries.end());
-    for (const std::string& name : entries) {
+    for (const std::string& name : listDirectory(root)) {
         const std::string dir = root + "/" + name;
         if (magnDir_.empty() && fileExists(dir + "/in_magn_x_raw") &&
             fileExists(dir + "/in_magn_y_raw") && fileExists(dir + "/in_magn_z_raw")) {
@@ -291,17 +280,11 @@ bool Compass::alignTo(double trueHeadingDeg, uint64_t nowMs) {
 std::string Compass::statusText(uint64_t nowMs) const {
     if (!available()) return "no magnetometer";
     if (!reading_.valid) return "compass: no sample yet";
-    char buf[96];
-    if (!cal_.hardIron) {
-        std::snprintf(buf, sizeof(buf), "compass %03d uncalibrated", static_cast<int>(reading_.headingDeg + 0.5) % 360);
-        return buf;
-    }
-    std::snprintf(buf, sizeof(buf), "compass %03d%s%s%s",
-                  static_cast<int>(reading_.headingDeg + 0.5) % 360,
-                  reading_.disturbed ? " disturbed" : "",
-                  reading_.haveTilt && reading_.tiltDeg > 40.0 ? " tilted" : "",
-                  nowMs - reading_.sampledMs > kStaleMs ? " stale" : "");
-    return buf;
+    const std::string heading = "compass " + formatHeading(reading_.headingDeg);
+    if (!cal_.hardIron) return heading + " uncalibrated";
+    return heading + (reading_.disturbed ? " disturbed" : "") +
+           (reading_.haveTilt && reading_.tiltDeg > 40.0 ? " tilted" : "") +
+           (nowMs - reading_.sampledMs > kStaleMs ? " stale" : "");
 }
 
 } // namespace bf

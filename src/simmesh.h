@@ -54,6 +54,12 @@ private:
     void emitFrame(const std::string& payload);
     void emitConsole(const std::string& text);
     void flush();
+    // Packet ids for what the fixture radio "hears": unique is all they need
+    // to be, and an LCG keeps a run reproducible.
+    uint32_t nextPacketId() {
+        packetSeed_ = packetSeed_ * 1664525u + 1013904223u;
+        return packetSeed_;
+    }
 
     int master_ = -1;
     std::string slavePath_;

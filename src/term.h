@@ -75,7 +75,7 @@ public:
 
 private:
     void pushLine(const std::string& text, LineKind kind);
-    void rewrapLast();
+    void flushPartial();
     void rewrapAll();
     void appendRowsFor(int lineIndex);
 

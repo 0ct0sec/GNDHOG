@@ -1,4 +1,5 @@
 #include "simfc.h"
+#include "bfsession.h"
 #include "simpty.h"
 #include "strutil.h"
 
@@ -119,17 +120,7 @@ void SimFc::flush() {
 }
 
 void SimFc::emitMsp(uint8_t command, const std::vector<uint8_t>& payload) {
-    std::string frame = "$M>";
-    const uint8_t size = static_cast<uint8_t>(payload.size());
-    frame.push_back(static_cast<char>(size));
-    frame.push_back(static_cast<char>(command));
-    uint8_t checksum = size ^ command;
-    for (uint8_t byte : payload) {
-        frame.push_back(static_cast<char>(byte));
-        checksum ^= byte;
-    }
-    frame.push_back(static_cast<char>(checksum));
-    emit(frame);
+    emit(encodeMspFrame('>', command, payload));
 }
 
 void SimFc::respondMsp(uint8_t command, const std::vector<uint8_t>& payload) {
@@ -152,11 +143,9 @@ void SimFc::respondMsp(uint8_t command, const std::vector<uint8_t>& payload) {
         if (pitModeSupported_) vtxPitMode_ = payload[3] != 0;
         emitMsp(command);
     } else {
-        std::string frame = "$M!";
-        frame.push_back(0);
-        frame.push_back(static_cast<char>(command));
-        frame.push_back(static_cast<char>(command));
-        emit(frame);
+        // The FC's "no such command" is the same frame with '!' for its
+        // direction and nothing in it.
+        emit(encodeMspFrame('!', command, {}));
     }
 }
 
@@ -164,7 +153,7 @@ void SimFc::respond(const std::string& raw) {
     const std::string cmd = trim(raw);
 
     if (!cliMode_) {
-        if (cmd.rfind("#", 0) == 0) {
+        if (startsWith(cmd, "#")) {
             cliMode_ = true;
             emit("\r\nEntering CLI Mode, type 'exit' to return, or 'help'\r\n\r\n# ");
         }
@@ -204,7 +193,7 @@ void SimFc::respond(const std::string& raw) {
         emit("Leaving CLI mode, unsaved changes lost.\r\n");
         cliMode_ = false;
         return;
-    } else if (cmd.rfind("set ", 0) == 0) {
+    } else if (startsWith(cmd, "set ")) {
         const std::string body = trim(cmd.substr(4));
         const size_t eq = body.find('=');
         if (eq == std::string::npos) {
@@ -215,16 +204,16 @@ void SimFc::respond(const std::string& raw) {
             params_[name] = value;
             emit(name + " set to " + value + "\r\n");
         }
-    } else if (cmd.rfind("get ", 0) == 0) {
+    } else if (startsWith(cmd, "get ")) {
         const std::string name = trim(cmd.substr(4));
         const auto it = params_.find(name);
         emit(it == params_.end() ? "Invalid name\r\n"
                                  : name + " = " + it->second + "\r\n");
     } else if (cmd == "batch start" || cmd == "batch end" ||
-               cmd.rfind("profile", 0) == 0 || cmd.rfind("rateprofile", 0) == 0 ||
-               cmd.rfind("battery_profile", 0) == 0 || cmd.rfind("feature", 0) == 0 ||
-               cmd.rfind("aux ", 0) == 0 || cmd.rfind("board_name", 0) == 0 ||
-               cmd.rfind("manufacturer_id", 0) == 0 || cmd.rfind("vtxtable", 0) == 0) {
+               startsWith(cmd, "profile") || startsWith(cmd, "rateprofile") ||
+               startsWith(cmd, "battery_profile") || startsWith(cmd, "feature") ||
+               startsWith(cmd, "aux ") || startsWith(cmd, "board_name") ||
+               startsWith(cmd, "manufacturer_id") || startsWith(cmd, "vtxtable")) {
         // Accepted silently, as the real CLI does inside a batch.
     } else {
         emit("Unknown command, try 'help'\r\n");

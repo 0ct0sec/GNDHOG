@@ -113,6 +113,15 @@ char baseChar(int code) {
     }
 }
 
+// The base layer's character with Shift and Caps Lock applied: Caps only
+// turns letters, and Shift on a letter under Caps turns it back.
+char shiftedBaseChar(int code, bool shift, bool caps) {
+    const char c = baseChar(code);
+    if (!c) return 0;
+    const bool upper = (c >= 'a' && c <= 'z') ? (shift != caps) : shift;
+    return upper ? shiftChar(c) : c;
+}
+
 Key specialForCode(int code) {
     switch (code) {
     case KEnter: case KKpEnter: return Key::Enter;
@@ -339,11 +348,7 @@ KeyEvent KeyDecoder::make(int code, int scan, bool repeated) const {
         c = symChar(scan);
         if (c && shift_) c = shiftChar(c);
     } else {
-        c = baseChar(code);
-        if (c) {
-            const bool upper = (c >= 'a' && c <= 'z') ? (shift_ != caps_) : shift_;
-            if (upper) c = shiftChar(c);
-        }
+        c = shiftedBaseChar(code, shift_, caps_);
     }
     if (c) {
         e.key = Key::Char;
@@ -364,10 +369,8 @@ KeyEvent fromKeycodeOnly(int code, bool shift, bool caps, bool ctrl, bool alt) {
         e.key = special;
         return e;
     }
-    char c = baseChar(code);
+    const char c = shiftedBaseChar(code, shift, caps);
     if (c) {
-        const bool upper = (c >= 'a' && c <= 'z') ? (shift != caps) : shift;
-        if (upper) c = shiftChar(c);
         e.key = Key::Char;
         e.ch = c;
     }

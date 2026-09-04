@@ -72,9 +72,11 @@ public:
     std::string get(const std::string& key, const std::string& fallback = "") const;
     int getInt(const std::string& key, int fallback) const;
     bool getBool(const std::string& key, bool fallback) const;
+    double getDouble(const std::string& key, double fallback) const;
     void set(const std::string& key, const std::string& value);
     void setInt(const std::string& key, int value);
     void setBool(const std::string& key, bool value);
+    void setDouble(const std::string& key, double value);   // three decimals
     const std::map<std::string, std::string>& all() const { return values_; }
 
 private:
@@ -91,6 +93,10 @@ std::string timestampCompact();          // 20260831_135905
 // The first line of a small text file -- a sysfs attribute, usually -- with
 // trailing whitespace removed. Empty when the file cannot be read.
 std::string readFirstLine(const std::string& path);
+// The names in a directory, sorted, without . and .. -- empty when it cannot
+// be opened. readdir order is whatever the filesystem feels like, and every
+// caller that takes "the first" one needs the same answer across launches.
+std::vector<std::string> listDirectory(const std::string& dir);
 std::string sanitizeForFilename(const std::string& s);
 
 } // namespace bf

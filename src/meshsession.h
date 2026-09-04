@@ -129,6 +129,7 @@ private:
     size_t nodeSlotIndex(uint32_t num);
     MeshNode& nodeSlot(uint32_t num);
     void sortNodes();
+    void reindexNodes();
     void setNote(const std::string& text);
     void fail(const std::string& reason);
     void appendMessage(uint32_t peer, MeshMessage message);

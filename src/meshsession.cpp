@@ -188,8 +188,7 @@ size_t MeshSession::nodeSlotIndex(uint32_t num) {
             }
         }
         nodes_.erase(nodes_.begin() + static_cast<long>(victim));
-        nodeIndex_.clear();
-        for (size_t i = 0; i < nodes_.size(); ++i) nodeIndex_[nodes_[i].num] = i;
+        reindexNodes();
     }
     MeshNode fresh;
     fresh.num = num;
@@ -201,6 +200,11 @@ size_t MeshSession::nodeSlotIndex(uint32_t num) {
 
 MeshNode& MeshSession::nodeSlot(uint32_t num) { return nodes_[nodeSlotIndex(num)]; }
 
+void MeshSession::reindexNodes() {
+    nodeIndex_.clear();
+    for (size_t i = 0; i < nodes_.size(); ++i) nodeIndex_[nodes_[i].num] = i;
+}
+
 void MeshSession::sortNodes() {
     std::stable_sort(nodes_.begin(), nodes_.end(),
                      [](const MeshNode& a, const MeshNode& b) {
@@ -211,8 +215,7 @@ void MeshSession::sortNodes() {
                          if (a.lastHeard != b.lastHeard) return a.lastHeard > b.lastHeard;
                          return a.num < b.num;
                      });
-    nodeIndex_.clear();
-    for (size_t i = 0; i < nodes_.size(); ++i) nodeIndex_[nodes_[i].num] = i;
+    reindexNodes();
     ++nodeSequence_;
 }
 

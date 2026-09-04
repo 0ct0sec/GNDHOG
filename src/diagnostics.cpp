@@ -16,9 +16,7 @@ namespace bf {
 namespace {
 
 bool commandFailed(const std::string& text) {
-    std::istringstream in(text);
-    std::string line;
-    while (std::getline(in, line)) {
+    for (const std::string& line : splitLines(text)) {
         if (isErrorLine(line)) return true;
     }
     return false;
@@ -172,9 +170,7 @@ struct StatusEvidence {
 
 StatusEvidence parseStatus(const std::string& text, DiagnosticReport& report) {
     StatusEvidence e;
-    std::istringstream in(text);
-    std::string line;
-    while (std::getline(in, line)) {
+    for (const std::string& line : splitLines(text)) {
         const std::string t = trim(line);
         const std::string u = upper(t);
         int temperatureC = 0;
@@ -270,10 +266,8 @@ StatusEvidence parseStatus(const std::string& text, DiagnosticReport& report) {
 }
 
 bool parseTasksLoad(const std::string& text, double& load) {
-    std::istringstream in(text);
-    std::string line;
     bool found = false;
-    while (std::getline(in, line)) {
+    for (const std::string& line : splitLines(text)) {
         const std::string t = trim(line);
         const std::string u = upper(t);
         if (!startsWith(u, "TOTAL")) continue;
@@ -297,11 +291,9 @@ bool parseTasksLoad(const std::string& text, double& load) {
 }
 
 std::string firstVersionLine(const std::string& text) {
-    std::istringstream in(text);
-    std::string line;
-    while (std::getline(in, line)) {
+    for (const std::string& line : splitLines(text)) {
         std::string t = trim(line);
-        if (t.rfind("# ", 0) == 0) t = trim(t.substr(2));
+        if (startsWith(t, "# ")) t = trim(t.substr(2));
         if (t.find("Betaflight") != std::string::npos) return t;
     }
     return {};
@@ -310,9 +302,7 @@ std::string firstVersionLine(const std::string& text) {
 } // namespace
 
 bool parseCoreTemperatureC(const std::string& text, int& temperatureC) {
-    std::istringstream in(text);
-    std::string line;
-    while (std::getline(in, line)) {
+    for (const std::string& line : splitLines(text)) {
         const std::string u = upper(line);
         const size_t label = u.find("CORE TEMP");
         if (label == std::string::npos) continue;

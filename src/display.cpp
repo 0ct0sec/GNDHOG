@@ -8,7 +8,6 @@
 #include <sstream>
 
 #if defined(__linux__)
-#include <dirent.h>
 #include <fcntl.h>
 #include <linux/fb.h>
 #include <sys/ioctl.h>
@@ -43,8 +42,7 @@ bool Display::open(const std::string& device, std::string& error) {
     if (::ioctl(fd_, FBIOGET_VSCREENINFO, &var) != 0 ||
         ::ioctl(fd_, FBIOGET_FSCREENINFO, &fix) != 0) {
         error = std::string("FBIOGET_SCREENINFO: ") + std::strerror(errno);
-        ::close(fd_);
-        fd_ = -1;
+        close();
         return false;
     }
 
@@ -61,8 +59,7 @@ bool Display::open(const std::string& device, std::string& error) {
     if (bpp_ != 16) {
         error = "unsupported framebuffer depth: " + std::to_string(bpp_) +
                 " bits/pixel (this app renders RGB565)";
-        ::close(fd_);
-        fd_ = -1;
+        close();
         return false;
     }
     plainRgb565_ = (rOff_ == 11 && rLen_ == 5 && gOff_ == 5 && gLen_ == 6 &&
@@ -73,8 +70,7 @@ bool Display::open(const std::string& device, std::string& error) {
     void* m = ::mmap(nullptr, mapLen_, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
     if (m == MAP_FAILED) {
         error = std::string("mmap: ") + std::strerror(errno);
-        ::close(fd_);
-        fd_ = -1;
+        close();
         return false;
     }
     map_ = static_cast<uint8_t*>(m);
@@ -140,11 +136,7 @@ void Display::present() {
 
 bool Backlight::discover() {
 #if defined(__linux__)
-    DIR* d = ::opendir("/sys/class/backlight");
-    if (!d) return false;
-    while (dirent* e = ::readdir(d)) {
-        const std::string name = e->d_name;
-        if (name == "." || name == "..") continue;
+    for (const std::string& name : listDirectory("/sys/class/backlight")) {
         const std::string dir = "/sys/class/backlight/" + name;
         const std::string maxs = readFirstLine(dir + "/max_brightness");
         if (maxs.empty()) continue;
@@ -157,7 +149,6 @@ bool Backlight::discover() {
         path_ = dir;
         break;
     }
-    ::closedir(d);
     return available();
 #else
     return false;

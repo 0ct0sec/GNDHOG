@@ -1,13 +1,11 @@
 #include "input.h"
+#include "storage.h"
 #include "strutil.h"
 
-#include <algorithm>
 #include <cerrno>
-#include <cstring>
 #include <ctime>
 
 #if defined(__linux__)
-#include <dirent.h>
 #include <fcntl.h>
 #include <linux/input.h>
 #include <sys/ioctl.h>
@@ -45,18 +43,10 @@ std::vector<int> Keyboard::fds() const {
 int Keyboard::open(std::string& error) {
 #if defined(__linux__)
     close();
-    DIR* dir = ::opendir("/dev/input");
-    if (!dir) {
-        error = std::string("/dev/input: ") + std::strerror(errno);
-        return 0;
-    }
     std::vector<std::string> nodes;
-    while (dirent* e = ::readdir(dir)) {
-        const std::string name = e->d_name;
-        if (name.rfind("event", 0) == 0) nodes.push_back("/dev/input/" + name);
+    for (const std::string& name : listDirectory("/dev/input")) {
+        if (startsWith(name, "event")) nodes.push_back("/dev/input/" + name);
     }
-    ::closedir(dir);
-    std::sort(nodes.begin(), nodes.end());
 
     int denied = 0;
     for (const std::string& node : nodes) {

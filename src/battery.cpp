@@ -5,12 +5,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include <vector>
-
-#if defined(__linux__)
-#include <dirent.h>
-#include <sys/stat.h>
-#endif
 
 namespace bf {
 namespace {
@@ -74,20 +68,9 @@ bool Battery::discoverIn(const std::string& root) {
     reading_ = BatteryReading{};
     nextPollMs_ = 0;
 #if defined(__linux__)
-    DIR* d = ::opendir(root.c_str());
-    if (!d) return false;
-    std::vector<std::string> names;
-    while (dirent* e = ::readdir(d)) {
-        const std::string name = e->d_name;
-        if (name == "." || name == "..") continue;
-        names.push_back(name);
-    }
-    ::closedir(d);
-    // readdir order is whatever the filesystem feels like. A machine with two
-    // supplies must pick the same one across launches, or the indicator would
-    // change meaning at random.
-    std::sort(names.begin(), names.end());
-    for (const std::string& name : names) {
+    // The listing is sorted: a machine with two supplies must pick the same
+    // one across launches, or the indicator would change meaning at random.
+    for (const std::string& name : listDirectory(root)) {
         const std::string dir = root + "/" + name;
         if (readFirstLine(dir + "/type") != "Battery") continue;
         // A mains adapter and a UPS both live in this class; only a supply that

@@ -19,6 +19,7 @@
 #include "simfc.h"
 #include "simmesh.h"
 #include "storage.h"
+#include "strutil.h"
 #include "term.h"
 #include "simpty.h"
 #include "thermaltrip.h"
@@ -800,6 +801,58 @@ void testGraphics() {
     dimSurface(ds, theme::black);
     check(ds.px[0] == 0x8410 && ds.px[1] == 0x8410,
           "modal dimming blends every pixel instead of dropping scanlines");
+}
+
+// ---------------------------------------------------------- shared helpers
+
+void testStringHelpers() {
+    section("shared string and config helpers");
+    const std::vector<std::string> lines = splitLines("one\r\ntwo\n\nfour");
+    check(lines.size() == 4 && lines[0] == "one" && lines[1] == "two" && lines[2].empty() &&
+              lines[3] == "four",
+          "splitLines cuts on LF, drops the CR, and keeps an empty line in the middle");
+    check(splitLines("a\nb\n").size() == 2 && splitLines("").empty() &&
+              splitLines("\n").size() == 1,
+          "a final newline ends the last line rather than starting an empty one");
+    const std::vector<std::string> fields = splitFields("a,,b", ',');
+    check(fields.size() == 3 && fields[0] == "a" && fields[1].empty() && fields[2] == "b",
+          "splitFields keeps empty fields, which NMEA is mostly made of");
+    check(splitFields("", '\t').size() == 1, "an empty record is one empty field, not none");
+    check(endsWith("node-0badf00d.chat", ".chat") && !endsWith(".cha", ".chat") &&
+              endsWith("x", ""),
+          "endsWith handles a suffix longer than the text and an empty one");
+    checkEq(formatHeading(37.5), "038", "a heading rounds to three digits");
+    checkEq(formatHeading(359.7), "000", "a heading that rounds to 360 is written 000");
+    checkEq(formatHeading(0.0), "000", "north is 000");
+
+    Config cfg;
+    cfg.setDouble("compass.xoff", 123.4567);
+    checkEq(cfg.get("compass.xoff"), "123.457", "setDouble keeps three decimals");
+    check(std::abs(cfg.getDouble("compass.xoff", 0.0) - 123.457) < 1e-9, "getDouble reads it back");
+    cfg.set("compass.yoff", "not a number");
+    check(cfg.getDouble("compass.yoff", -1.0) == -1.0 && cfg.getDouble("absent", 2.5) == 2.5,
+          "getDouble falls back for junk and for a missing key");
+
+    check(encodeMspFrame('<', 88, {}) == std::string("$M<\x00\x58\x58", 6),
+          "an MSP request frames the size, the command and the XOR checksum");
+    const std::string set = encodeMspFrame('<', 89, {1, 2, 3});
+    check(set.size() == 9 && static_cast<uint8_t>(set.back()) ==
+                                 static_cast<uint8_t>(3 ^ 89 ^ 1 ^ 2 ^ 3),
+          "the checksum covers the size, the command and every payload byte");
+
+#if defined(__linux__)
+    const std::string root = "/tmp/bfcli-listdir-selftest-" + std::to_string(::getpid());
+    std::filesystem::remove_all(root);
+    check(fixtureDir(root) && fixtureFile(root + "/b", "") && fixtureFile(root + "/a", "") &&
+              fixtureDir(root + "/c"),
+          "directory listing fixture is created");
+    const std::vector<std::string> names = listDirectory(root);
+    check(names.size() == 3 && names[0] == "a" && names[1] == "b" && names[2] == "c",
+          "listDirectory is sorted and leaves out . and ..");
+    check(listDirectory(root + "/nope").empty(),
+          "a directory that cannot be opened lists as nothing");
+    std::filesystem::remove_all(root);
+#endif
 }
 
 // ------------------------------------------------- end-to-end against a pty
@@ -3242,6 +3295,7 @@ int runSelfTest() {
     }
 #endif
     testGraphics();
+    testStringHelpers();
     section("menu hierarchy and typography");
     {
         App app;
@@ -3265,14 +3319,8 @@ int runSelfTest() {
         const int labelColumns = (kScreenW - 48) / kGlyphW;
         // What drawHintBar leaves once the "Esc back" plate has taken its side.
         const int hintColumns = (kScreenW - (textWidth("Esc back") + 8) - 4) / kGlyphW;
-        for (const MenuItem& item : app.menu_) {
-            labelsClean &= item.label.size() < 3 ||
-                           item.label.compare(item.label.size() - 3, 3, "...") != 0;
-        }
-        for (const MenuItem& item : app.quick_) {
-            labelsClean &= item.label.size() < 3 ||
-                           item.label.compare(item.label.size() - 3, 3, "...") != 0;
-        }
+        for (const MenuItem& item : app.menu_) labelsClean &= !endsWith(item.label, "...");
+        for (const MenuItem& item : app.quick_) labelsClean &= !endsWith(item.label, "...");
         for (MenuPage page : pages) {
             app.openMenuPage(page);
             for (const MenuItem& item : app.currentMenuItems()) {
@@ -3280,8 +3328,7 @@ int runSelfTest() {
                 actionIds.insert(item.id);
                 labelsFit &= static_cast<int>(item.label.size()) <= labelColumns;
                 hintsFit &= static_cast<int>(item.hint.size()) <= hintColumns;
-                labelsClean &= item.label.size() < 3 ||
-                               item.label.compare(item.label.size() - 3, 3, "...") != 0;
+                labelsClean &= !endsWith(item.label, "...");
             }
         }
         check(actionCount == 20 && actionIds.size() == 20,

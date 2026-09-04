@@ -7,7 +7,6 @@
 #include <cstring>
 
 #if defined(__linux__)
-#include <dirent.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -33,20 +32,6 @@ std::string resolve(const std::string& path) {
     char buf[PATH_MAX];
     const char* r = ::realpath(path.c_str(), buf);
     return r ? std::string(r) : path;
-}
-
-std::vector<std::string> listDir(const std::string& dir) {
-    std::vector<std::string> out;
-    DIR* d = ::opendir(dir.c_str());
-    if (!d) return out;
-    while (dirent* e = ::readdir(d)) {
-        const std::string name = e->d_name;
-        if (name == "." || name == "..") continue;
-        out.push_back(name);
-    }
-    ::closedir(d);
-    std::sort(out.begin(), out.end());
-    return out;
 }
 
 // Walk up from /sys/class/tty/<tty> to the USB device that owns it and read the
@@ -210,13 +195,13 @@ std::vector<PortInfo> enumeratePorts() {
     // by-id first: the symlink name carries vendor/product/serial text and is
     // the only stable handle across replug.
     std::vector<std::pair<std::string, std::string>> byId;
-    for (const std::string& name : listDir("/dev/serial/by-id")) {
+    for (const std::string& name : listDirectory("/dev/serial/by-id")) {
         const std::string link = "/dev/serial/by-id/" + name;
         byId.emplace_back(resolve(link), link);
     }
 
-    for (const std::string& name : listDir("/dev")) {
-        if (name.rfind("ttyACM", 0) == 0 || name.rfind("ttyUSB", 0) == 0) {
+    for (const std::string& name : listDirectory("/dev")) {
+        if (startsWith(name, "ttyACM") || startsWith(name, "ttyUSB")) {
             addDevice("/dev/" + name, "usb");
         }
     }
@@ -232,10 +217,12 @@ std::vector<PortInfo> enumeratePorts() {
                 break;
             }
         }
-        if (isKnownFcId(p.vendorId, p.productId)) p.score = 100;
-        else if (isDfuId(p.vendorId, p.productId)) p.score = 20;
+        const bool fc = isKnownFcId(p.vendorId, p.productId);
+        const bool dfu = isDfuId(p.vendorId, p.productId);
+        if (fc) p.score = 100;
+        else if (dfu) p.score = 20;
         else if (lower(p.product).find("betaflight") != std::string::npos) p.score = 90;
-        else if (p.device.rfind("/dev/ttyACM", 0) == 0) p.score = 70;
+        else if (startsWith(p.device, "/dev/ttyACM")) p.score = 70;
         else if (p.kind == "usb") p.score = 40;
         else p.score = 10;
 
@@ -247,9 +234,7 @@ std::vector<PortInfo> enumeratePorts() {
         else if (p.kind == "uart") p.meshScore = 10;
         else p.meshScore = 0;
         // A device that answered as a flight controller is not also a radio.
-        if (isKnownFcId(p.vendorId, p.productId) || isDfuId(p.vendorId, p.productId)) {
-            p.meshScore = 0;
-        }
+        if (fc || dfu) p.meshScore = 0;
     }
     std::stable_sort(out.begin(), out.end(),
                      [](const PortInfo& a, const PortInfo& b) { return a.rank() > b.rank(); });
@@ -279,8 +264,7 @@ bool SerialPort::open(const std::string& device, int baud, std::string& error) {
     termios tio{};
     if (::tcgetattr(fd_, &tio) != 0) {
         error = std::string("tcgetattr: ") + std::strerror(errno);
-        ::close(fd_);
-        fd_ = -1;
+        close();
         return false;
     }
     ::cfmakeraw(&tio);
@@ -301,8 +285,7 @@ bool SerialPort::open(const std::string& device, int baud, std::string& error) {
 
     if (::tcsetattr(fd_, TCSANOW, &tio) != 0) {
         error = std::string("tcsetattr: ") + std::strerror(errno);
-        ::close(fd_);
-        fd_ = -1;
+        close();
         return false;
     }
     ::tcflush(fd_, TCIOFLUSH);

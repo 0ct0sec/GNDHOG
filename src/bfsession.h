@@ -144,12 +144,14 @@ private:
     void scanForIdentity(const std::string& text);
     void beginCli(uint64_t now);
     void queueMsp(uint8_t command, const std::vector<uint8_t>& payload = {});
+    // Sends one MSP request and arms the reply deadline the state machine polls.
+    void beginMspAction(MspAction action, uint64_t now, uint8_t command,
+                        const std::vector<uint8_t>& payload = {});
     void processMspInput(uint64_t now);
     void handleMspFrame(uint8_t direction, uint8_t command,
                         const std::vector<uint8_t>& payload, uint64_t now);
     bool parseVtxStatus(const std::vector<uint8_t>& payload, VtxStatus& status) const;
     std::vector<uint8_t> vtxSetPayload(uint8_t power, bool pitMode) const;
-    void requestVtxStatus(MspAction action, uint64_t now);
     void startPitRollback(uint64_t now);
     void finishVtxGuard(VtxBenchMode mode, const std::string& note, uint64_t now);
     void noteCoreTemperature(const std::vector<TermLine>& lines);
@@ -196,5 +198,11 @@ std::vector<std::string> restorableLines(const std::string& fileText);
 
 // True when a line of FC output reports a rejected command.
 bool isErrorLine(const std::string& line);
+
+// One MSP v1 frame: "$M", the direction ('<' to the FC, '>' from it, '!' for
+// an error reply), the payload size, the command, the payload, and the XOR
+// checksum over everything after the header.
+std::string encodeMspFrame(char direction, uint8_t command,
+                           const std::vector<uint8_t>& payload);
 
 } // namespace bf

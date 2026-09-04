@@ -4,7 +4,6 @@
 #include "strutil.h"
 
 #include <algorithm>
-#include <sstream>
 
 namespace bf {
 namespace {
@@ -41,24 +40,39 @@ bool isErrorLine(const std::string& line) {
     const std::string t = trim(line);
     if (t.empty()) return false;
     if (t.find("###ERROR") != std::string::npos) return true;
-    if (t.rfind("Unknown command", 0) == 0) return true;
-    if (t.rfind("Invalid name", 0) == 0) return true;
-    if (t.rfind("Invalid value", 0) == 0) return true;
-    if (t.rfind("Parse error", 0) == 0) return true;
+    if (startsWith(t, "Unknown command")) return true;
+    if (startsWith(t, "Invalid name")) return true;
+    if (startsWith(t, "Invalid value")) return true;
+    if (startsWith(t, "Parse error")) return true;
     return false;
 }
 
 std::vector<std::string> restorableLines(const std::string& fileText) {
     std::vector<std::string> out;
-    std::istringstream in(fileText);
-    std::string line;
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+    for (const std::string& line : splitLines(fileText)) {
         const std::string t = trim(line);
         if (t.empty() || t[0] == '#') continue;
         out.push_back(t);
     }
     return out;
+}
+
+std::string encodeMspFrame(char direction, uint8_t command,
+                           const std::vector<uint8_t>& payload) {
+    std::string frame;
+    frame.reserve(payload.size() + 6);
+    frame += "$M";
+    frame.push_back(direction);
+    const uint8_t size = static_cast<uint8_t>(payload.size());
+    frame.push_back(static_cast<char>(size));
+    frame.push_back(static_cast<char>(command));
+    uint8_t checksum = size ^ command;
+    for (uint8_t byte : payload) {
+        frame.push_back(static_cast<char>(byte));
+        checksum ^= byte;
+    }
+    frame.push_back(static_cast<char>(checksum));
+    return frame;
 }
 
 namespace {
@@ -90,14 +104,12 @@ bool Session::connect(const std::string& device, int baud, std::string& error) {
     connectStartMs_ = nowMs();
     lastByteMs_ = connectStartMs_;
     mspInput_.clear();
-    mspAction_ = MspAction::ProbeVtx;
-    mspDeadlineMs_ = connectStartMs_ + kMspReplyTimeoutMs;
     vtxOriginal_ = VtxStatus{};
     vtxBenchMode_ = VtxBenchMode::None;
     vtxGuardNote_.clear();
     coreTemperatureAvailable_ = false;
     coreTemperatureC_ = 0;
-    queueMsp(kMspVtxConfig);
+    beginMspAction(MspAction::ProbeVtx, connectStartMs_, kMspVtxConfig);
     return true;
 }
 
@@ -136,19 +148,14 @@ void Session::beginCli(uint64_t now) {
 }
 
 void Session::queueMsp(uint8_t command, const std::vector<uint8_t>& payload) {
-    std::string frame;
-    frame.reserve(payload.size() + 6);
-    frame += "$M<";
-    const uint8_t size = static_cast<uint8_t>(payload.size());
-    frame.push_back(static_cast<char>(size));
-    frame.push_back(static_cast<char>(command));
-    uint8_t checksum = size ^ command;
-    for (uint8_t byte : payload) {
-        frame.push_back(static_cast<char>(byte));
-        checksum ^= byte;
-    }
-    frame.push_back(static_cast<char>(checksum));
-    port_.write(frame);
+    port_.write(encodeMspFrame('<', command, payload));
+}
+
+void Session::beginMspAction(MspAction action, uint64_t now, uint8_t command,
+                             const std::vector<uint8_t>& payload) {
+    mspAction_ = action;
+    mspDeadlineMs_ = now + kMspReplyTimeoutMs;
+    queueMsp(command, payload);
 }
 
 bool Session::parseVtxStatus(const std::vector<uint8_t>& payload, VtxStatus& status) const {
@@ -186,12 +193,6 @@ std::vector<uint8_t> Session::vtxSetPayload(uint8_t power, bool pitMode) const {
     };
 }
 
-void Session::requestVtxStatus(MspAction action, uint64_t now) {
-    mspAction_ = action;
-    mspDeadlineMs_ = now + kMspReplyTimeoutMs;
-    queueMsp(kMspVtxConfig);
-}
-
 void Session::noteVtxGuard(const std::string& note, LineKind kind) {
     vtxGuardNote_ = note;
     ++vtxGuardNoteSequence_;
@@ -205,21 +206,18 @@ void Session::finishVtxGuard(VtxBenchMode mode, const std::string& note, uint64_
 }
 
 void Session::startPitRollback(uint64_t now) {
-    mspAction_ = MspAction::SetPitOff;
-    mspDeadlineMs_ = now + kMspReplyTimeoutMs;
-    queueMsp(kMspSetVtxConfig, vtxSetPayload(vtxOriginal_.power, false));
+    beginMspAction(MspAction::SetPitOff, now, kMspSetVtxConfig,
+                   vtxSetPayload(vtxOriginal_.power, false));
 }
 
 void Session::enableVtxBenchGuard() {
     if (state_ != SessionState::AwaitingVtxChoice) return;
-    const uint64_t now = nowMs();
     state_ = SessionState::ApplyingVtxGuard;
-    mspAction_ = MspAction::SetPit;
-    mspDeadlineMs_ = now + kMspReplyTimeoutMs;
     // Pit mode is runtime state and does not alter the saved VTX power. Some
     // SmartAudio versions cannot enter it after power-up; in that case we fail
     // closed instead of modifying vtx_power behind the operator's back.
-    queueMsp(kMspSetVtxConfig, vtxSetPayload(vtxOriginal_.power, true));
+    beginMspAction(MspAction::SetPit, nowMs(), kMspSetVtxConfig,
+                   vtxSetPayload(vtxOriginal_.power, true));
 }
 
 void Session::skipVtxBenchGuard() {
@@ -313,17 +311,15 @@ void Session::clearFinishedJob() {
 }
 
 void Session::scanForIdentity(const std::string& text) {
-    std::istringstream in(text);
-    std::string line;
-    while (std::getline(in, line)) {
+    for (const std::string& line : splitLines(text)) {
         const std::string t = trim(line);
-        if (firmware_.empty() && t.rfind("# Betaflight /", 0) == 0) {
+        if (firmware_.empty() && startsWith(t, "# Betaflight /")) {
             firmware_ = trim(t.substr(2));
-        } else if (firmware_.empty() && t.rfind("Betaflight /", 0) == 0) {
+        } else if (firmware_.empty() && startsWith(t, "Betaflight /")) {
             firmware_ = t;
         }
-        if (board_.empty() && t.rfind("board_name ", 0) == 0) board_ = trim(t.substr(11));
-        if (craft_.empty() && t.rfind("# name:", 0) == 0) craft_ = trim(t.substr(7));
+        if (board_.empty() && startsWith(t, "board_name ")) board_ = trim(t.substr(11));
+        if (craft_.empty() && startsWith(t, "# name:")) craft_ = trim(t.substr(7));
     }
 }
 
@@ -565,14 +561,14 @@ void Session::poll(uint64_t now) {
         switch (mspAction_) {
         case MspAction::SetPit:
         case MspAction::WaitPit:
-            requestVtxStatus(MspAction::VerifyPit, now);
+            beginMspAction(MspAction::VerifyPit, now, kMspVtxConfig);
             break;
         case MspAction::VerifyPit:
             startPitRollback(now);
             break;
         case MspAction::SetPitOff:
         case MspAction::WaitPitOff:
-            requestVtxStatus(MspAction::VerifyPitOff, now);
+            beginMspAction(MspAction::VerifyPitOff, now, kMspVtxConfig);
             break;
         case MspAction::VerifyPitOff:
             finishVtxGuard(VtxBenchMode::Unconfirmed,

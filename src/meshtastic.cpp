@@ -106,6 +106,12 @@ constexpr double kEarthRadiusM = 6371000.0;
 double toRadians(double degrees) { return degrees * kPi / 180.0; }
 double toDegrees(double radians) { return radians * 180.0 / kPi; }
 
+// Into 0..360, for a bearing that arrived negative or past a full turn.
+double normaliseDeg(double degrees) {
+    double out = std::fmod(degrees, 360.0);
+    if (out < 0.0) out += 360.0;
+    return out;
+}
 
 const char* stateText(MeshMessageState state) {
     switch (state) {
@@ -689,9 +695,7 @@ double meshBearingDeg(double lat1, double lon1, double lat2, double lon2) {
 const char* meshCompassPoint(double bearingDeg) {
     static const char* const kPoints[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
     if (std::isnan(bearingDeg)) return "?";
-    double normalised = std::fmod(bearingDeg, 360.0);
-    if (normalised < 0.0) normalised += 360.0;
-    const int index = static_cast<int>((normalised + 22.5) / 45.0) % 8;
+    const int index = static_cast<int>((normaliseDeg(bearingDeg) + 22.5) / 45.0) % 8;
     return kPoints[index];
 }
 
@@ -709,13 +713,8 @@ std::string meshRangeText(double metres) {
 
 std::string meshBearingText(double bearingDeg) {
     if (std::isnan(bearingDeg)) return "---";
-    double normalised = std::fmod(bearingDeg, 360.0);
-    if (normalised < 0.0) normalised += 360.0;
-    int whole = static_cast<int>(normalised + 0.5);
-    if (whole >= 360) whole = 0;
-    char buf[16];
-    std::snprintf(buf, sizeof(buf), "%03d %s", whole, meshCompassPoint(normalised));
-    return buf;
+    const double normalised = normaliseDeg(bearingDeg);
+    return formatHeading(normalised) + " " + meshCompassPoint(normalised);
 }
 
 double meshRelativeTurnDeg(double bearingDeg, double courseDeg) {
@@ -794,25 +793,9 @@ std::string formatMeshChat(const std::vector<MeshMessage>& messages) {
 
 std::vector<MeshMessage> parseMeshChat(const std::string& text) {
     std::vector<MeshMessage> out;
-    size_t pos = 0;
-    while (pos <= text.size()) {
-        const size_t nl = text.find('\n', pos);
-        std::string line = text.substr(pos, (nl == std::string::npos ? text.size() : nl) - pos);
-        pos = (nl == std::string::npos) ? text.size() + 1 : nl + 1;
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+    for (const std::string& line : splitLines(text)) {
         if (line.empty() || line[0] == '#') continue;
-
-        std::vector<std::string> fields;
-        size_t start = 0;
-        for (;;) {
-            const size_t tab = line.find('\t', start);
-            if (tab == std::string::npos) {
-                fields.push_back(line.substr(start));
-                break;
-            }
-            fields.push_back(line.substr(start, tab - start));
-            start = tab + 1;
-        }
+        const std::vector<std::string> fields = splitFields(line, '\t');
         if (fields.size() < 8) continue;
 
         MeshMessage m;
@@ -848,10 +831,8 @@ bool meshChatPeerFromFileName(const std::string& name, uint32_t& peer) {
         peer = kMeshBroadcast;
         return true;
     }
-    if (name.rfind("node-", 0) != 0) return false;
-    const size_t dot = name.rfind(".chat");
-    if (dot == std::string::npos || dot != name.size() - 5) return false;
-    const std::string hex = name.substr(5, dot - 5);
+    if (!startsWith(name, "node-") || !endsWith(name, ".chat")) return false;
+    const std::string hex = name.substr(5, name.size() - 10);
     if (hex.size() != 8) return false;
     for (char c : hex) {
         if (!std::isxdigit(static_cast<unsigned char>(c))) return false;

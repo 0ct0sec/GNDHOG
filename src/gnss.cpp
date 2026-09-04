@@ -26,20 +26,6 @@ bool legibleText(const std::string& line) {
     return true;
 }
 
-std::vector<std::string> splitFields(const std::string& body) {
-    std::vector<std::string> out;
-    size_t start = 0;
-    for (;;) {
-        const size_t comma = body.find(',', start);
-        if (comma == std::string::npos) {
-            out.push_back(body.substr(start));
-            return out;
-        }
-        out.push_back(body.substr(start, comma - start));
-        start = comma + 1;
-    }
-}
-
 // ddmm.mmmm with a hemisphere letter. Degrees and minutes are not separated by
 // anything, which is why this cannot be a plain strtod.
 bool parseCoordinate(const std::string& value, const std::string& hemisphere, double& out) {
@@ -153,11 +139,24 @@ bool parseNmeaSentence(const std::string& sentence, GnssFix& fix, uint64_t nowMs
     const size_t star = sentence.rfind('*');
     const std::string body = sentence.substr(1, (star == std::string::npos ? sentence.size() - 1
                                                                            : star - 1));
-    const std::vector<std::string> f = splitFields(body);
+    const std::vector<std::string> f = splitFields(body, ',');
     if (f.empty() || f[0].size() < 5) return false;
     // Talker IDs differ per constellation (GP, GL, GA, GB, GN); the last three
     // characters are the sentence type and the only part worth switching on.
     const std::string type = f[0].substr(f[0].size() - 3);
+    // A fix is the coordinates plus the moment this station saw them; the
+    // receiver's own clock is kept as it arrived, whenever it arrived.
+    const auto adoptCoords = [&](double lat, double lon) {
+        fix.latitude = lat;
+        fix.longitude = lon;
+        fix.valid = true;
+        fix.everValid = true;
+        fix.updatedMs = nowMs;
+    };
+    const auto noteClock = [&](const std::string& hhmmss) {
+        const std::string clock = formatClock(hhmmss);
+        if (!clock.empty()) fix.utc = clock;
+    };
 
     if (type == "GGA") {
         if (f.size() < 10) return false;
@@ -167,11 +166,7 @@ bool parseNmeaSentence(const std::string& sentence, GnssFix& fix, uint64_t nowMs
         const bool haveCoords = parseCoordinate(f[2], f[3], lat) &&
                                 parseCoordinate(f[4], f[5], lon);
         if (quality > 0 && haveCoords) {
-            fix.latitude = lat;
-            fix.longitude = lon;
-            fix.valid = true;
-            fix.everValid = true;
-            fix.updatedMs = nowMs;
+            adoptCoords(lat, lon);
         } else if (quality == 0) {
             fix.valid = false;
         }
@@ -182,8 +177,7 @@ bool parseNmeaSentence(const std::string& sentence, GnssFix& fix, uint64_t nowMs
             fix.altitudeM = altitude;
             fix.haveAltitude = true;
         }
-        const std::string clock = formatClock(f[1]);
-        if (!clock.empty()) fix.utc = clock;
+        noteClock(f[1]);
         return true;
     }
 
@@ -195,11 +189,7 @@ bool parseNmeaSentence(const std::string& sentence, GnssFix& fix, uint64_t nowMs
         const bool haveCoords = parseCoordinate(f[3], f[4], lat) &&
                                 parseCoordinate(f[5], f[6], lon);
         if (active && haveCoords) {
-            fix.latitude = lat;
-            fix.longitude = lon;
-            fix.valid = true;
-            fix.everValid = true;
-            fix.updatedMs = nowMs;
+            adoptCoords(lat, lon);
             uint32_t epoch = 0;
             if (epochFromNmea(f[9], f[1], epoch)) fix.utcSeconds = epoch;
         } else if (!active) {
@@ -215,8 +205,7 @@ bool parseNmeaSentence(const std::string& sentence, GnssFix& fix, uint64_t nowMs
             fix.courseDeg = course;
             fix.haveCourse = true;
         }
-        const std::string clock = formatClock(f[1]);
-        if (!clock.empty()) fix.utc = clock;
+        noteClock(f[1]);
         return true;
     }
 
@@ -302,8 +291,7 @@ void Gnss::poll(uint64_t nowMs) {
     const int n = port_.read(incoming);
     if (n < 0) {
         lastError_ = "GNSS serial read failed";
-        port_.close();
-        buf_.clear();
+        close();
         return;
     }
     if (n == 0) return;

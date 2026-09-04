@@ -271,18 +271,16 @@ void SimMesh::handleToRadio(const std::string& body) {
 }
 
 void SimMesh::injectText(uint32_t from, uint32_t to, const std::string& text) {
-    packetSeed_ = packetSeed_ * 1664525u + 1013904223u;
     emitFrame(wrapFromRadio(
-        2, meshPacketPayload(from, to, packetSeed_,
+        2, meshPacketPayload(from, to, nextPacketId(),
                              static_cast<uint32_t>(MeshPort::TextMessage), text, 0,
                              5.5f, 3, 2)));
     flush();
 }
 
 void SimMesh::injectPosition(uint32_t from, double latitude, double longitude) {
-    packetSeed_ = packetSeed_ * 1664525u + 1013904223u;
     emitFrame(wrapFromRadio(
-        2, meshPacketPayload(from, kMeshBroadcast, packetSeed_,
+        2, meshPacketPayload(from, kMeshBroadcast, nextPacketId(),
                              static_cast<uint32_t>(MeshPort::Position),
                              positionPayload(latitude, longitude,
                                              static_cast<uint32_t>(::time(nullptr)), 12, 8),
@@ -328,9 +326,8 @@ void SimMesh::pump() {
         }
         pb::Writer routing;
         routing.varint(3, ackError_);
-        packetSeed_ = packetSeed_ * 1664525u + 1013904223u;
         emitFrame(wrapFromRadio(
-            2, meshPacketPayload(acks_[i].from, kSelfNum, packetSeed_,
+            2, meshPacketPayload(acks_[i].from, kSelfNum, nextPacketId(),
                                  static_cast<uint32_t>(MeshPort::Routing),
                                  routing.data(), acks_[i].requestId, 7.0f, 3, 3)));
         acks_.erase(acks_.begin() + static_cast<long>(i));

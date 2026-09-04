@@ -2,11 +2,10 @@
 #include "brand.h"
 #include "simfc.h"
 #include "simmesh.h"
+#include "strutil.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <ctime>
 #include <sstream>
 #include <poll.h>
@@ -250,11 +249,8 @@ void App::refreshMeshMenus() {
                 item.label = "Compass: " + compass_.magnetometerName();
                 item.hint = "open it to read a heading";
             } else {
-                char buf[48];
-                std::snprintf(buf, sizeof(buf), "Compass: %03d%s",
-                              static_cast<int>(compass_.reading().headingDeg + 0.5) % 360,
-                              compass_.calibration().hardIron ? "" : " uncalibrated");
-                item.label = buf;
+                item.label = "Compass: " + formatHeading(compass_.reading().headingDeg) +
+                             (compass_.calibration().hardIron ? "" : " uncalibrated");
                 item.hint = compass_.calibration().hardIron
                                 ? (compass_.calibration().aligned
                                        ? "calibrated and aligned; C or A redo either"
@@ -483,7 +479,7 @@ bool App::setup(const Options& opt, std::string& error) {
 
     // Sym-layer corrections, e.g. `sym.0x28 = _`.
     for (const auto& kv : config_.all()) {
-        if (kv.first.rfind("sym.", 0) != 0 || kv.second.empty()) continue;
+        if (!startsWith(kv.first, "sym.") || kv.second.empty()) continue;
         try {
             const int scan = std::stoi(kv.first.substr(4), nullptr, 0);
             keyboard_.decoder().setSymOverride(scan, kv.second[0]);
@@ -1352,16 +1348,11 @@ void App::viewFile(const BackupFile& f) {
         return;
     }
     pushLocal("---- " + f.name + " ----", LineKind::Local);
-    size_t pos = 0;
     int shown = 0;
-    while (pos < text.size() && shown < 4000) {
-        const size_t nl = text.find('\n', pos);
-        const std::string line =
-            text.substr(pos, (nl == std::string::npos ? text.size() : nl) - pos);
+    for (const std::string& line : splitLines(text)) {
+        if (shown == 4000) break;
         term_.addLine(line, LineKind::Fc);
         ++shown;
-        if (nl == std::string::npos) break;
-        pos = nl + 1;
     }
     pushLocal("---- end of " + f.name + " ----", LineKind::Local);
     term_.scrollToBottom(bodyRows(true));
@@ -1963,33 +1954,28 @@ void App::tickAutoShare(uint64_t now) {
 void App::loadCompassCalibration() {
     CompassCalibration cal;
     cal.hardIron = config_.getBool("compass.calibrated", false);
-    cal.xOff = std::atof(config_.get("compass.xoff", "0").c_str());
-    cal.yOff = std::atof(config_.get("compass.yoff", "0").c_str());
-    cal.zOff = std::atof(config_.get("compass.zoff", "0").c_str());
-    cal.fieldNorm = std::atof(config_.get("compass.norm", "0").c_str());
+    cal.xOff = config_.getDouble("compass.xoff", 0.0);
+    cal.yOff = config_.getDouble("compass.yoff", 0.0);
+    cal.zOff = config_.getDouble("compass.zoff", 0.0);
+    cal.fieldNorm = config_.getDouble("compass.norm", 0.0);
     cal.aligned = config_.getBool("compass.aligned", false);
-    cal.mountOffsetDeg = std::atof(config_.get("compass.offset", "0").c_str());
+    cal.mountOffsetDeg = config_.getDouble("compass.offset", 0.0);
     // Hand-set: the local magnetic declination, east positive, and a chip
     // that turns out to be mounted with its z axis into the board.
-    cal.declinationDeg = std::atof(config_.get("compass.declination", "0").c_str());
+    cal.declinationDeg = config_.getDouble("compass.declination", 0.0);
     cal.mirror = config_.getBool("compass.mirror", false);
     compass_.setCalibration(cal);
 }
 
 void App::saveCompassCalibration() {
     const CompassCalibration& cal = compass_.calibration();
-    char buf[32];
-    auto put = [&](const char* key, double value) {
-        std::snprintf(buf, sizeof(buf), "%.3f", value);
-        config_.set(key, buf);
-    };
     config_.setBool("compass.calibrated", cal.hardIron);
-    put("compass.xoff", cal.xOff);
-    put("compass.yoff", cal.yOff);
-    put("compass.zoff", cal.zOff);
-    put("compass.norm", cal.fieldNorm);
+    config_.setDouble("compass.xoff", cal.xOff);
+    config_.setDouble("compass.yoff", cal.yOff);
+    config_.setDouble("compass.zoff", cal.zOff);
+    config_.setDouble("compass.norm", cal.fieldNorm);
     config_.setBool("compass.aligned", cal.aligned);
-    put("compass.offset", cal.mountOffsetDeg);
+    config_.setDouble("compass.offset", cal.mountOffsetDeg);
     std::string error;
     if (!config_.save(storage_, error)) {
         showStatus("compass calibration not saved: " + error, 6000);
@@ -2057,10 +2043,7 @@ void App::alignCompassToTrack() {
     }
     saveCompassCalibration();
     audio_.play(HudCue::Success);
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "compass aligned to track %03d",
-                  static_cast<int>(std::lround(fix.courseDeg)) % 360);
-    showStatus(buf, 5000);
+    showStatus("compass aligned to track " + formatHeading(fix.courseDeg), 5000);
     refreshMeshMenus();
 }
 

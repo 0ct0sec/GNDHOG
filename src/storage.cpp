@@ -68,10 +68,8 @@ bool deleteInside(const std::string& dir, const char* what, const std::string& p
 
 bool makeDirs(const std::string& path, std::string& error) {
     std::string acc;
-    std::istringstream in(path);
-    std::string part;
     if (!path.empty() && path[0] == '/') acc = "/";
-    while (std::getline(in, part, '/')) {
+    for (const std::string& part : splitFields(path, '/')) {
         if (part.empty()) continue;
         acc += part;
         if (::mkdir(acc.c_str(), 0700) != 0 && errno != EEXIST) {
@@ -143,17 +141,12 @@ bool Storage::init(std::string& error) {
 
 std::vector<std::string> Storage::listMeshChatFiles() const {
     std::vector<std::string> out;
-    DIR* d = ::opendir(meshDir_.c_str());
-    if (!d) return out;
-    while (dirent* e = ::readdir(d)) {
-        const std::string name = e->d_name;
-        if (name.size() < 6 || name.compare(name.size() - 5, 5, ".chat") != 0) continue;
+    for (const std::string& name : listDirectory(meshDir_)) {
+        if (name.size() < 6 || !endsWith(name, ".chat")) continue;
         struct stat st{};
         if (::stat((meshDir_ + "/" + name).c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
         out.push_back(name);
     }
-    ::closedir(d);
-    std::sort(out.begin(), out.end());
     return out;
 }
 
@@ -172,22 +165,21 @@ bool Storage::writeAtomic(const std::string& path, const std::string& content,
         error = tmp + ": " + std::strerror(errno);
         return false;
     }
+    // A temp file that could not be completed is not left behind.
+    const auto abandon = [&](const char* what) {
+        error = std::string(what) + ": " + std::strerror(errno);
+        ::close(fd);
+        ::unlink(tmp.c_str());
+        return false;
+    };
     size_t off = 0;
     while (off < content.size()) {
         const ssize_t n = ::write(fd, content.data() + off, content.size() - off);
         if (n > 0) { off += static_cast<size_t>(n); continue; }
         if (n < 0 && errno == EINTR) continue;
-        error = std::string("write: ") + std::strerror(errno);
-        ::close(fd);
-        ::unlink(tmp.c_str());
-        return false;
+        return abandon("write");
     }
-    if (::fsync(fd) != 0) {
-        error = std::string("fsync: ") + std::strerror(errno);
-        ::close(fd);
-        ::unlink(tmp.c_str());
-        return false;
-    }
+    if (::fsync(fd) != 0) return abandon("fsync");
     ::close(fd);
     if (::rename(tmp.c_str(), path.c_str()) != 0) {
         error = std::string("rename: ") + std::strerror(errno);
@@ -219,14 +211,24 @@ std::string readFirstLine(const std::string& path) {
     return line;
 }
 
-std::vector<BackupFile> Storage::listBackups() const {
-    std::vector<BackupFile> out;
-    DIR* d = ::opendir(backupDir_.c_str());
+std::vector<std::string> listDirectory(const std::string& dir) {
+    std::vector<std::string> out;
+    DIR* d = ::opendir(dir.c_str());
     if (!d) return out;
     while (dirent* e = ::readdir(d)) {
         const std::string name = e->d_name;
         if (name == "." || name == "..") continue;
-        if (name.size() < 4 || name.substr(name.size() - 4) != ".txt") continue;
+        out.push_back(name);
+    }
+    ::closedir(d);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<BackupFile> Storage::listBackups() const {
+    std::vector<BackupFile> out;
+    for (const std::string& name : listDirectory(backupDir_)) {
+        if (!endsWith(name, ".txt")) continue;
         BackupFile b;
         b.name = name;
         b.path = backupDir_ + "/" + name;
@@ -238,7 +240,6 @@ std::vector<BackupFile> Storage::listBackups() const {
         }
         out.push_back(std::move(b));
     }
-    ::closedir(d);
     std::sort(out.begin(), out.end(),
               [](const BackupFile& a, const BackupFile& b) { return a.mtime > b.mtime; });
     return out;
@@ -339,8 +340,22 @@ bool Config::getBool(const std::string& key, bool fallback) const {
     return v == "1" || v == "true" || v == "yes" || v == "on";
 }
 
+double Config::getDouble(const std::string& key, double fallback) const {
+    const auto it = values_.find(key);
+    if (it == values_.end()) return fallback;
+    char* end = nullptr;
+    const double value = std::strtod(it->second.c_str(), &end);
+    return end == it->second.c_str() ? fallback : value;
+}
+
 void Config::set(const std::string& key, const std::string& value) { values_[key] = value; }
 void Config::setInt(const std::string& key, int value) { values_[key] = std::to_string(value); }
 void Config::setBool(const std::string& key, bool value) { values_[key] = value ? "1" : "0"; }
+
+void Config::setDouble(const std::string& key, double value) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.3f", value);
+    values_[key] = buf;
+}
 
 } // namespace bf

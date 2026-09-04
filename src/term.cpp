@@ -48,13 +48,6 @@ void Terminal::rewrapAll() {
     for (size_t i = 0; i < lines_.size(); ++i) appendRowsFor(static_cast<int>(i));
 }
 
-void Terminal::rewrapLast() {
-    if (lines_.empty()) return;
-    const int last = static_cast<int>(lines_.size()) - 1;
-    while (!rows_.empty() && rows_.back().line == last) rows_.pop_back();
-    appendRowsFor(last);
-}
-
 void Terminal::pushLine(const std::string& text, LineKind kind) {
     lines_.push_back(TermLine{text, kind});
     ++linesEver_;
@@ -74,12 +67,16 @@ void Terminal::pushLine(const std::string& text, LineKind kind) {
     }
 }
 
+// Whatever the FC has sent of its current line goes into the scrollback as it
+// stands, so that nothing is ever spliced into the middle of it.
+void Terminal::flushPartial() {
+    if (partial_.empty()) return;
+    pushLine(partial_, partialKind_);
+    partial_.clear();
+}
+
 void Terminal::addLine(const std::string& text, LineKind kind) {
-    // A local message must not be spliced into a half-received FC line.
-    if (!partial_.empty()) {
-        pushLine(partial_, partialKind_);
-        partial_.clear();
-    }
+    flushPartial();
     pushLine(text, kind);
 }
 
@@ -165,10 +162,7 @@ void Terminal::scrollToBottom(int visibleRows) {
 }
 
 void Terminal::markCapture() {
-    if (!partial_.empty()) {
-        pushLine(partial_, partialKind_);
-        partial_.clear();
-    }
+    flushPartial();
     capturing_ = true;
     captureFromLine_ = lines_.size();
 }

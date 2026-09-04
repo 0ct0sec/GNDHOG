@@ -44,25 +44,10 @@ std::string formatMarks(const std::vector<Mark>& marks) {
 
 std::vector<Mark> parseMarks(const std::string& text) {
     std::vector<Mark> out;
-    size_t pos = 0;
-    while (pos <= text.size() && out.size() < kMaxMarks) {
-        const size_t nl = text.find('\n', pos);
-        std::string line = text.substr(pos, (nl == std::string::npos ? text.size() : nl) - pos);
-        pos = (nl == std::string::npos) ? text.size() + 1 : nl + 1;
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+    for (const std::string& line : splitLines(text)) {
+        if (out.size() >= kMaxMarks) break;
         if (line.empty() || line[0] == '#') continue;
-
-        std::vector<std::string> fields;
-        size_t start = 0;
-        for (;;) {
-            const size_t tab = line.find('\t', start);
-            if (tab == std::string::npos) {
-                fields.push_back(line.substr(start));
-                break;
-            }
-            fields.push_back(line.substr(start, tab - start));
-            start = tab + 1;
-        }
+        const std::vector<std::string> fields = splitFields(line, '\t');
         if (fields.size() < 4) continue;
 
         Mark m;
