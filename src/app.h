@@ -134,7 +134,11 @@ private:
     void pollGnss(uint64_t now);
     // Status-line expiry and the HUD audio watch, which both links need.
     void tickStatusTail(uint64_t now);
+    // The FC die-temperature watch; false once a thermal trip has cut the link.
+    bool tickTemperatureWatch(uint64_t now);
     void render();
+    // --preview: paints every screen into opt_.previewDir, one PPM each.
+    int runPreview();
 
     // ---- input
     void handleKey(const KeyEvent& e);
@@ -205,6 +209,7 @@ private:
     void connectSelected();
     void connectPort(const PortInfo& port, LinkMode mode);
     void beginConnectionSafety(const std::string& device);
+    void resetTemperatureWatch(uint64_t nextCheckMs);
     void performThermalTrip(int temperatureC);
     void requestDisconnect(bool exitAfter = false);
     void finishDisconnect(bool exitAfter = false);
@@ -300,12 +305,16 @@ private:
     void openRootMenu();
     void openHelp();
     void openMarks();
+    void openFiles();
     // Up/Down/PageUp/PageDown on a list, with the cue and the repaint. False
     // for any other key, so the caller goes on to its own bindings.
     bool navigateList(ListState& st, const KeyEvent& e, int count, int rows);
     // The two "not ready" refusals, each with its dialog; true when ready.
     bool requireFcReady();
     bool requireRadioReady();
+    // True with a current fix; otherwise the "No fix yet" dialog, which ends
+    // with what GNDHOG will not do with a stale one.
+    bool requireFix(const std::string& refusal);
     // True, with the dialog shown, when no more places can be saved.
     bool marksFull();
     // Ends a field check early with `why` on the screen and a report built

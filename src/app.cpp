@@ -408,6 +408,11 @@ void App::openMarks() {
     openReturnableScreen(Screen::Marks);
 }
 
+void App::openFiles() {
+    refreshFiles();
+    openReturnableScreen(Screen::Files);
+}
+
 bool App::navigateList(ListState& st, const KeyEvent& e, int count, int rows) {
     int delta = 0;
     switch (e.key) {
@@ -432,6 +437,16 @@ bool App::requireFcReady() {
 bool App::requireRadioReady() {
     if (meshMode() && mesh_.ready()) return true;
     notice("Not ready", "Connect a Meshtastic radio first.");
+    return false;
+}
+
+// True when the receiver has a current fix. Otherwise the "No fix yet" dialog,
+// ending in what will not be done with a stale one.
+bool App::requireFix(const std::string& refusal) {
+    if (gnss_.fix().valid) return true;
+    notice("No fix yet",
+           "The receiver is present but has no current fix.\n\n" + gnss_.statusText(nowMs()) +
+               "\n\nGNDHOG will not " + refusal + ".");
     return false;
 }
 
@@ -527,12 +542,13 @@ bool App::setup(const Options& opt, std::string& error) {
     // does. A hand-edited config that names a rate this libc has no termios
     // constant for is refused here rather than at open time, where it would
     // look like the peer had gone quiet.
-    gnssBaud_ = opt_.gnssBaudSet ? opt_.gnssBaud : config_.getInt("gnss.baud", 115200);
-    if (!isSupportedBaud(gnssBaud_)) gnssBaud_ = 115200;
-    fcBaud_ = opt_.fcBaudSet ? opt_.fcBaud : config_.getInt("fc.baud", 115200);
-    if (!isSupportedBaud(fcBaud_)) fcBaud_ = 115200;
-    meshBaud_ = opt_.meshBaudSet ? opt_.meshBaud : config_.getInt("mesh.baud", 115200);
-    if (!isSupportedBaud(meshBaud_)) meshBaud_ = 115200;
+    const auto launchBaud = [this](bool named, int rate, const char* key) {
+        const int baud = named ? rate : config_.getInt(key, 115200);
+        return isSupportedBaud(baud) ? baud : 115200;
+    };
+    gnssBaud_ = launchBaud(opt_.gnssBaudSet, opt_.gnssBaud, "gnss.baud");
+    fcBaud_ = launchBaud(opt_.fcBaudSet, opt_.fcBaud, "fc.baud");
+    meshBaud_ = launchBaud(opt_.meshBaudSet, opt_.meshBaud, "mesh.baud");
     // --gnss DEV names a receiver on purpose, so it is opened this launch even
     // if the saved switch is off: on the bench that switch was off, and the
     // flag was found doing nothing at all. Like --no-gnss it never rewrites
@@ -837,13 +853,7 @@ void App::shareMyPosition(uint32_t peer) {
                "business, not this application's.");
         return;
     }
-    if (!gnss_.fix().valid) {
-        notice("No fix yet",
-               "The receiver is present but has no current fix.\n\n" +
-                   gnss_.statusText(nowMs()) +
-                   "\n\nGNDHOG will not transmit a stale or invented coordinate.");
-        return;
-    }
+    if (!requireFix("transmit a stale or invented coordinate")) return;
     confirm("Transmit position?",
             "Send this station's own GNSS fix to " + peerTitle(peer) + "?\n\n" +
                 gnss_.fix().coordText() + "\n\n"
@@ -933,14 +943,20 @@ void App::beginMeshSession() {
     refreshMeshMenus();
 }
 
-void App::beginConnectionSafety(const std::string& device) {
-    nextTemperatureCheckMs_ = nowMs();
+// The watch starts over with every link: first check at `nextCheckMs`, no
+// alarm level remembered, no warning owed, no trip attempted.
+void App::resetTemperatureWatch(uint64_t nextCheckMs) {
+    nextTemperatureCheckMs_ = nextCheckMs;
     temperatureMonitorStarted_ = false;
     temperatureAlarmLevel_ = 0;
     temperatureWarningPending_ = false;
     temperatureWarningC_ = 0;
-    lastTemperatureSequence_ = session_.coreTemperatureSequence();
     thermalTripAttempted_ = false;
+}
+
+void App::beginConnectionSafety(const std::string& device) {
+    resetTemperatureWatch(nowMs());
+    lastTemperatureSequence_ = session_.coreTemperatureSequence();
 
     const ThermalTripProbe& probe = thermalTrip_.inspect(device);
     thermalTripPromptPending_ = probe.eligible;
@@ -1133,34 +1149,25 @@ void App::finishDisconnect(bool exitAfter) {
     }
     session_.disconnect();
     pushLocal("-- disconnected --", LineKind::Warn);
-    nextTemperatureCheckMs_ = 0;
-    temperatureMonitorStarted_ = false;
-    temperatureAlarmLevel_ = 0;
-    temperatureWarningPending_ = false;
-    temperatureWarningC_ = 0;
+    resetTemperatureWatch(0);
     thermalTrip_.reset();
     thermalTripPromptPending_ = false;
-    thermalTripAttempted_ = false;
     refreshPorts();
+    if (exitAfter) {
+        running_ = false;
+        return;
+    }
     // A link that had borrowed the receiver's UART has given it back, so the
     // probe starts over; a receiver on a port of its own was never closed.
-    if (!exitAfter) startGnss();
-    if (exitAfter) running_ = false;
-    else setScreen(Screen::Ports);
+    startGnss();
+    setScreen(Screen::Ports);
 }
 
 void App::requestDisconnect(bool exitAfter) {
-    // A mesh radio has no bench guard to unwind: nothing was changed on it, so
-    // closing the port is the whole of the operation.
-    if (meshMode()) {
-        finishDisconnect(exitAfter);
-        return;
-    }
-    if (!session_.connected()) {
-        finishDisconnect(exitAfter);
-        return;
-    }
-    if (!session_.vtxBenchGuardActive()) {
+    // A mesh radio has no bench guard to unwind, and neither has a link that
+    // is already gone or one that never entered pit mode: closing the port is
+    // the whole of the operation.
+    if (meshMode() || !session_.connected() || !session_.vtxBenchGuardActive()) {
         finishDisconnect(exitAfter);
         return;
     }
@@ -1652,8 +1659,7 @@ void App::applyMenu(int id) {
         break;
     case MenuRestore:
     case MenuFiles:
-        refreshFiles();
-        openReturnableScreen(Screen::Files);
+        openFiles();
         break;
     case MenuQuick:
         setScreen(Screen::Quick);
@@ -1752,13 +1758,7 @@ void App::markHere() {
                    gnssDevice_ + ".");
         return;
     }
-    if (!fix.valid) {
-        notice("No fix yet",
-               "The receiver is present but has no current fix.\n\n" +
-                   gnss_.statusText(nowMs()) +
-                   "\n\nGNDHOG will not save a stale or invented coordinate as a place.");
-        return;
-    }
+    if (!requireFix("save a stale or invented coordinate as a place")) return;
     if (marksFull()) return;
     // The fix is captured when the key is pressed. The operator is naming the
     // spot they were standing on, not wherever they wander while typing.
@@ -2120,14 +2120,10 @@ void App::onPortsKey(const KeyEvent& e) {
     const int n = static_cast<int>(ports_.size());
     switch (e.key) {
     case Key::Up:
-        portList_.move(-1, n, rows);
-        portLinkModeForced_ = false;
-        syncPortLinkMode();
-        audio_.play(HudCue::Navigate);
-        dirty_ = true;
-        break;
     case Key::Down:
-        portList_.move(+1, n, rows);
+        portList_.move(e.key == Key::Up ? -1 : +1, n, rows);
+        // Another row, another port: an M override belongs to the one it
+        // was pressed on.
         portLinkModeForced_ = false;
         syncPortLinkMode();
         audio_.play(HudCue::Navigate);
@@ -2155,8 +2151,7 @@ void App::onPortsKey(const KeyEvent& e) {
                            ? "Enter opens this port as a Meshtastic radio"
                            : "Enter opens this port as a Betaflight CLI");
         } else if (e.ch == 'f' || e.ch == 'F') {
-            refreshFiles();
-            openReturnableScreen(Screen::Files);
+            openFiles();
         } else if (e.ch == 'g' || e.ch == 'G') {
             // The receiver no longer waits for a radio, so its status cannot
             // either: on a bench with nothing but a cap, this is the screen.
@@ -2263,7 +2258,7 @@ void App::onTerminalKey(const KeyEvent& e) {
     case Key::F3: if (session_.ready()) session_.send("version"); return;
     case Key::F4: if (session_.ready()) session_.send("diff"); return;
     case Key::F5: runBackup("diff all", "Backup (diff all)"); return;
-    case Key::F6: refreshFiles(); openReturnableScreen(Screen::Files); return;
+    case Key::F6: openFiles(); return;
     case Key::F7: if (session_.ready()) session_.send("tasks"); return;
     case Key::F8:
         applyQuick(12);   // save, with its confirmation
@@ -2398,18 +2393,24 @@ void App::onKeymapKey(const KeyEvent& e) {
 }
 
 void App::onHelpKey(const KeyEvent& e) {
+    int delta = 0;
     switch (e.key) {
-    case Key::Up:       helpScroll_ = std::max(0, helpScroll_ - 1); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::Down:     ++helpScroll_; audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageUp:   helpScroll_ = std::max(0, helpScroll_ - 8); audio_.play(HudCue::Navigate); dirty_ = true; break;
-    case Key::PageDown: helpScroll_ += 8; audio_.play(HudCue::Navigate); dirty_ = true; break;
+    case Key::Up:       delta = -1; break;
+    case Key::Down:     delta = +1; break;
+    case Key::PageUp:   delta = -8; break;
+    case Key::PageDown: delta = +8; break;
     case Key::Escape:
     case Key::Enter:
         audio_.play(HudCue::Back);
         setScreen(returnScreen_);
-        break;
-    default: break;
+        return;
+    default: return;
     }
+    // Only the top is bounded here; drawHelp clamps the bottom against the
+    // rows it actually has.
+    helpScroll_ = std::max(0, helpScroll_ + delta);
+    audio_.play(HudCue::Navigate);
+    dirty_ = true;
 }
 
 void App::onNodesKey(const KeyEvent& e) {
@@ -2690,6 +2691,60 @@ void App::tick(uint64_t now) {
                 [this]() { session_.skipVtxBenchGuard(); });
     }
 
+    if (!tickTemperatureWatch(now)) return;
+
+    if (disconnectAfterVtxRestore_ && !session_.connected()) {
+        const bool exitAfter = exitAfterVtxRestore_;
+        disconnectAfterVtxRestore_ = false;
+        exitAfterVtxRestore_ = false;
+        finishDisconnect(exitAfter);
+        return;
+    }
+
+    const JobStatus& job = session_.job();
+    if (diagnosticRunning_ && !session_.connected()) {
+        abortFieldCheck("serial link lost during field check");
+    }
+    if (job.finished) {
+        const bool wasRestore = job.kind == JobKind::Restore;
+        const std::string message = job.message;
+        const bool ok = job.ok;
+        // A capture reports through its own callback; only a restore or a
+        // failure needs a dialog here.
+        if (wasRestore || !ok) {
+            if (!modal_) {
+                notice(ok ? "Restore complete" : "Finished with problems", message,
+                       ok ? HudCue::Success : HudCue::Error);
+            }
+        }
+        if (ok && !wasRestore) audio_.play(HudCue::Success);
+        pushLocal("-- " + message + " --", ok ? LineKind::Good : LineKind::Warn);
+        session_.clearFinishedJob();
+    }
+
+    // Act on an unplug once. Unlatched, this re-enumerated /dev, /sys and
+    // /dev/serial/by-id on every frame for as long as the terminal stayed up.
+    if (session_.linkLost()) {
+        if (!linkLossHandled_) {
+            linkLossHandled_ = true;
+            audio_.play(HudCue::LinkDown);
+            refreshPorts();
+            showStatus(session_.vtxBenchGuardActive()
+                           ? "link lost - pit mode clears only when the FC reboots"
+                           : "link lost - Esc for the menu to reconnect",
+                       6000);
+        }
+    } else {
+        linkLossHandled_ = false;
+    }
+    tickStatusTail(now);
+}
+
+// The FC's own die temperature: the one-shot trip offer, the idle-time status
+// capture that keeps the reading fresh, the alarm ladder, and the notice it
+// ends in. False once a thermal trip has just cut the link, which ends the
+// tick: there is nothing left on that port to poll.
+bool App::tickTemperatureWatch(uint64_t now) {
     if (thermalTripPromptPending_ && session_.ready() && !modal_) {
         thermalTripPromptPending_ = false;
         confirm("Arm EXT thermal trip?",
@@ -2766,7 +2821,7 @@ void App::tick(uint64_t now) {
         }
         if (temperatureC >= 80 && thermalTrip_.armed() && !thermalTripAttempted_) {
             performThermalTrip(temperatureC);
-            return;
+            return false;
         }
     }
 
@@ -2784,52 +2839,7 @@ void App::tick(uint64_t now) {
                    "remove USB power.",
                critical ? HudCue::Critical : HudCue::Error);
     }
-
-    if (disconnectAfterVtxRestore_ && !session_.connected()) {
-        const bool exitAfter = exitAfterVtxRestore_;
-        disconnectAfterVtxRestore_ = false;
-        exitAfterVtxRestore_ = false;
-        finishDisconnect(exitAfter);
-        return;
-    }
-
-    const JobStatus& job = session_.job();
-    if (diagnosticRunning_ && !session_.connected()) {
-        abortFieldCheck("serial link lost during field check");
-    }
-    if (job.finished) {
-        const bool wasRestore = job.kind == JobKind::Restore;
-        const std::string message = job.message;
-        const bool ok = job.ok;
-        // A capture reports through its own callback; only a restore or a
-        // failure needs a dialog here.
-        if (wasRestore || !ok) {
-            if (!modal_) {
-                notice(ok ? "Restore complete" : "Finished with problems", message,
-                       ok ? HudCue::Success : HudCue::Error);
-            }
-        }
-        if (ok && !wasRestore) audio_.play(HudCue::Success);
-        pushLocal("-- " + message + " --", ok ? LineKind::Good : LineKind::Warn);
-        session_.clearFinishedJob();
-    }
-
-    // Act on an unplug once. Unlatched, this re-enumerated /dev, /sys and
-    // /dev/serial/by-id on every frame for as long as the terminal stayed up.
-    if (session_.linkLost()) {
-        if (!linkLossHandled_) {
-            linkLossHandled_ = true;
-            audio_.play(HudCue::LinkDown);
-            refreshPorts();
-            showStatus(session_.vtxBenchGuardActive()
-                           ? "link lost - pit mode clears only when the FC reboots"
-                           : "link lost - Esc for the menu to reconnect",
-                       6000);
-        }
-    } else {
-        linkLossHandled_ = false;
-    }
-    tickStatusTail(now);
+    return true;
 }
 
 void App::tickStatusTail(uint64_t now) {
@@ -3020,6 +3030,198 @@ void App::tickMesh(uint64_t now) {
     tickStatusTail(now);
 }
 
+// --preview: one PPM per screen, painted headless with fixture text and a
+// simulated radio, for host-side inspection. Nothing is connected and no key
+// is synthesised, so this is purely a paint test.
+int App::runPreview() {
+    const std::string& dir = opt_.previewDir;
+    // Every writePpm below opens a file by path, and fopen does not build the
+    // directory it was handed. Without this the whole run reports "wrote 0
+    // previews" and never says which of the two things went wrong: the
+    // painting, or a directory that was never there.
+    std::string dirError;
+    if (!makeDirs(dir, dirError)) {
+        std::fprintf(stderr, "%s: --preview %s: %s\n", kAppName, dir.c_str(), dirError.c_str());
+        return 1;
+    }
+
+    int written = 0;
+    const auto shoot = [&](const char* name) {
+        render();
+        if (display_.canvas().writePpm(dir + "/" + name + ".ppm")) ++written;
+    };
+    struct Shot {
+        Screen screen;
+        MenuPage page;
+        const char* name;
+    };
+    const auto shootScreens = [&](std::initializer_list<Shot> shots) {
+        for (const Shot& shot : shots) {
+            screen_ = shot.screen;
+            menuPage_ = shot.page;
+            shoot(shot.name);
+        }
+    };
+
+    status_.clear();   // show each screen's real hint bar, not a startup notice
+    pushLocal("# Betaflight / STM32G47X (G473) 2026.6.0-alpha MSP API: 1.48", LineKind::Fc);
+    pushLocal("Voltage: 4.12V (1S battery - OK)", LineKind::Fc);
+    pushLocal("Arming disable flags: RXLOSS CLI", LineKind::Fc);
+    pushLocal("-- CLI ready --", LineKind::Good);
+    editor_.setText("set gyro_lpf1_static_hz = 0");
+    diagnosticStatus_ =
+        "GYRO: (1) ICM42688P enabled locked dma\n"
+        "DEVICES DETECTED: SPI=2, I2C=1 (0 errors)\n"
+        "CPU:37%, cycle time: 125, GYRO rate: 8000, RX rate: 0, System rate: 10\n"
+        "Voltage: 4.12V (1S battery - OK)\n"
+        "Arming disable flags: RXLOSS CLI\n";
+    diagnosticTasks_ = "Task list\nTotal                                             42.5%\n";
+    diagnosticVersion_ =
+        "# Betaflight / STM32G47X (G473) 2026.6.0-alpha MSP API: 1.48\n";
+    diagnosticReport_ = buildDiagnosticReport(
+        diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
+    shootScreens({
+        {Screen::Ports, MenuPage::Root, "01-ports"},
+        {Screen::Terminal, MenuPage::Root, "02-terminal"},
+        {Screen::Menu, MenuPage::Root, "03-menu"},
+        {Screen::Menu, MenuPage::FlightController, "04-menu-flight-controller"},
+        {Screen::Menu, MenuPage::BackupRestore, "05-menu-backup-restore"},
+        {Screen::Menu, MenuPage::ControlsInfo, "06-menu-controls-info"},
+        {Screen::Menu, MenuPage::SoundDisplay, "07-menu-sound-display"},
+        {Screen::Menu, MenuPage::ConnectionExit, "08-menu-connection-exit"},
+        {Screen::Menu, MenuPage::LinkSpeeds, "09-menu-link-speeds"},
+        {Screen::Quick, MenuPage::FlightController, "10-quick"},
+        {Screen::Files, MenuPage::Root, "11-files"},
+        {Screen::Keymap, MenuPage::Root, "12-keymap"},
+        {Screen::Help, MenuPage::Root, "13-help"},
+        {Screen::Diagnostics, MenuPage::Root, "14-field-check"},
+        {Screen::About, MenuPage::Root, "15-about"},
+    });
+    // One more with a confirmation dialog up, since that is its own layout.
+    screen_ = Screen::Terminal;
+    confirm("Props off?", "Spins a motor. Props off?\n\n> motor 1 1100", "Send", nullptr);
+    shoot("16-confirm");
+    closeModal();
+    confirm("Bench VTX guard?",
+            "SmartAudio reports power level 3/4.\n\nTry verified pit mode before entering "
+            "CLI? This is the VTX's purpose-built bench state; no setting is saved. "
+            "Unsupported hardware is left unchanged.",
+            "Use pit", nullptr);
+    shoot("17-vtx-guard");
+    closeModal();
+    notice("CRITICAL FC TEMPERATURE",
+           "FC MCU core is 82C. Betaflight's default alarm is 70C.\n\n"
+           "This is not a VTX temperature sensor. Stop bench work, unplug FC USB and "
+           "battery power, and let the stack cool. Closing the serial link does not "
+           "remove USB power.");
+    shoot("18-temperature-warning");
+    closeModal();
+    confirm("Restore VTX state?",
+            "Pit mode is active for bench work. Restore the saved flight state?\n\n"
+            "Restore exits CLI, discards unsaved CLI changes, and reboots the FC. Cancel "
+            "closes the link and leaves pit mode active until the FC is rebooted or "
+            "power-cycled.",
+            "Restore", nullptr);
+    shoot("19-vtx-restore");
+    closeModal();
+
+    // The mesh screens are worth seeing with real traffic in them, so the
+    // preview drives the simulated radio rather than painting invented
+    // node rows that no decoder ever produced.
+    SimMesh previewMesh;
+    std::string previewError;
+    if (previewMesh.start(previewError) &&
+        mesh_.connect(previewMesh.devicePath(), 115200, previewError)) {
+        const uint64_t ready = nowMs() + 4000;
+        while (nowMs() < ready && !mesh_.ready()) {
+            previewMesh.pump();
+            mesh_.poll(nowMs());
+            sleepMs(4);
+        }
+    }
+    if (mesh_.ready()) {
+        linkMode_ = LinkMode::Meshtastic;
+        refreshMeshMenus();
+        // The Betaflight fixture lines above belong to the other shots.
+        term_.clear();
+        chatPeer_ = previewMesh.hilltopNodeNum();
+        previewMesh.injectText(previewMesh.hilltopNodeNum(), mesh_.radio().myNodeNum,
+                               "gate is open, road is clear past the ford");
+        std::string sendError;
+        mesh_.sendText(chatPeer_, "rolling in ten, keep the channel", sendError);
+        const uint64_t settle = nowMs() + 1200;
+        while (nowMs() < settle) {
+            previewMesh.pump();
+            mesh_.poll(nowMs());
+            sleepMs(4);
+        }
+        chatRowsValid_ = false;
+        chatFollow_ = true;
+
+        // A fix from a spot south-west of the fixture's hilltop relay, so
+        // the Locate screen has a real range and bearing to draw, and a
+        // walking course so the turn advice has something to say.
+        GnssFix previewFix;
+        previewFix.valid = true;
+        previewFix.latitude = 51.47790;
+        previewFix.longitude = -0.00150;
+        previewFix.haveAltitude = true;
+        previewFix.altitudeM = 45.0;
+        previewFix.satellitesUsed = 9;
+        previewFix.satellitesInView = 14;
+        previewFix.hdop = 0.9;
+        previewFix.haveSpeed = true;
+        previewFix.speedKph = 4.2;
+        previewFix.haveCourse = true;
+        previewFix.courseDeg = 38.0;
+        previewFix.utc = "12:35:19";
+        gnss_.adoptFix(previewFix, nowMs());
+        Mark previewMark;
+        previewMark.name = "Car";
+        previewMark.latitude = 51.47510;
+        previewMark.longitude = -0.00920;
+        previewMark.haveAltitude = true;
+        previewMark.altitudeM = 12;
+        previewMark.stampUtc = static_cast<int64_t>(std::time(nullptr)) - 5400;
+        previewMark.source = "gnss";
+        // In memory only: the preview must not write into the operator's
+        // real marks file.
+        marks_.push_back(previewMark);
+        locateNode_ = previewMesh.hilltopNodeNum();
+        locateMark_ = -1;
+        quickMessages_ = defaultQuickMessages();
+        refreshMeshMenus();
+
+        shootScreens({
+            {Screen::Nodes, MenuPage::Root, "20-mesh-nodes"},
+            {Screen::Chat, MenuPage::Root, "21-mesh-chat"},
+            {Screen::Menu, MenuPage::Root, "22-mesh-menu"},
+            {Screen::Menu, MenuPage::Mesh, "23-mesh-network"},
+            {Screen::Menu, MenuPage::MeshPosition, "24-mesh-position-gnss"},
+            {Screen::Terminal, MenuPage::Root, "25-mesh-radio-log"},
+            {Screen::Locate, MenuPage::Root, "26-mesh-locate"},
+            {Screen::Marks, MenuPage::Root, "27-mesh-marks"},
+        });
+        screen_ = Screen::Chat;
+        openQuickMessages();
+        shoot("28-mesh-quick-messages");
+        screen_ = Screen::Locate;
+        markNodePosition(locateNode_);
+        shoot("29-mesh-mark-prompt");
+        closeModal();
+        screen_ = Screen::Compass;
+        shoot("30-compass");
+        marks_.clear();
+        menuPage_ = MenuPage::Root;
+        mesh_.disconnect();
+    } else if (!previewError.empty()) {
+        std::printf("mesh preview skipped: %s\n", previewError.c_str());
+    }
+
+    std::printf("wrote %d previews to %s\n", written, dir.c_str());
+    return written > 0 ? 0 : 1;
+}
+
 int App::run(const Options& opt) {
     std::string error;
     if (!setup(opt, error)) {
@@ -3028,204 +3230,9 @@ int App::run(const Options& opt) {
     }
 
     if (!opt.previewDir.empty()) {
-        // Every writePpm below opens a file by path, and fopen does not build
-        // the directory it was handed. Without this the whole run reports
-        // "wrote 0 previews" and never says which of the two things went
-        // wrong: the painting, or a directory that was never there.
-        std::string previewDirError;
-        if (!makeDirs(opt.previewDir, previewDirError)) {
-            std::fprintf(stderr, "%s: --preview %s: %s\n", kAppName,
-                         opt.previewDir.c_str(), previewDirError.c_str());
-            teardown();
-            return 1;
-        }
-        // Render one frame of every screen for host-side inspection. Nothing is
-        // connected and no key is synthesised, so this is purely a paint test.
-        const struct { Screen screen; MenuPage menuPage; const char* name; } kShots[] = {
-            {Screen::Ports, MenuPage::Root, "01-ports"},
-            {Screen::Terminal, MenuPage::Root, "02-terminal"},
-            {Screen::Menu, MenuPage::Root, "03-menu"},
-            {Screen::Menu, MenuPage::FlightController, "04-menu-flight-controller"},
-            {Screen::Menu, MenuPage::BackupRestore, "05-menu-backup-restore"},
-            {Screen::Menu, MenuPage::ControlsInfo, "06-menu-controls-info"},
-            {Screen::Menu, MenuPage::SoundDisplay, "07-menu-sound-display"},
-            {Screen::Menu, MenuPage::ConnectionExit, "08-menu-connection-exit"},
-            {Screen::Menu, MenuPage::LinkSpeeds, "09-menu-link-speeds"},
-            {Screen::Quick, MenuPage::FlightController, "10-quick"},
-            {Screen::Files, MenuPage::Root, "11-files"},
-            {Screen::Keymap, MenuPage::Root, "12-keymap"},
-            {Screen::Help, MenuPage::Root, "13-help"},
-            {Screen::Diagnostics, MenuPage::Root, "14-field-check"},
-            {Screen::About, MenuPage::Root, "15-about"},
-        };
-        status_.clear();   // show each screen's real hint bar, not a startup notice
-        pushLocal("# Betaflight / STM32G47X (G473) 2026.6.0-alpha MSP API: 1.48", LineKind::Fc);
-        pushLocal("Voltage: 4.12V (1S battery - OK)", LineKind::Fc);
-        pushLocal("Arming disable flags: RXLOSS CLI", LineKind::Fc);
-        pushLocal("-- CLI ready --", LineKind::Good);
-        editor_.setText("set gyro_lpf1_static_hz = 0");
-        diagnosticStatus_ =
-            "GYRO: (1) ICM42688P enabled locked dma\n"
-            "DEVICES DETECTED: SPI=2, I2C=1 (0 errors)\n"
-            "CPU:37%, cycle time: 125, GYRO rate: 8000, RX rate: 0, System rate: 10\n"
-            "Voltage: 4.12V (1S battery - OK)\n"
-            "Arming disable flags: RXLOSS CLI\n";
-        diagnosticTasks_ = "Task list\nTotal                                             42.5%\n";
-        diagnosticVersion_ =
-            "# Betaflight / STM32G47X (G473) 2026.6.0-alpha MSP API: 1.48\n";
-        diagnosticReport_ = buildDiagnosticReport(
-            diagnosticStatus_, diagnosticTasks_, diagnosticVersion_);
-        int written = 0;
-        for (const auto& shot : kShots) {
-            screen_ = shot.screen;
-            if (shot.screen == Screen::Menu) menuPage_ = shot.menuPage;
-            render();
-            const std::string path = opt.previewDir + "/" + shot.name + ".ppm";
-            if (display_.canvas().writePpm(path)) ++written;
-        }
-        // One more with a confirmation dialog up, since that is its own layout.
-        screen_ = Screen::Terminal;
-        confirm("Props off?", "Spins a motor. Props off?\n\n> motor 1 1100", "Send", nullptr);
-        render();
-        if (display_.canvas().writePpm(opt.previewDir + "/16-confirm.ppm")) ++written;
-        closeModal();
-        confirm("Bench VTX guard?",
-                "SmartAudio reports power level 3/4.\n\nTry verified pit mode before entering "
-                "CLI? This is the VTX's purpose-built bench state; no setting is saved. "
-                "Unsupported hardware is left unchanged.",
-                "Use pit", nullptr);
-        render();
-        if (display_.canvas().writePpm(opt.previewDir + "/17-vtx-guard.ppm")) ++written;
-        closeModal();
-        notice("CRITICAL FC TEMPERATURE",
-               "FC MCU core is 82C. Betaflight's default alarm is 70C.\n\n"
-               "This is not a VTX temperature sensor. Stop bench work, unplug FC USB and "
-               "battery power, and let the stack cool. Closing the serial link does not "
-               "remove USB power.");
-        render();
-        if (display_.canvas().writePpm(opt.previewDir + "/18-temperature-warning.ppm")) ++written;
-        closeModal();
-        confirm("Restore VTX state?",
-                "Pit mode is active for bench work. Restore the saved flight state?\n\n"
-                "Restore exits CLI, discards unsaved CLI changes, and reboots the FC. Cancel "
-                "closes the link and leaves pit mode active until the FC is rebooted or "
-                "power-cycled.",
-                "Restore", nullptr);
-        render();
-        if (display_.canvas().writePpm(opt.previewDir + "/19-vtx-restore.ppm")) ++written;
-        closeModal();
-
-        // The mesh screens are worth seeing with real traffic in them, so the
-        // preview drives the simulated radio rather than painting invented
-        // node rows that no decoder ever produced.
-        SimMesh previewMesh;
-        std::string previewError;
-        if (previewMesh.start(previewError) &&
-            mesh_.connect(previewMesh.devicePath(), 115200, previewError)) {
-            const uint64_t ready = nowMs() + 4000;
-            while (nowMs() < ready && !mesh_.ready()) {
-                previewMesh.pump();
-                mesh_.poll(nowMs());
-                sleepMs(4);
-            }
-        }
-        if (mesh_.ready()) {
-            linkMode_ = LinkMode::Meshtastic;
-            refreshMeshMenus();
-            // The Betaflight fixture lines above belong to the other shots.
-            term_.clear();
-            chatPeer_ = previewMesh.hilltopNodeNum();
-            previewMesh.injectText(previewMesh.hilltopNodeNum(), mesh_.radio().myNodeNum,
-                                   "gate is open, road is clear past the ford");
-            std::string sendError;
-            mesh_.sendText(chatPeer_, "rolling in ten, keep the channel", sendError);
-            const uint64_t settle = nowMs() + 1200;
-            while (nowMs() < settle) {
-                previewMesh.pump();
-                mesh_.poll(nowMs());
-                sleepMs(4);
-            }
-            chatRowsValid_ = false;
-            chatFollow_ = true;
-
-            // A fix from a spot south-west of the fixture's hilltop relay, so
-            // the Locate screen has a real range and bearing to draw, and a
-            // walking course so the turn advice has something to say.
-            GnssFix previewFix;
-            previewFix.valid = true;
-            previewFix.latitude = 51.47790;
-            previewFix.longitude = -0.00150;
-            previewFix.haveAltitude = true;
-            previewFix.altitudeM = 45.0;
-            previewFix.satellitesUsed = 9;
-            previewFix.satellitesInView = 14;
-            previewFix.hdop = 0.9;
-            previewFix.haveSpeed = true;
-            previewFix.speedKph = 4.2;
-            previewFix.haveCourse = true;
-            previewFix.courseDeg = 38.0;
-            previewFix.utc = "12:35:19";
-            gnss_.adoptFix(previewFix, nowMs());
-            Mark previewMark;
-            previewMark.name = "Car";
-            previewMark.latitude = 51.47510;
-            previewMark.longitude = -0.00920;
-            previewMark.haveAltitude = true;
-            previewMark.altitudeM = 12;
-            previewMark.stampUtc = static_cast<int64_t>(std::time(nullptr)) - 5400;
-            previewMark.source = "gnss";
-            // In memory only: the preview must not write into the operator's
-            // real marks file.
-            marks_.push_back(previewMark);
-            locateNode_ = previewMesh.hilltopNodeNum();
-            locateMark_ = -1;
-            quickMessages_ = defaultQuickMessages();
-            refreshMeshMenus();
-
-            const struct { Screen screen; MenuPage page; const char* name; } kMeshShots[] = {
-                {Screen::Nodes, MenuPage::Root, "20-mesh-nodes"},
-                {Screen::Chat, MenuPage::Root, "21-mesh-chat"},
-                {Screen::Menu, MenuPage::Root, "22-mesh-menu"},
-                {Screen::Menu, MenuPage::Mesh, "23-mesh-network"},
-                {Screen::Menu, MenuPage::MeshPosition, "24-mesh-position-gnss"},
-                {Screen::Terminal, MenuPage::Root, "25-mesh-radio-log"},
-                {Screen::Locate, MenuPage::Root, "26-mesh-locate"},
-                {Screen::Marks, MenuPage::Root, "27-mesh-marks"},
-            };
-            for (const auto& shot : kMeshShots) {
-                screen_ = shot.screen;
-                menuPage_ = shot.page;
-                render();
-                if (display_.canvas().writePpm(opt.previewDir + "/" + shot.name + ".ppm")) {
-                    ++written;
-                }
-            }
-            screen_ = Screen::Chat;
-            openQuickMessages();
-            render();
-            if (display_.canvas().writePpm(opt.previewDir + "/28-mesh-quick-messages.ppm")) {
-                ++written;
-            }
-            screen_ = Screen::Locate;
-            markNodePosition(locateNode_);
-            render();
-            if (display_.canvas().writePpm(opt.previewDir + "/29-mesh-mark-prompt.ppm")) {
-                ++written;
-            }
-            closeModal();
-            screen_ = Screen::Compass;
-            render();
-            if (display_.canvas().writePpm(opt.previewDir + "/30-compass.ppm")) ++written;
-            marks_.clear();
-            menuPage_ = MenuPage::Root;
-            mesh_.disconnect();
-        } else if (!previewError.empty()) {
-            std::printf("mesh preview skipped: %s\n", previewError.c_str());
-        }
-
-        std::printf("wrote %d previews to %s\n", written, opt.previewDir.c_str());
+        const int result = runPreview();
         teardown();
-        return written > 0 ? 0 : 1;
+        return result;
     }
 
     audio_.play(HudCue::Startup);
