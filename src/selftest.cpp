@@ -34,6 +34,7 @@
 #include <fstream>
 #include <set>
 #include <string>
+#include <thread>
 
 #if defined(__linux__)
 #include <fcntl.h>
@@ -745,7 +746,14 @@ void testThermalTrip() {
 
 void testStorage() {
     section("storage");
-    const std::string dir = "/tmp/bfcli-selftest";
+    char pattern[] = "/tmp/bfcli-storage-selftest.XXXXXX";
+    const char* created = ::mkdtemp(pattern);
+    check(created != nullptr, "create a private storage fixture");
+    if (!created) return;
+    const std::string dir = created;
+    const char* original = ::getenv("BFCLI_DATA_DIR");
+    const bool hadOverride = original != nullptr;
+    const std::string savedOverride = original ? original : "";
     ::setenv("BFCLI_DATA_DIR", dir.c_str(), 1);
     Storage s;
     std::string err;
@@ -774,6 +782,56 @@ void testStorage() {
               diagnostic.find("_BETAFPVG473_V2.txt") != std::string::npos,
           "field checks get a separate non-restorable filename");
     check(s.diagnosticDir() != s.backupDir(), "field checks stay outside the restore picker");
+
+    check(fixtureFile(dir + "/blocked", "keep"), "create a file where a directory is expected");
+    check(!makeDirs(dir + "/blocked", err), "mkdir does not accept a regular file as a directory");
+    back = "unchanged";
+    check(!s.readFile(s.backupDir(), back, err) && back == "unchanged",
+          "a directory read fails without returning an empty successful backup");
+    check(s.writeAtomic(path, "", err) && s.readFile(path, back, err) && back.empty(),
+          "an empty regular file still reads successfully");
+
+    const std::string victim = dir + "/untouched";
+    check(fixtureFile(victim, "keep") && ::symlink(victim.c_str(), (path + ".tmp").c_str()) == 0,
+          "a stale temporary symlink is in place");
+    check(s.writeAtomic(path, "replacement", err) && fixtureRead(victim) == "keep" &&
+              fixtureRead(path) == "replacement",
+          "an atomic save neither follows nor truncates a stale temporary symlink");
+    ::unlink((path + ".tmp").c_str());
+
+    const std::string a(65536, 'a'), b(65536, 'b');
+    bool savedA = false, savedB = false;
+    std::string errorA, errorB;
+    std::thread writerA([&] { savedA = s.writeAtomic(path, a, errorA); });
+    std::thread writerB([&] { savedB = s.writeAtomic(path, b, errorB); });
+    writerA.join();
+    writerB.join();
+    check(savedA && savedB && s.readFile(path, back, err) && (back == a || back == b),
+          "concurrent atomic saves both finish and leave one complete file");
+
+    check(fixtureDir(s.backupDir() + "/directory.txt") &&
+              !s.writeAtomic(s.backupDir() + "/directory.txt", "cannot replace", err),
+          "a failed rename is reported");
+    bool leftTemp = false;
+    for (const std::string& file : listDirectory(s.backupDir())) {
+        leftTemp |= file.find(".tmp.") != std::string::npos;
+    }
+    check(!leftTemp, "finished and failed saves clean up their own temporary files");
+    check(::symlink((dir + "/missing").c_str(), (s.backupDir() + "/dangling.txt").c_str()) == 0,
+          "create a dangling backup link");
+    check(s.listBackups().size() == 1, "directories and vanished backup targets stay out of the picker");
+
+    check(::symlink(dir.c_str(), (s.backupDir() + "/nested").c_str()) == 0 &&
+              !s.deleteBackup(s.backupDir() + "/nested/untouched", err) &&
+              fixtureRead(victim) == "keep",
+          "backup deletion never walks through a nested symlink");
+    const std::string dotted = s.backupDir() + "/before..after.txt";
+    check(s.writeAtomic(dotted, "backup", err) && s.deleteBackup(dotted, err),
+          "two dots inside a direct child's filename are not path traversal");
+
+    std::filesystem::remove_all(dir);
+    if (hadOverride) ::setenv("BFCLI_DATA_DIR", savedOverride.c_str(), 1);
+    else ::unsetenv("BFCLI_DATA_DIR");
 }
 
 void testGraphics() {

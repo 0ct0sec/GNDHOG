@@ -35,7 +35,8 @@ public:
     // the config, because it is the one thing worth copying off by hand.
     std::string marksPath() const;
 
-    // Durable replacement: temp file, fsync, rename, then fsync the directory.
+    // Durable replacement: private temp file, fsync, rename, directory fsync.
+    // A directory-sync error is reported after replacement has taken place.
     bool writeAtomic(const std::string& path, const std::string& content,
                      std::string& error) const;
     bool readFile(const std::string& path, std::string& out, std::string& error) const;

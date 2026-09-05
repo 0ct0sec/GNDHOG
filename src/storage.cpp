@@ -9,7 +9,6 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
-#include <sstream>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -32,7 +31,9 @@ bool fsyncDir(const std::string& dir) {
     const int fd = ::open(dir.c_str(), O_RDONLY);
     if (fd < 0) return false;
     const bool ok = (::fsync(fd) == 0);
+    const int syncError = errno;
     ::close(fd);
+    errno = syncError;
     return ok;
 }
 
@@ -53,7 +54,12 @@ std::string stampedName(const char* prefix, const std::string& craft,
 // backup that is already gone is, because the operator just asked for it.
 bool deleteInside(const std::string& dir, const char* what, const std::string& path,
                   bool missingOk, std::string& error) {
-    if (path.rfind(dir + "/", 0) != 0 || path.find("..") != std::string::npos) {
+    const std::string prefix = dir + "/";
+    const std::string name = startsWith(path, prefix) ? path.substr(prefix.size()) : "";
+    // Pickers list direct children only. Do not traverse a nested symlink,
+    // but allow ordinary filenames such as "before..after.txt".
+    if (name.empty() || name == "." || name == ".." ||
+        name.find('/') != std::string::npos || name.find('\0') != std::string::npos) {
         error = std::string("refusing to delete a path outside the ") + what + " directory";
         return false;
     }
@@ -72,9 +78,16 @@ bool makeDirs(const std::string& path, std::string& error) {
     for (const std::string& part : splitFields(path, '/')) {
         if (part.empty()) continue;
         acc += part;
-        if (::mkdir(acc.c_str(), 0700) != 0 && errno != EEXIST) {
-            error = acc + ": " + std::strerror(errno);
-            return false;
+        if (::mkdir(acc.c_str(), 0700) != 0) {
+            if (errno != EEXIST) {
+                error = acc + ": " + std::strerror(errno);
+                return false;
+            }
+            struct stat st{};
+            if (::stat(acc.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+                error = acc + ": not a directory";
+                return false;
+            }
         }
         acc += "/";
     }
@@ -157,14 +170,20 @@ std::string Storage::marksPath() const { return dataDir_ + "/marks.txt"; }
 bool Storage::writeAtomic(const std::string& path, const std::string& content,
                           std::string& error) const {
     const size_t slash = path.find_last_of('/');
-    const std::string dir = slash == std::string::npos ? std::string(".") : path.substr(0, slash);
-    const std::string tmp = path + ".tmp";
+    const std::string dir = slash == std::string::npos ? "." :
+                            slash == 0 ? "/" : path.substr(0, slash);
+    const std::string pattern = path + ".tmp.XXXXXX";
+    std::vector<char> tmpName(pattern.begin(), pattern.end());
+    tmpName.push_back('\0');
 
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    // Each writer owns its temp file. A stale file, symlink, or another
+    // running instance must never become the file we truncate.
+    const int fd = ::mkstemp(tmpName.data());
     if (fd < 0) {
-        error = tmp + ": " + std::strerror(errno);
+        error = path + ": " + std::strerror(errno);
         return false;
     }
+    const std::string tmp = tmpName.data();
     // A temp file that could not be completed is not left behind.
     const auto abandon = [&](const char* what) {
         error = std::string(what) + ": " + std::strerror(errno);
@@ -177,16 +196,24 @@ bool Storage::writeAtomic(const std::string& path, const std::string& content,
         const ssize_t n = ::write(fd, content.data() + off, content.size() - off);
         if (n > 0) { off += static_cast<size_t>(n); continue; }
         if (n < 0 && errno == EINTR) continue;
+        if (n == 0) errno = EIO;
         return abandon("write");
     }
     if (::fsync(fd) != 0) return abandon("fsync");
-    ::close(fd);
+    if (::close(fd) != 0) {
+        error = std::string("close: ") + std::strerror(errno);
+        ::unlink(tmp.c_str());
+        return false;
+    }
     if (::rename(tmp.c_str(), path.c_str()) != 0) {
         error = std::string("rename: ") + std::strerror(errno);
         ::unlink(tmp.c_str());
         return false;
     }
-    fsyncDir(dir);   // best effort: the rename is already durable on ext4
+    if (!fsyncDir(dir)) {
+        error = std::string("file replaced, but directory sync failed: ") + std::strerror(errno);
+        return false;
+    }
     return true;
 }
 
@@ -196,9 +223,16 @@ bool Storage::readFile(const std::string& path, std::string& out, std::string& e
         error = path + ": " + std::strerror(errno);
         return false;
     }
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    out = ss.str();
+    std::string content;
+    char buffer[4096];
+    while (f.read(buffer, sizeof(buffer)) || f.gcount() > 0) {
+        content.append(buffer, static_cast<size_t>(f.gcount()));
+    }
+    if (f.bad() || !f.eof()) {
+        error = path + ": read failed";
+        return false;
+    }
+    out = std::move(content);
     return true;
 }
 
@@ -233,15 +267,15 @@ std::vector<BackupFile> Storage::listBackups() const {
         b.name = name;
         b.path = backupDir_ + "/" + name;
         struct stat st{};
-        if (::stat(b.path.c_str(), &st) == 0) {
-            if (!S_ISREG(st.st_mode)) continue;
-            b.bytes = static_cast<uint64_t>(st.st_size);
-            b.mtime = static_cast<int64_t>(st.st_mtime);
-        }
+        if (::stat(b.path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        b.bytes = static_cast<uint64_t>(st.st_size);
+        b.mtime = static_cast<int64_t>(st.st_mtime);
         out.push_back(std::move(b));
     }
     std::sort(out.begin(), out.end(),
-              [](const BackupFile& a, const BackupFile& b) { return a.mtime > b.mtime; });
+              [](const BackupFile& a, const BackupFile& b) {
+                  return a.mtime != b.mtime ? a.mtime > b.mtime : a.name < b.name;
+              });
     return out;
 }
 
