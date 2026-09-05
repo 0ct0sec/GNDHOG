@@ -3046,9 +3046,15 @@ int App::runPreview() {
     }
 
     int written = 0;
+    bool complete = true;
     const auto shoot = [&](const char* name) {
         render();
-        if (display_.canvas().writePpm(dir + "/" + name + ".ppm")) ++written;
+        const std::string path = dir + "/" + name + ".ppm";
+        if (display_.canvas().writePpm(path)) ++written;
+        else {
+            complete = false;
+            std::fprintf(stderr, "%s: could not write preview %s\n", kAppName, path.c_str());
+        }
     };
     struct Shot {
         Screen screen;
@@ -3214,12 +3220,14 @@ int App::runPreview() {
         marks_.clear();
         menuPage_ = MenuPage::Root;
         mesh_.disconnect();
-    } else if (!previewError.empty()) {
-        std::printf("mesh preview skipped: %s\n", previewError.c_str());
+    } else {
+        complete = false;
+        std::fprintf(stderr, "mesh preview failed: %s\n",
+                     previewError.empty() ? "simulated radio did not become ready" : previewError.c_str());
     }
 
     std::printf("wrote %d previews to %s\n", written, dir.c_str());
-    return written > 0 ? 0 : 1;
+    return complete && written > 0 ? 0 : 1;
 }
 
 int App::run(const Options& opt) {

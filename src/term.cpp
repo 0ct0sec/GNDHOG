@@ -31,14 +31,13 @@ void Terminal::resetInputFragment() {
 void Terminal::appendRowsFor(int lineIndex) {
     const std::string& t = lines_[static_cast<size_t>(lineIndex)].text;
     if (t.empty()) {
-        rows_.push_back(DisplayRow{lineIndex, 0, 0});
+        rows_.push_back(DisplayRow{0, lineIndex, 0});
         return;
     }
     size_t off = 0;
     while (off < t.size()) {
         const size_t take = std::min(static_cast<size_t>(cols_), t.size() - off);
-        rows_.push_back(DisplayRow{lineIndex, static_cast<uint16_t>(off),
-                                   static_cast<uint16_t>(take)});
+        rows_.push_back(DisplayRow{off, lineIndex, static_cast<int>(take)});
         off += take;
     }
 }

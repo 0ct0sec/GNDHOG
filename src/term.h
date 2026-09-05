@@ -22,9 +22,9 @@ struct TermLine {
 
 // One rendered row: a slice of a logical line after wrapping.
 struct DisplayRow {
+    size_t start = 0;
     int line = 0;
-    uint16_t start = 0;
-    uint16_t len = 0;
+    int len = 0;
 };
 
 // Scrollback plus the byte-stream decoder that feeds it. Betaflight's CLI is

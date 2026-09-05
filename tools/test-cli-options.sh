@@ -72,4 +72,24 @@ checks=$((checks + 1))
     >"$tmp/out" 2>"$tmp/err"
 checks=$((checks + 1))
 
+# A partial preview export must fail even when the other screens were saved.
+mkdir -p "$tmp/preview/02-terminal.ppm"
+set +e
+"$bin" --preview "$tmp/preview" --mute --no-gnss >"$tmp/out" 2>"$tmp/err"
+rc=$?
+set -e
+if [ "$rc" -ne 1 ] || ! grep -F -- 'could not write preview' "$tmp/err" >/dev/null; then
+    echo "cli-options: a partial preview export must report its failed file" >&2
+    exit 1
+fi
+checks=$((checks + 1))
+
+rmdir "$tmp/preview/02-terminal.ppm"
+"$bin" --preview "$tmp/preview" --mute --no-gnss >"$tmp/out" 2>"$tmp/err"
+if ! grep -F -- 'wrote 30 previews' "$tmp/out" >/dev/null; then
+    echo "cli-options: a complete preview export must include every screen" >&2
+    exit 1
+fi
+checks=$((checks + 1))
+
 echo "cli-options: $checks scenarios passed"

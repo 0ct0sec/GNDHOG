@@ -17,7 +17,10 @@ bool Canvas::writePpm(const std::string& path) const {
     if (w_ <= 0 || h_ <= 0) return false;
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) return false;
-    std::fprintf(f, "P6\n%d %d\n255\n", w_, h_);
+    if (std::fprintf(f, "P6\n%d %d\n255\n", w_, h_) < 0) {
+        std::fclose(f);
+        return false;
+    }
     std::vector<unsigned char> line(static_cast<size_t>(w_) * 3);
     for (int y = 0; y < h_; ++y) {
         for (int x = 0; x < w_; ++x) {
@@ -29,10 +32,12 @@ bool Canvas::writePpm(const std::string& path) const {
             line[x * 3 + 1] = static_cast<unsigned char>((g6 << 2) | (g6 >> 4));
             line[x * 3 + 2] = static_cast<unsigned char>((b5 << 3) | (b5 >> 2));
         }
-        std::fwrite(line.data(), 1, line.size(), f);
+        if (std::fwrite(line.data(), 1, line.size(), f) != line.size()) {
+            std::fclose(f);
+            return false;
+        }
     }
-    std::fclose(f);
-    return true;
+    return std::fclose(f) == 0;
 }
 
 void fill(Surface& s, Color c) {

@@ -457,6 +457,24 @@ void testTerminal() {
     for (const TermLine& line : completed) rejected += isErrorLine(line.text) ? 1 : 0;
     check(completed.size() == 60, "feed reports completed lines evicted by trimming");
     check(rejected == 60, "every evicted rejection remains available to the session");
+
+    // Long console records still wrap from their actual position after 64 KiB.
+    t.clear();
+    t.setWidth(53);
+    std::string longLine;
+    for (int i = 0; i < 70000; ++i) longLine += static_cast<char>('!' + i % 90);
+    t.feed(longLine + "\n");
+    const auto reassemble = [&] {
+        std::string text;
+        for (size_t row = 0; row < t.rowCount(); ++row) text += t.rowText(row);
+        return text;
+    };
+    check(reassemble() == longLine, "wrapped rows preserve every byte past the 16-bit offset boundary");
+    t.setWidth(37);
+    check(reassemble() == longLine, "rewrapping a long record preserves the whole line");
+    t.setWidth(70001);
+    check(t.rowCount() == 1 && t.rowText(0) == longLine,
+          "a wide logical row does not narrow its length to 16 bits");
 }
 
 void testEditor() {
@@ -867,6 +885,11 @@ void testGraphics() {
     dimSurface(ds, theme::black);
     check(ds.px[0] == 0x8410 && ds.px[1] == 0x8410,
           "modal dimming blends every pixel instead of dropping scanlines");
+#if defined(__linux__)
+    check(!dimmed.writePpm("/dev/full"), "a buffered preview write reports a failed close");
+    Canvas large(320, 170);
+    check(!large.writePpm("/dev/full"), "a preview reports a short write before the final row");
+#endif
 }
 
 // ---------------------------------------------------------- shared helpers
