@@ -20,6 +20,7 @@
 #include "simmesh.h"
 #include "storage.h"
 #include "strutil.h"
+#include "numutil.h"
 #include "term.h"
 #include "simpty.h"
 #include "thermaltrip.h"
@@ -829,6 +830,13 @@ void testStorage() {
     check(s.writeAtomic(dotted, "backup", err) && s.deleteBackup(dotted, err),
           "two dots inside a direct child's filename are not path traversal");
 
+    Config reloaded;
+    reloaded.setBool("gnss.enabled", false);
+    check(s.writeAtomic(s.configPath(), "sound.volume = 42\n", err), "replace the saved config");
+    reloaded.load(s);
+    check(reloaded.getBool("gnss.enabled", true) && reloaded.getInt("sound.volume", 0) == 42,
+          "reloading config forgets keys removed from disk");
+
     std::filesystem::remove_all(dir);
     if (hadOverride) ::setenv("BFCLI_DATA_DIR", savedOverride.c_str(), 1);
     else ::unsetenv("BFCLI_DATA_DIR");
@@ -890,6 +898,37 @@ void testStringHelpers() {
     cfg.set("compass.yoff", "not a number");
     check(cfg.getDouble("compass.yoff", -1.0) == -1.0 && cfg.getDouble("absent", 2.5) == 2.5,
           "getDouble falls back for junk and for a missing key");
+    for (const std::string bad : {"12tail", "nan", "inf", "-inf", "1e999", "1e-999"}) {
+        cfg.set("compass.xoff", bad);
+        check(cfg.getDouble("compass.xoff", 7.0) == 7.0,
+              "invalid compass calibration falls back: " + bad);
+    }
+    for (const std::string bad : {"115200baud", "2147483648", "-2147483649", "09", ""}) {
+        cfg.set("fc.baud", bad);
+        check(cfg.getInt("fc.baud", 9600) == 9600, "invalid integer config falls back: " + bad);
+    }
+    cfg.set("number", "0x28");
+    check(cfg.getInt("number", 0) == 40, "config retains hexadecimal integers");
+    cfg.set("number", "010");
+    check(cfg.getInt("number", 0) == 8, "config retains octal integers");
+    cfg.set("sound.enabled", "typo");
+    check(cfg.getBool("sound.enabled", true) && !cfg.getBool("sound.enabled", false),
+          "an invalid boolean uses its caller's fallback");
+    cfg.set("sound.enabled", "OFF");
+    check(!cfg.getBool("sound.enabled", true), "explicit false remains false regardless of case");
+    int integer = 42;
+    uint32_t unsignedInteger = 42;
+    double real = 42.0;
+    check(!parseInteger("2147483648", integer) && integer == 42 &&
+              !parseInteger("-1", unsignedInteger) && unsignedInteger == 42,
+          "integer overflow and negative unsigned values leave the destination untouched");
+    check(parseInteger("2147483647", integer) && integer == 2147483647 &&
+              parseInteger("-2147483648", integer) && integer == (-2147483647 - 1) &&
+              parseInteger("4294967295", unsignedInteger) && unsignedInteger == UINT32_MAX,
+          "the full 32-bit signed and unsigned ranges remain readable");
+    const std::string embeddedNul("12\0junk", 7);
+    check(!parseInteger(embeddedNul, integer) && !parseFiniteDouble(embeddedNul, real) && real == 42.0,
+          "an embedded NUL cannot hide a malformed numeric suffix");
 
     check(encodeMspFrame('<', 88, {}) == std::string("$M<\x00\x58\x58", 6),
           "an MSP request frames the size, the command and the XOR checksum");
@@ -1512,6 +1551,36 @@ void testGnss() {
     check(sky.satellitesInView == 10,
           "satellites in view are summed across constellations, and a repeated "
           "talker replaces its own count rather than adding to it");
+
+    for (const std::string coords : {
+             "5160.0000,N,00007.6500,W", "9100.0000,N,00007.6500,W",
+             "5130.4332,E,00007.6500,W", "5130.4332,North,00007.6500,W",
+             "5130.4332,N,18100.0000,W", "5130.4.3,N,00007.6500,W",
+             "5130junk,N,00007.6500,W", "-130.4332,N,00007.6500,W"}) {
+        GnssFix malformed = rmcFix;
+        check(parseNmeaSentence("$GNRMC,123519.00,A," + coords + ",0.5,54.7,230326", malformed, 8000) &&
+                  !malformed.valid && malformed.everValid && malformed.updatedMs == 2000,
+              "bad coordinates invalidate the current fix without refreshing the old one: " + coords);
+    }
+    GnssFix edge;
+    check(parseNmeaSentence("$GNRMC,123519.00,A,9000.0000,S,18000.0000,E,0,0,230326", edge, 8000) &&
+              edge.valid && edge.latitude == -90.0 && edge.longitude == 180.0,
+          "the poles and date line remain valid coordinates");
+    GnssFix optional = fix;
+    check(parseNmeaSentence("$GNGGA,123519.00,5130.4332,N,00007.6500,W,1,09,0.9,nan", optional, 9000) &&
+              optional.valid && !optional.haveAltitude,
+          "a NaN altitude is unavailable even when the horizontal fix is valid");
+    check(parseNmeaSentence("$GNGGA,123519.00,5130.4332,N,00007.6500,W,1,09,0.9,2147483648", optional, 9000) &&
+              !optional.haveAltitude, "altitude must fit the integer used by marks and position packets");
+    optional = rmcFix;
+    check(parseNmeaSentence("$GNRMC,123519.00,A,5130.4332,N,00007.6500,W,,,230326", optional, 9000) &&
+              !optional.haveSpeed && !optional.haveCourse,
+          "missing speed and course do not reuse a previous sentence's availability flags");
+    check(parseNmeaSentence("$GNRMC,123519.00,A,5130.4332,N,00007.6500,W,1e999,400,230326", optional, 9000) &&
+              !optional.haveSpeed && !optional.haveCourse,
+          "overflowing speed and out-of-range course are unavailable");
+    check(parseNmeaSentence("$GPGSV,1,1,2147483648", sky, 9000) && sky.satellitesInView == 10,
+          "an overflowing satellite count cannot corrupt the constellation total");
 }
 
 // --------------------------------------------------------- mesh session
@@ -1872,6 +1941,15 @@ void testMarks() {
         "3\t\t1.0\t2.0\t\t\n");
     check(bad.size() == 1 && bad[0].name == "(unnamed)",
           "off-planet and unparseable coordinates are dropped; a blank name is labelled");
+    for (const std::string coord : {"nan", "inf", "1.2junk", "1e999"}) {
+        check(parseMarks("1\tbad\t" + coord + "\t0\n").empty(),
+              "an invalid saved coordinate is dropped: " + coord);
+    }
+    check(parseMarks("broken\tbad\t1\t2\n-1\tbad\t1\t2\n").empty(),
+          "malformed and negative mark timestamps are dropped");
+    const auto badAltitude = parseMarks("1\tvalid place\t1\t2\t2147483648\n");
+    check(badAltitude.size() == 1 && !badAltitude[0].haveAltitude,
+          "a saved place can survive an overflowing optional altitude without inventing one");
     checkEq(cleanMarkName("   "), "", "a whitespace-only name is no name");
     check(cleanMarkName(std::string(40, 'x')).size() == kMaxMarkNameBytes,
           "names are clipped to what the prompt accepts");
@@ -1999,6 +2077,9 @@ void testCompass() {
               m[8] == 1 && m[1] == 0,
           "the sysfs mount matrix parses");
     check(!Compass::parseMountMatrix("1, 0; 0, 1", m), "a short matrix is rejected");
+    check(!Compass::parseMountMatrix("nan, 0, 0; 0, 1, 0; 0, 0, 1", m) &&
+              !Compass::parseMountMatrix("1oops, 0, 0; 0, 1, 0; 0, 0, 1", m) && m[0] == 1,
+          "a malformed mount matrix cannot replace the last valid matrix");
 
 #if defined(__linux__)
     CompassFixture f = makeCompassFixture();
@@ -2078,6 +2159,16 @@ void testCompass() {
     f.setField(cx + 1000.0, cy, 500.0);
     compass.poll(t + 10);
     check(compass.reading().tiltDeg > 80.0, "polling faster than the interval reads nothing");
+    check(fixtureFile(f.magn + "/in_magn_x_raw", "nan\n"), "write an invalid magnetometer sample");
+    t += Compass::kPollIntervalMs;
+    compass.poll(t);
+    check(!compass.reading().valid && !compass.usable(t),
+          "an invalid raw sample cannot provide a compass heading");
+    f.setField(cx + 1000.0, cy, 500.0);
+    t += Compass::kPollIntervalMs;
+    compass.poll(t);
+    check(compass.reading().valid && std::isfinite(compass.reading().headingDeg),
+          "a valid sample recovers without a NaN poisoning the smoothing history");
 #endif
 }
 

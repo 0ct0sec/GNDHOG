@@ -1,6 +1,7 @@
 #include "gnss.h"
 #include "input.h"
 #include "strutil.h"
+#include "numutil.h"
 
 #include <cctype>
 #include <cstdio>
@@ -28,41 +29,26 @@ bool legibleText(const std::string& line) {
 
 // ddmm.mmmm with a hemisphere letter. Degrees and minutes are not separated by
 // anything, which is why this cannot be a plain strtod.
-bool parseCoordinate(const std::string& value, const std::string& hemisphere, double& out) {
-    if (value.size() < 3 || hemisphere.empty()) return false;
+bool parseCoordinate(const std::string& value, const std::string& hemisphere,
+                     bool latitude, double& out) {
+    if (hemisphere.size() != 1 || value.find_first_not_of("0123456789.") != std::string::npos) {
+        return false;
+    }
+    const char h = static_cast<char>(std::toupper(static_cast<unsigned char>(hemisphere[0])));
+    if (latitude ? (h != 'N' && h != 'S') : (h != 'E' && h != 'W')) return false;
     const size_t dot = value.find('.');
     const size_t degreeDigits = (dot == std::string::npos ? value.size() : dot);
-    if (degreeDigits < 3) return false;
+    if (degreeDigits != (latitude ? 4u : 5u) ||
+        (dot != std::string::npos && dot + 1 == value.size())) return false;
     const std::string degreesText = value.substr(0, degreeDigits - 2);
     const std::string minutesText = value.substr(degreeDigits - 2);
-    char* end = nullptr;
-    const double degrees = std::strtod(degreesText.c_str(), &end);
-    if (end == degreesText.c_str()) return false;
-    const double minutes = std::strtod(minutesText.c_str(), &end);
-    if (end == minutesText.c_str()) return false;
+    double degrees = 0.0, minutes = 0.0;
+    if (!parseFiniteDouble(degreesText, degrees) || !parseFiniteDouble(minutesText, minutes) ||
+        minutes >= 60.0) return false;
     double result = degrees + minutes / 60.0;
-    const char h = static_cast<char>(std::toupper(static_cast<unsigned char>(hemisphere[0])));
+    if (result > (latitude ? 90.0 : 180.0)) return false;
     if (h == 'S' || h == 'W') result = -result;
-    else if (h != 'N' && h != 'E') return false;
     out = result;
-    return true;
-}
-
-bool parseDouble(const std::string& value, double& out) {
-    if (value.empty()) return false;
-    char* end = nullptr;
-    const double parsed = std::strtod(value.c_str(), &end);
-    if (end == value.c_str()) return false;
-    out = parsed;
-    return true;
-}
-
-bool parseInt(const std::string& value, int& out) {
-    if (value.empty()) return false;
-    char* end = nullptr;
-    const long parsed = std::strtol(value.c_str(), &end, 10);
-    if (end == value.c_str()) return false;
-    out = static_cast<int>(parsed);
     return true;
 }
 
@@ -140,7 +126,8 @@ bool parseNmeaSentence(const std::string& sentence, GnssFix& fix, uint64_t nowMs
     const std::string body = sentence.substr(1, (star == std::string::npos ? sentence.size() - 1
                                                                            : star - 1));
     const std::vector<std::string> f = splitFields(body, ',');
-    if (f.empty() || f[0].size() < 5) return false;
+    if (f.empty() || f[0].size() != 5 || f[0].find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ") !=
+                                             std::string::npos) return false;
     // Talker IDs differ per constellation (GP, GL, GA, GB, GN); the last three
     // characters are the sentence type and the only part worth switching on.
     const std::string type = f[0].substr(f[0].size() - 3);
@@ -161,21 +148,25 @@ bool parseNmeaSentence(const std::string& sentence, GnssFix& fix, uint64_t nowMs
     if (type == "GGA") {
         if (f.size() < 10) return false;
         int quality = 0;
-        parseInt(f[6], quality);
+        parseInteger(f[6], quality);
         double lat = 0.0, lon = 0.0;
-        const bool haveCoords = parseCoordinate(f[2], f[3], lat) &&
-                                parseCoordinate(f[4], f[5], lon);
+        const bool haveCoords = parseCoordinate(f[2], f[3], true, lat) &&
+                                parseCoordinate(f[4], f[5], false, lon);
         if (quality > 0 && haveCoords) {
             adoptCoords(lat, lon);
-        } else if (quality == 0) {
+        } else {
             fix.valid = false;
         }
-        parseInt(f[7], fix.satellitesUsed);
-        parseDouble(f[8], fix.hdop);
+        int used = 0;
+        fix.satellitesUsed = parseInteger(f[7], used) && used >= 0 && used <= 999 ? used : 0;
+        double hdop = 0.0;
+        fix.hdop = parseFiniteDouble(f[8], hdop) && hdop >= 0.0 ? hdop : 0.0;
         double altitude = 0.0;
-        if (f.size() > 9 && parseDouble(f[9], altitude)) {
+        fix.haveAltitude = parseFiniteDouble(f[9], altitude) &&
+                           altitude >= std::numeric_limits<int32_t>::min() &&
+                           altitude <= std::numeric_limits<int32_t>::max();
+        if (fix.haveAltitude) {
             fix.altitudeM = altitude;
-            fix.haveAltitude = true;
         }
         noteClock(f[1]);
         return true;
@@ -183,27 +174,28 @@ bool parseNmeaSentence(const std::string& sentence, GnssFix& fix, uint64_t nowMs
 
     if (type == "RMC") {
         if (f.size() < 10) return false;
-        const bool active = !f[2].empty() &&
+        const bool active = f[2].size() == 1 &&
                             std::toupper(static_cast<unsigned char>(f[2][0])) == 'A';
         double lat = 0.0, lon = 0.0;
-        const bool haveCoords = parseCoordinate(f[3], f[4], lat) &&
-                                parseCoordinate(f[5], f[6], lon);
+        const bool haveCoords = parseCoordinate(f[3], f[4], true, lat) &&
+                                parseCoordinate(f[5], f[6], false, lon);
         if (active && haveCoords) {
             adoptCoords(lat, lon);
             uint32_t epoch = 0;
             if (epochFromNmea(f[9], f[1], epoch)) fix.utcSeconds = epoch;
-        } else if (!active) {
+        } else {
             fix.valid = false;
         }
         double speedKnots = 0.0;
-        if (parseDouble(f[7], speedKnots)) {
+        fix.haveSpeed = parseFiniteDouble(f[7], speedKnots) && speedKnots >= 0.0 &&
+                        std::isfinite(speedKnots * 1.852);
+        if (fix.haveSpeed) {
             fix.speedKph = speedKnots * 1.852;
-            fix.haveSpeed = true;
         }
         double course = 0.0;
-        if (parseDouble(f[8], course)) {
+        fix.haveCourse = parseFiniteDouble(f[8], course) && course >= 0.0 && course < 360.0;
+        if (fix.haveCourse) {
             fix.courseDeg = course;
-            fix.haveCourse = true;
         }
         noteClock(f[1]);
         return true;
@@ -212,7 +204,7 @@ bool parseNmeaSentence(const std::string& sentence, GnssFix& fix, uint64_t nowMs
     if (type == "GSV") {
         if (f.size() < 4) return false;
         int inView = 0;
-        if (parseInt(f[3], inView)) {
+        if (parseInteger(f[3], inView) && inView >= 0 && inView <= 999) {
             // Field 3 is that constellation's total, so the sky is the sum
             // over talkers, not whichever talker spoke last.
             fix.inViewByTalker[f[0].substr(0, f[0].size() - 3)] = inView;

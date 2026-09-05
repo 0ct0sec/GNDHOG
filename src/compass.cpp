@@ -1,6 +1,7 @@
 #include "compass.h"
 #include "storage.h"
 #include "strutil.h"
+#include "numutil.h"
 
 #include <algorithm>
 #include <cmath>
@@ -15,13 +16,7 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 
 bool readNumber(const std::string& path, double& out) {
-    const std::string text = readFirstLine(path);
-    if (text.empty()) return false;
-    char* end = nullptr;
-    const double value = std::strtod(text.c_str(), &end);
-    if (end == text.c_str()) return false;
-    out = value;
-    return true;
+    return parseFiniteDouble(readFirstLine(path), out);
 }
 
 bool fileExists(const std::string& path) {
@@ -77,9 +72,8 @@ bool Compass::parseMountMatrix(const std::string& text, double matrix[9]) {
         const char c = i < text.size() ? text[i] : ';';
         if (c == ',' || c == ';') {
             if (count >= 9) return false;
-            char* end = nullptr;
-            const double value = std::strtod(cell.c_str(), &end);
-            if (end == cell.c_str()) return false;
+            double value = 0.0;
+            if (!parseFiniteDouble(cell, value)) return false;
             parsed[count++] = value;
             cell.clear();
         } else if (c != ' ') {

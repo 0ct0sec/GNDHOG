@@ -1,5 +1,6 @@
 #include "storage.h"
 #include "strutil.h"
+#include "numutil.h"
 
 #include <algorithm>
 #include <cctype>
@@ -329,6 +330,7 @@ std::vector<std::string> Storage::loadHistory() const {
 // ------------------------------------------------------------------- Config
 
 void Config::load(const Storage& s) {
+    values_.clear();
     std::ifstream f(s.configPath());
     std::string line;
     while (std::getline(f, line)) {
@@ -360,26 +362,24 @@ std::string Config::get(const std::string& key, const std::string& fallback) con
 int Config::getInt(const std::string& key, int fallback) const {
     const auto it = values_.find(key);
     if (it == values_.end()) return fallback;
-    try {
-        return std::stoi(it->second, nullptr, 0);
-    } catch (...) {
-        return fallback;
-    }
+    int value = 0;
+    return parseInteger(it->second, value, 0) ? value : fallback;
 }
 
 bool Config::getBool(const std::string& key, bool fallback) const {
     const auto it = values_.find(key);
     if (it == values_.end()) return fallback;
-    const std::string v = it->second;
-    return v == "1" || v == "true" || v == "yes" || v == "on";
+    const std::string v = lower(trim(it->second));
+    if (v == "1" || v == "true" || v == "yes" || v == "on") return true;
+    if (v == "0" || v == "false" || v == "no" || v == "off") return false;
+    return fallback;
 }
 
 double Config::getDouble(const std::string& key, double fallback) const {
     const auto it = values_.find(key);
     if (it == values_.end()) return fallback;
-    char* end = nullptr;
-    const double value = std::strtod(it->second.c_str(), &end);
-    return end == it->second.c_str() ? fallback : value;
+    double value = 0.0;
+    return parseFiniteDouble(it->second, value) ? value : fallback;
 }
 
 void Config::set(const std::string& key, const std::string& value) { values_[key] = value; }

@@ -3,6 +3,7 @@
 #include "simfc.h"
 #include "simmesh.h"
 #include "strutil.h"
+#include "numutil.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -495,10 +496,9 @@ bool App::setup(const Options& opt, std::string& error) {
     // Sym-layer corrections, e.g. `sym.0x28 = _`.
     for (const auto& kv : config_.all()) {
         if (!startsWith(kv.first, "sym.") || kv.second.empty()) continue;
-        try {
-            const int scan = std::stoi(kv.first.substr(4), nullptr, 0);
+        int scan = 0;
+        if (parseInteger(kv.first.substr(4), scan, 0) && scan >= 0) {
             keyboard_.decoder().setSymOverride(scan, kv.second[0]);
-        } catch (...) {
         }
     }
 

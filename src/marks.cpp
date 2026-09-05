@@ -1,9 +1,9 @@
 #include "marks.h"
 #include "meshtastic.h"
 #include "strutil.h"
+#include "numutil.h"
 
 #include <cstdio>
-#include <cstdlib>
 
 namespace bf {
 
@@ -51,13 +51,10 @@ std::vector<Mark> parseMarks(const std::string& text) {
         if (fields.size() < 4) continue;
 
         Mark m;
-        m.stampUtc = std::strtoll(fields[0].c_str(), nullptr, 10);
+        if (!parseInteger(fields[0], m.stampUtc) || m.stampUtc < 0) continue;
         m.name = cleanMarkName(meshUnescapeField(fields[1]));
-        char* end = nullptr;
-        m.latitude = std::strtod(fields[2].c_str(), &end);
-        if (end == fields[2].c_str()) continue;
-        m.longitude = std::strtod(fields[3].c_str(), &end);
-        if (end == fields[3].c_str()) continue;
+        if (!parseFiniteDouble(fields[2], m.latitude) ||
+            !parseFiniteDouble(fields[3], m.longitude)) continue;
         // A coordinate the planet does not have is a corrupted line, not a
         // place; it is dropped rather than drawn at the edge of the map.
         if (m.latitude < -90.0 || m.latitude > 90.0 ||
@@ -65,8 +62,7 @@ std::vector<Mark> parseMarks(const std::string& text) {
             continue;
         }
         if (fields.size() > 4 && !fields[4].empty()) {
-            m.altitudeM = static_cast<int32_t>(std::strtol(fields[4].c_str(), &end, 10));
-            m.haveAltitude = end != fields[4].c_str();
+            m.haveAltitude = parseInteger(fields[4], m.altitudeM);
         }
         if (fields.size() > 5) m.source = meshUnescapeField(fields[5]);
         if (m.name.empty()) m.name = "(unnamed)";
