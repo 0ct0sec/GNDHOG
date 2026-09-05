@@ -329,9 +329,11 @@ bool decodeMeshPosition(const std::string& payload, MeshPosition& out) {
         default: break;
         }
     }
-    // Presence, not plausibility: a node at 0,0 that actually reported 0,0 is
-    // still a report, and a node that reported nothing is not at the equator.
-    out.valid = r.ok() && haveLat && haveLon;
+    // A reported 0,0 is a place, but absent coordinates or numbers outside
+    // the planet's range must never steer the Locate screen.
+    out.valid = r.ok() && haveLat && haveLon &&
+                out.latitude >= -90.0 && out.latitude <= 90.0 &&
+                out.longitude >= -180.0 && out.longitude <= 180.0;
     return r.ok();
 }
 
@@ -367,6 +369,26 @@ bool decodeMeshDeviceMetrics(const std::string& payload, bool& haveBattery,
     return r.ok();
 }
 
+bool decodeMeshTelemetry(const std::string& payload, bool& haveBattery,
+                         uint32_t& batteryLevel, bool& haveVoltage, float& voltage) {
+    haveBattery = haveVoltage = false;
+    batteryLevel = 0;
+    voltage = 0.0f;
+    pb::Reader r(payload);
+    while (r.next()) {
+        if (r.field() != 2) continue;   // Telemetry.device_metrics
+        bool gotBattery = false, gotVoltage = false;
+        uint32_t battery = 0;
+        float volts = 0.0f;
+        if (!decodeMeshDeviceMetrics(r.bytes(), gotBattery, battery, gotVoltage, volts)) return false;
+        // Repeated submessages merge their reported fields. The caller only
+        // publishes these readings once the entire wrapper has decoded.
+        if (gotBattery) { haveBattery = true; batteryLevel = battery; }
+        if (gotVoltage) { haveVoltage = true; voltage = volts; }
+    }
+    return r.ok();
+}
+
 namespace {
 
 bool decodeNodeInfo(const std::string& payload, MeshNode& out) {
@@ -375,13 +397,17 @@ bool decodeNodeInfo(const std::string& payload, MeshNode& out) {
     while (r.next()) {
         switch (r.field()) {
         case kNodeNum: out.num = r.u32(); break;
-        case kNodeUser: decodeMeshUser(r.bytes(), out.user); break;
-        case kNodePosition: decodeMeshPosition(r.bytes(), out.position); break;
+        case kNodeUser:
+            if (!decodeMeshUser(r.bytes(), out.user)) return false;
+            break;
+        case kNodePosition:
+            if (!decodeMeshPosition(r.bytes(), out.position)) return false;
+            break;
         case kNodeSnr: out.snr = r.f32(); out.haveSnr = true; break;
         case kNodeLastHeard: out.lastHeard = r.fixed32(); break;
         case kNodeDeviceMetrics:
-            decodeMeshDeviceMetrics(r.bytes(), out.haveBattery, out.batteryLevel,
-                                    out.haveVoltage, out.voltage);
+            if (!decodeMeshDeviceMetrics(r.bytes(), out.haveBattery, out.batteryLevel,
+                                         out.haveVoltage, out.voltage)) return false;
             break;
         case kNodeViaMqtt: out.viaMqtt = r.boolean(); break;
         case kNodeHopsAway: out.hopsAway = r.u32(); out.haveHops = true; break;
@@ -392,7 +418,7 @@ bool decodeNodeInfo(const std::string& payload, MeshNode& out) {
     return r.ok();
 }
 
-void decodeData(const std::string& payload, MeshFromRadio& out) {
+bool decodeData(const std::string& payload, MeshFromRadio& out) {
     pb::Reader r(payload);
     while (r.next()) {
         switch (r.field()) {
@@ -402,17 +428,23 @@ void decodeData(const std::string& payload, MeshFromRadio& out) {
         default: break;
         }
     }
+    return r.ok();
 }
 
-void decodePacket(const std::string& payload, MeshFromRadio& out) {
+bool decodePacket(const std::string& payload, MeshFromRadio& out) {
     pb::Reader r(payload);
     while (r.next()) {
         switch (r.field()) {
         case kPacketFrom: out.from = r.fixed32(); break;
         case kPacketTo: out.to = r.fixed32(); break;
         case kPacketChannel: out.channel = r.u32(); break;
-        case kPacketDecoded: decodeData(r.bytes(), out); break;
-        case kPacketEncrypted: out.encrypted = true; break;
+        case kPacketDecoded:
+            if (!decodeData(r.bytes(), out)) return false;
+            break;
+        case kPacketEncrypted:
+            if (r.type() != pb::WireType::Bytes) return false;
+            out.encrypted = true;
+            break;
         case kPacketId: out.packetId = r.fixed32(); break;
         case kPacketRxTime: out.rxTime = r.fixed32(); break;
         case kPacketRxSnr: out.rxSnr = r.f32(); out.haveSnr = true; break;
@@ -423,9 +455,10 @@ void decodePacket(const std::string& payload, MeshFromRadio& out) {
         default: break;
         }
     }
+    return r.ok();
 }
 
-void decodeConfig(const std::string& payload, MeshFromRadio& out) {
+bool decodeConfig(const std::string& payload, MeshFromRadio& out) {
     pb::Reader r(payload);
     while (r.next()) {
         if (r.field() == kConfigLora) {
@@ -441,6 +474,7 @@ void decodeConfig(const std::string& payload, MeshFromRadio& out) {
                 default: break;
                 }
             }
+            if (!lora.ok()) return false;
         } else if (r.field() == kConfigPosition) {
             out.havePositionConfig = true;
             pb::Reader pos = r.sub();
@@ -448,11 +482,13 @@ void decodeConfig(const std::string& payload, MeshFromRadio& out) {
                 if (pos.field() == kPositionCfgGpsMode) out.gpsMode = pos.u32();
                 else if (pos.field() == kPositionCfgFixed) out.fixedPosition = pos.boolean();
             }
+            if (!pos.ok()) return false;
         }
     }
+    return r.ok();
 }
 
-void decodeChannel(const std::string& payload, MeshFromRadio& out) {
+bool decodeChannel(const std::string& payload, MeshFromRadio& out) {
     pb::Reader r(payload);
     while (r.next()) {
         switch (r.field()) {
@@ -463,14 +499,16 @@ void decodeChannel(const std::string& payload, MeshFromRadio& out) {
             while (settings.next()) {
                 if (settings.field() == kChannelSettingsName) out.channelName = settings.bytes();
             }
+            if (!settings.ok()) return false;
             break;
         }
         default: break;
         }
     }
+    return r.ok();
 }
 
-void decodeMetadata(const std::string& payload, MeshFromRadio& out) {
+bool decodeMetadata(const std::string& payload, MeshFromRadio& out) {
     pb::Reader r(payload);
     while (r.next()) {
         switch (r.field()) {
@@ -480,6 +518,7 @@ void decodeMetadata(const std::string& payload, MeshFromRadio& out) {
         default: break;
         }
     }
+    return r.ok();
 }
 
 } // namespace
@@ -491,7 +530,7 @@ bool decodeMeshFromRadio(const std::string& body, MeshFromRadio& out) {
         switch (r.field()) {
         case kFromRadioPacket:
             out.kind = MeshFromRadio::Kind::Packet;
-            decodePacket(r.bytes(), out);
+            if (!decodePacket(r.bytes(), out)) return false;
             break;
         case kFromRadioMyInfo: {
             out.kind = MeshFromRadio::Kind::MyInfo;
@@ -499,15 +538,16 @@ bool decodeMeshFromRadio(const std::string& body, MeshFromRadio& out) {
             while (info.next()) {
                 if (info.field() == kMyInfoNodeNum) out.myNodeNum = info.u32();
             }
+            if (!info.ok()) return false;
             break;
         }
         case kFromRadioNodeInfo:
             out.kind = MeshFromRadio::Kind::NodeInfo;
-            decodeNodeInfo(r.bytes(), out.node);
+            if (!decodeNodeInfo(r.bytes(), out.node)) return false;
             break;
         case kFromRadioConfig:
             out.kind = MeshFromRadio::Kind::Config;
-            decodeConfig(r.bytes(), out);
+            if (!decodeConfig(r.bytes(), out)) return false;
             break;
         case kFromRadioLogRecord: {
             out.kind = MeshFromRadio::Kind::LogRecord;
@@ -515,6 +555,7 @@ bool decodeMeshFromRadio(const std::string& body, MeshFromRadio& out) {
             while (record.next()) {
                 if (record.field() == 1) out.logText = record.bytes();
             }
+            if (!record.ok()) return false;
             break;
         }
         case kFromRadioConfigCompleteId:
@@ -522,15 +563,16 @@ bool decodeMeshFromRadio(const std::string& body, MeshFromRadio& out) {
             out.configCompleteId = r.u32();
             break;
         case kFromRadioRebooted:
+            if (r.type() != pb::WireType::Varint) return false;
             out.kind = MeshFromRadio::Kind::Rebooted;
             break;
         case kFromRadioChannel:
             out.kind = MeshFromRadio::Kind::Channel;
-            decodeChannel(r.bytes(), out);
+            if (!decodeChannel(r.bytes(), out)) return false;
             break;
         case kFromRadioMetadata:
             out.kind = MeshFromRadio::Kind::Metadata;
-            decodeMetadata(r.bytes(), out);
+            if (!decodeMetadata(r.bytes(), out)) return false;
             break;
         default:
             break;

@@ -13,6 +13,9 @@ bool Reader::readVarint(uint64_t& out) {
     for (int i = 0; i < 10; ++i) {
         if (pos_ >= size_) return false;
         const uint8_t byte = static_cast<uint8_t>(data_[pos_++]);
+        // Nine groups already filled 63 bits. Only bit 0 fits in the tenth;
+        // silently discarding the rest can turn a corrupt length into zero.
+        if (i == 9 && byte > 1) return false;
         result |= static_cast<uint64_t>(byte & 0x7F) << shift;
         if ((byte & 0x80) == 0) {
             out = result;
@@ -30,7 +33,7 @@ bool Reader::next() {
     if (!ok_ || pos_ >= size_) return false;
 
     uint64_t tag = 0;
-    if (!readVarint(tag)) { ok_ = false; return false; }
+    if (!readVarint(tag) || (tag >> 3) > 0x1FFFFFFFu) { ok_ = false; return false; }
     field_ = static_cast<uint32_t>(tag >> 3);
     type_ = static_cast<WireType>(tag & 0x07);
     if (field_ == 0) { ok_ = false; return false; }
@@ -81,39 +84,48 @@ bool Reader::next() {
     }
 }
 
-uint64_t Reader::varint() const {
-    return type_ == WireType::Varint ? value_ : 0;
+bool Reader::expect(WireType type) {
+    if (type_ != type) ok_ = false;
+    return ok_;
 }
 
-uint32_t Reader::u32() const { return static_cast<uint32_t>(varint()); }
+uint64_t Reader::varint() {
+    return expect(WireType::Varint) ? value_ : 0;
+}
 
-int32_t Reader::i32() const { return static_cast<int32_t>(static_cast<uint32_t>(varint())); }
+uint32_t Reader::u32() {
+    const uint64_t value = varint();
+    if (value > UINT32_MAX) { ok_ = false; return 0; }
+    return static_cast<uint32_t>(value);
+}
 
-int32_t Reader::s32() const {
-    const uint32_t v = static_cast<uint32_t>(varint());
+int32_t Reader::i32() { return static_cast<int32_t>(static_cast<uint32_t>(varint())); }
+
+int32_t Reader::s32() {
+    const uint32_t v = u32();
     return static_cast<int32_t>((v >> 1) ^ (~(v & 1) + 1));
 }
 
-uint32_t Reader::fixed32() const {
-    return type_ == WireType::Fixed32 ? static_cast<uint32_t>(value_) : 0;
+uint32_t Reader::fixed32() {
+    return expect(WireType::Fixed32) ? static_cast<uint32_t>(value_) : 0;
 }
 
-int32_t Reader::sfixed32() const { return static_cast<int32_t>(fixed32()); }
+int32_t Reader::sfixed32() { return static_cast<int32_t>(fixed32()); }
 
-float Reader::f32() const {
+float Reader::f32() {
     const uint32_t bits = fixed32();
     float out = 0.0f;
     std::memcpy(&out, &bits, sizeof(out));
     return out;
 }
 
-std::string Reader::bytes() const {
-    if (type_ != WireType::Bytes || payload_ == nullptr) return {};
+std::string Reader::bytes() {
+    if (!expect(WireType::Bytes) || payload_ == nullptr) return {};
     return std::string(payload_, payloadSize_);
 }
 
-Reader Reader::sub() const {
-    if (type_ != WireType::Bytes || payload_ == nullptr) return Reader();
+Reader Reader::sub() {
+    if (!expect(WireType::Bytes) || payload_ == nullptr) return Reader();
     return Reader(payload_, payloadSize_);
 }
 

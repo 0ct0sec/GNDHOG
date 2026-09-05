@@ -43,23 +43,23 @@ public:
     WireType type() const { return type_; }
     bool ok() const { return ok_; }
 
-    // Accessors for the field `next()` just landed on. Each returns zero (or an
-    // empty string) when the field on the wire is not the type being asked for,
-    // because a peer is allowed to have changed a field's type and that must
-    // not be able to produce a nonsense reading here.
-    uint64_t varint() const;
-    bool boolean() const { return varint() != 0; }
-    uint32_t u32() const;
-    int32_t i32() const;          // int32 / enum: a varint in two's complement
-    int32_t s32() const;          // sint32: zigzag
-    uint32_t fixed32() const;
-    int32_t sfixed32() const;
-    float f32() const;
-    std::string bytes() const;
-    Reader sub() const;           // nested message inside a length-delimited field
+    // Accessors validate the expected type and mark the reader failed on a
+    // mismatch. A fabricated zero could otherwise look like an ACK or a fix
+    // at the equator. Unknown fields remain safe to skip without an accessor.
+    uint64_t varint();
+    bool boolean() { return varint() != 0; }
+    uint32_t u32();
+    int32_t i32();          // int32 / enum: a varint in two's complement
+    int32_t s32();          // sint32: zigzag
+    uint32_t fixed32();
+    int32_t sfixed32();
+    float f32();
+    std::string bytes();
+    Reader sub();           // nested message inside a length-delimited field
 
 private:
     bool readVarint(uint64_t& out);
+    bool expect(WireType type);
 
     const char* data_ = nullptr;
     size_t size_ = 0;

@@ -1229,6 +1229,34 @@ void testProtobufWire() {
     pb::Reader bogus(endless);
     check(!bogus.next() && !bogus.ok(), "an over-long varint is rejected instead of wrapping");
 
+    const std::string overflow = std::string(9, static_cast<char>(0x80)) + '\x02';
+    const std::string overflowValue = std::string("\x08", 1) + overflow;
+    pb::Reader valueOverflow(overflowValue);
+    check(!valueOverflow.next() && !valueOverflow.ok(),
+          "the tenth varint byte cannot silently discard bits above uint64");
+    const std::string overflowLength = std::string("\x0A", 1) + overflow;
+    pb::Reader lengthOverflow(overflowLength);
+    check(!lengthOverflow.next() && !lengthOverflow.ok(),
+          "an overflowing length cannot become an empty successful field");
+    pb::Writer boundary;
+    boundary.varint(0x1FFFFFFFu, UINT64_MAX);
+    pb::Reader lastField(boundary.data());
+    check(lastField.next() && lastField.field() == 0x1FFFFFFFu &&
+              lastField.varint() == UINT64_MAX && lastField.ok(),
+          "the largest legal field number and uint64 value still decode");
+    boundary.clear();
+    boundary.varint(0x20000000u, 1);
+    pb::Reader illegalField(boundary.data());
+    check(!illegalField.next() && !illegalField.ok(), "field numbers are limited to 29 bits");
+    const std::string aliasedTag("\x88\x80\x80\x80\x80\x01\x00", 7);
+    pb::Reader alias(aliasedTag);
+    check(!alias.next() && !alias.ok(), "an oversized tag cannot wrap back to a known field");
+    boundary.clear();
+    boundary.varint(1, 0x100000000ull);
+    pb::Reader narrowed(boundary.data());
+    check(narrowed.next() && narrowed.u32() == 0 && !narrowed.ok(),
+          "a uint32 overflow is an error instead of a fabricated zero");
+
     // Unknown fields, which is how this survives a firmware newer than itself.
     pb::Writer future;
     future.varint(1, 5);
@@ -1396,6 +1424,67 @@ void testMeshCodec() {
     haveError = true;
     check(decodeMeshRouting(std::string(), haveError, reason) && !haveError,
           "a routing message with no error field is not a delivery report");
+    pb::Writer wrongAck;
+    wrongAck.bytes(3, "not an error code");
+    check(!decodeMeshRouting(wrongAck.data(), haveError, reason),
+          "a routing field with the wrong wire type cannot acknowledge delivery");
+    wrongAck.clear();
+    wrongAck.varint(3, 0x100000000ull);
+    check(!decodeMeshRouting(wrongAck.data(), haveError, reason),
+          "a routing reason larger than uint32 cannot wrap into ACK");
+
+    pb::Writer wrongPosition;
+    wrongPosition.varint(1, 0);
+    wrongPosition.varint(2, 0);
+    check(!decodeMeshPosition(wrongPosition.data(), absent) && !absent.valid,
+          "coordinates of the wrong wire type cannot fabricate a fix at zero");
+    wrongPosition.clear();
+    wrongPosition.sfixed32(1, 900000001);
+    wrongPosition.sfixed32(2, 0);
+    check(decodeMeshPosition(wrongPosition.data(), absent) && !absent.valid,
+          "a decoded position beyond the pole is not navigable");
+    wrongPosition.clear();
+    wrongPosition.sfixed32(1, 0);
+    wrongPosition.sfixed32(2, 0);
+    check(decodeMeshPosition(wrongPosition.data(), absent) && absent.valid,
+          "correctly typed coordinates at zero remain a valid reported position");
+
+    const std::string broken("\x80", 1);
+    for (uint32_t field : {2u, 3u, 4u, 5u, 6u, 10u, 13u}) {
+        pb::Writer wrapped;
+        wrapped.bytes(field, broken);
+        MeshFromRadio malformed;
+        check(!decodeMeshFromRadio(wrapped.data(), malformed),
+              "a truncated nested FromRadio message is rejected: " + std::to_string(field));
+    }
+    for (const auto& fields : std::vector<std::pair<uint32_t, uint32_t>>{
+             {2, 4}, {4, 2}, {4, 3}, {4, 6}, {5, 2}, {5, 6}, {10, 2}}) {
+        pb::Writer nested, wrapped;
+        nested.bytes(fields.second, broken);
+        wrapped.message(fields.first, nested);
+        MeshFromRadio malformed;
+        check(!decodeMeshFromRadio(wrapped.data(), malformed),
+              "a grandchild decode failure reaches the radio frame: " +
+                  std::to_string(fields.first) + "/" + std::to_string(fields.second));
+    }
+
+    pb::Writer batteryMetrics, voltageMetrics, telemetry;
+    batteryMetrics.varint(1, 42);
+    voltageMetrics.f32(2, 3.75f);
+    telemetry.message(2, batteryMetrics);
+    telemetry.message(2, voltageMetrics);
+    bool haveBattery = false, haveVoltage = false;
+    uint32_t battery = 0;
+    float voltage = 0;
+    check(decodeMeshTelemetry(telemetry.data(), haveBattery, battery, haveVoltage, voltage) &&
+              haveBattery && battery == 42 && haveVoltage && voltage == 3.75f,
+          "repeated telemetry submessages retain all reported metrics");
+    check(!decodeMeshTelemetry(telemetry.data() + broken, haveBattery, battery, haveVoltage, voltage),
+          "a valid telemetry prefix cannot hide a malformed wrapper tail");
+    telemetry.clear();
+    telemetry.bytes(2, batteryMetrics.data() + broken);
+    check(!decodeMeshTelemetry(telemetry.data(), haveBattery, battery, haveVoltage, voltage),
+          "a partial device metric cannot hide a malformed nested tail");
 
     checkEq(meshNodeIdText(0x0BADF00Du), "!0badf00d", "node ids render the Meshtastic way");
     checkEq(meshAgeText(10), "now", "a fresh contact reads as now");

@@ -1,6 +1,5 @@
 #include "meshsession.h"
 #include "input.h"
-#include "protowire.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -476,22 +475,16 @@ void MeshSession::handlePacket(const MeshFromRadio& frame, uint64_t now) {
         bool haveBattery = false, haveVoltage = false;
         uint32_t battery = 0;
         float voltage = 0.0f;
-        // Telemetry wraps its variant; DeviceMetrics is field 2.
-        pb::Reader reader(frame.payload);
-        while (reader.next()) {
-            if (reader.field() != 2) continue;
-            if (decodeMeshDeviceMetrics(reader.bytes(), haveBattery, battery,
-                                        haveVoltage, voltage)) {
-                MeshNode& node = nodeSlot(frame.from);
-                if (haveBattery) {
-                    node.batteryLevel = battery;
-                    node.haveBattery = true;
-                }
-                if (haveVoltage) {
-                    node.voltage = voltage;
-                    node.haveVoltage = true;
-                }
-            }
+        // A valid prefix of a broken telemetry message is not a new reading.
+        if (!decodeMeshTelemetry(frame.payload, haveBattery, battery, haveVoltage, voltage)) break;
+        MeshNode& node = nodeSlot(frame.from);
+        if (haveBattery) {
+            node.batteryLevel = battery;
+            node.haveBattery = true;
+        }
+        if (haveVoltage) {
+            node.voltage = voltage;
+            node.haveVoltage = true;
         }
         break;
     }

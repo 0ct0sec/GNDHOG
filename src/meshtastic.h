@@ -210,6 +210,8 @@ bool decodeMeshUser(const std::string& payload, MeshUser& out);
 bool decodeMeshRouting(const std::string& payload, bool& haveError, uint32_t& errorReason);
 bool decodeMeshDeviceMetrics(const std::string& payload, bool& haveBattery,
                              uint32_t& batteryLevel, bool& haveVoltage, float& voltage);
+bool decodeMeshTelemetry(const std::string& payload, bool& haveBattery,
+                         uint32_t& batteryLevel, bool& haveVoltage, float& voltage);
 
 // ------------------------------------------------------------------ helpers
 
