@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=GNDHOG ZERO
-Comment=Betaflight CLI over USB or UART
+Comment=Betaflight CLI, backups, and Meshtastic chat
 Exec=/opt/bfcli/run-bfcli
 Icon=share/images/gndhog-zero_100.png
 Terminal=false

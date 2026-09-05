@@ -62,7 +62,8 @@ install -d -m 0755 \
     "$STAGE/opt/bfcli/bin" \
     "$STAGE/usr/share/APPLaunch/applications" \
     "$STAGE/usr/share/APPLaunch/share/images" \
-    "$STAGE/usr/share/doc/bfcli"
+    "$STAGE/usr/share/doc/bfcli/docs" \
+    "$STAGE/usr/share/doc/bfcli/store"
 
 install -m 0755 "$BINARY" "$STAGE/opt/bfcli/bin/bfcli"
 install -m 0755 "$ROOT/packaging/run-bfcli" "$STAGE/opt/bfcli/run-bfcli"
@@ -71,6 +72,11 @@ install -m 0644 "$ROOT/packaging/bfcli.desktop" \
 install -m 0644 "$ROOT/assets/gndhog-zero_100.png" \
     "$STAGE/usr/share/APPLaunch/share/images/gndhog-zero_100.png"
 install -m 0644 "$ROOT/README.md" "$STAGE/usr/share/doc/bfcli/README.md"
+install -m 0644 "$ROOT/LICENSE" "$STAGE/usr/share/doc/bfcli/LICENSE"
+install -m 0644 "$ROOT/store/icon.png" "$STAGE/usr/share/doc/bfcli/store/icon.png"
+for DOCUMENT in FIELD_GUIDE DEVELOPMENT PUBLISHING; do
+    install -m 0644 "$ROOT/docs/$DOCUMENT.md" "$STAGE/usr/share/doc/bfcli/docs/$DOCUMENT.md"
+done
 install -m 0644 "$ROOT/packaging/copyright" "$STAGE/usr/share/doc/bfcli/copyright"
 
 sed "s/@VERSION@/$VERSION/g" "$ROOT/packaging/control.in" > "$STAGE/DEBIAN/control"

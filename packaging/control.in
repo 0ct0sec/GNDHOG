@@ -4,9 +4,10 @@ Architecture: arm64
 Maintainer: 0ct0
 Section: utils
 Priority: optional
-Depends: libc6 (>= 2.38), libasound2t64 | libasound2
+Depends: libc6 (>= 2.38), libasound2t64 | libasound2, libpulse0
 Homepage: https://github.com/0ct0sec/GNDHOG
-Description: Betaflight CLI terminal for M5Stack Cardputer Zero
- GNDHOG ZERO provides field diagnostics, a native framebuffer terminal,
- command history, completion, and configuration backup and restore over USB
- or UART.
+Description: Betaflight and Meshtastic terminal for Cardputer Zero
+ GNDHOG ZERO provides Betaflight field checks, CLI command history,
+ completion, and configuration backup and restore over USB or UART.
+ A separate Meshtastic radio enables chat and local transcripts; an optional
+ GNSS receiver adds position sharing, range, bearing, and saved marks.

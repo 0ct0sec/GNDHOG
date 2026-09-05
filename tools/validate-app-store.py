@@ -385,8 +385,14 @@ def validate_package(errors: list[str], manifest: dict, package_path: Path) -> N
             ROOT / "assets/gndhog-zero_100.png", 0o644
         ),
         "usr/share/doc/bfcli/README.md": (ROOT / "README.md", 0o644),
+        "usr/share/doc/bfcli/LICENSE": (ROOT / "LICENSE", 0o644),
+        "usr/share/doc/bfcli/store/icon.png": (ROOT / "store/icon.png", 0o644),
         "usr/share/doc/bfcli/copyright": (ROOT / "packaging/copyright", 0o644),
     }
+    for document in ("FIELD_GUIDE", "DEVELOPMENT", "PUBLISHING"):
+        expected_payloads[f"usr/share/doc/bfcli/docs/{document}.md"] = (
+            ROOT / "docs" / f"{document}.md", 0o644,
+        )
     for required, (source, expected_mode) in expected_payloads.items():
         member = files.get(required)
         if member is None:
