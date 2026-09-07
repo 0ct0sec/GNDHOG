@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <ctime>
 #include <sstream>
+#include <utility>
 #include <poll.h>
 #include <unistd.h>
 
@@ -698,8 +699,16 @@ void App::loadMeshChats() {
     chatSequenceSeen_ = mesh_.chatSequence();
 }
 
-void App::flushMeshChats() {
+void App::flushMeshChats(uint64_t now) {
     for (uint32_t peer : mesh_.takeDirtyPeers()) {
+        if (std::find(unsavedMeshPeers_.begin(), unsavedMeshPeers_.end(), peer) ==
+            unsavedMeshPeers_.end()) unsavedMeshPeers_.push_back(peer);
+    }
+    if (unsavedMeshPeers_.empty() || (now != 0 && now < nextMeshChatSaveMs_)) return;
+    if (now == 0) now = nowMs();
+    std::vector<uint32_t> peers;
+    peers.swap(unsavedMeshPeers_);
+    for (uint32_t peer : peers) {
         const std::vector<MeshMessage>* log = mesh_.conversation(peer);
         const std::string path = storage_.meshDir() + "/" + meshChatFileName(peer);
         std::string error;
@@ -708,8 +717,10 @@ void App::flushMeshChats() {
             // Losing the transcript is worth saying out loud; the message
             // itself already went out over the air either way.
             showStatus("chat not saved: " + error, 6000);
+            unsavedMeshPeers_.push_back(peer);
         }
     }
+    nextMeshChatSaveMs_ = unsavedMeshPeers_.empty() ? 0 : now + 5000;
 }
 
 void App::startGnss(bool quiet) {
@@ -915,10 +926,16 @@ void App::clearConversation() {
                 " message(s) are deleted from this device. Nothing is recalled from "
                 "the mesh, and the other station keeps its own copy.",
             "Delete", [this, peer]() {
-                mesh_.clearConversation(peer);
                 std::string error;
                 const std::string path = storage_.meshDir() + "/" + meshChatFileName(peer);
-                storage_.deleteMeshChat(path, error);
+                if (!storage_.deleteMeshChat(path, error)) {
+                    showStatus("conversation not cleared: " + error, 6000);
+                    return;
+                }
+                mesh_.clearConversation(peer);
+                unsavedMeshPeers_.erase(
+                    std::remove(unsavedMeshPeers_.begin(), unsavedMeshPeers_.end(), peer),
+                    unsavedMeshPeers_.end());
                 // The dirty list is deliberately left alone: another peer may
                 // have an unwritten message in it, and this is not its problem.
                 chatRowsValid_ = false;
@@ -928,9 +945,18 @@ void App::clearConversation() {
 }
 
 void App::beginMeshSession() {
+    flushMeshChats(nowMs());
+    // Disk may still contain an older version after a failed save. Carry the
+    // in-memory version through session setup until a retry actually saves it.
+    std::vector<std::pair<uint32_t, std::vector<MeshMessage>>> unsaved;
+    for (uint32_t peer : unsavedMeshPeers_) {
+        const auto* log = mesh_.conversation(peer);
+        if (log) unsaved.emplace_back(peer, *log);
+    }
     mesh_.clearConversations();
     mesh_.takeDirtyPeers();
     loadMeshChats();
+    for (auto& entry : unsaved) mesh_.adoptConversation(entry.first, std::move(entry.second));
     nodeList_ = ListState{};
     chatPeer_ = kMeshBroadcast;
     chatRowsValid_ = false;
@@ -2667,6 +2693,7 @@ void App::onAboutKey(const KeyEvent& e) {
 void App::tick(uint64_t now) {
     pollGnss(now);
     pollCompass(now);
+    if (!meshMode()) flushMeshChats(now);
     if (meshMode()) {
         tickMesh(now);
         return;
@@ -2956,8 +2983,8 @@ void App::tickMesh(uint64_t now) {
         chatRowsValid_ = false;
         dirty_ = true;
         if (screen_ == Screen::Chat) mesh_.markRead(chatPeer_);
-        flushMeshChats();
     }
+    flushMeshChats(now);
 
     const int unread = mesh_.totalUnread();
     if (unread > meshUnreadSeen_) audio_.play(HudCue::Prompt);

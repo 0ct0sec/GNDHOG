@@ -248,7 +248,9 @@ private:
     bool linkConnected() const;
     void beginMeshSession();
     void loadMeshChats();
-    void flushMeshChats();
+    // A zero clock forces a final attempt at disconnect/shutdown. Normal ticks
+    // retain failed writes and wait between retries, including outside mesh mode.
+    void flushMeshChats(uint64_t now = 0);
     void openChat(uint32_t peer);
     void submitChatLine();
     // The recipient is passed in rather than read from chatPeer_: the node list
@@ -405,6 +407,8 @@ private:
     ListState nodeList_;
     uint64_t nodeSequenceSeen_ = 0;
     uint64_t chatSequenceSeen_ = 0;
+    std::vector<uint32_t> unsavedMeshPeers_;
+    uint64_t nextMeshChatSaveMs_ = 0;
     uint64_t meshNoteSeen_ = 0;
     uint32_t chatPeer_ = kMeshBroadcast;
     LineEditor chatEditor_;

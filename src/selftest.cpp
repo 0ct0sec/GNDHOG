@@ -3077,6 +3077,48 @@ void testMeshApp() {
         check(!reloaded.empty() && reloaded.back().text == "ping",
               "the saved transcript reads back as the same conversation");
 
+        // A path that cannot be removed must leave the in-memory conversation
+        // intact too. Otherwise it reappears from disk on the next launch.
+        check(::unlink(path.c_str()) == 0 && ::mkdir(path.c_str(), 0700) == 0,
+              "replace the fixture transcript with a blocked destination");
+        app.clearConversation();
+        app.handleKey(enter);
+        check(app.mesh_.conversation(chatPeer) != nullptr &&
+                  app.status_.find("not cleared") != std::string::npos,
+              "failed deletion preserves the conversation and reports the failure");
+        check(::rmdir(path.c_str()) == 0 && fixtureFile(path, text),
+              "restore the fixture transcript after the failed deletion");
+
+        const std::string broadcastPath = app.storage_.meshDir() + "/" +
+                                          meshChatFileName(kMeshBroadcast);
+        // Earlier fixture runs can have left a valid broadcast transcript.
+        ::unlink(broadcastPath.c_str());
+        check(::mkdir(broadcastPath.c_str(), 0700) == 0,
+              "block a broadcast transcript write");
+        check(app.mesh_.sendText(kMeshBroadcast, "keep this unsaved message", error),
+              "queue a message while its transcript destination is blocked");
+        app.tick(nowMs());
+        check(app.status_.find("chat not saved") != std::string::npos,
+              "failed transcript persistence is visible");
+        check(::rmdir(broadcastPath.c_str()) == 0, "unblock transcript persistence");
+        app.tick(nowMs());
+        check(!std::filesystem::exists(broadcastPath),
+              "a failed save is not retried every display frame");
+        // Re-entering a radio session must not reload an older disk snapshot
+        // over the unsaved message, or discard its retry.
+        app.beginMeshSession();
+        const auto* unsaved = app.mesh_.conversation(kMeshBroadcast);
+        check(unsaved && !unsaved->empty() &&
+                  unsaved->back().text == "keep this unsaved message",
+              "session setup preserves an unsaved transcript");
+        app.linkMode_ = LinkMode::Betaflight;
+        app.tick(nowMs() + 6000);
+        std::string recovered;
+        check(app.storage_.readFile(broadcastPath, recovered, readError) &&
+                  recovered.find("keep this unsaved message") != std::string::npos,
+              "an idle retry saves the transcript even after leaving mesh mode");
+        app.linkMode_ = LinkMode::Meshtastic;
+
         KeyEvent escape;
         escape.key = Key::Escape;
         app.handleKey(escape);
