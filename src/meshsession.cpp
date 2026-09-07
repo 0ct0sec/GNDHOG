@@ -71,6 +71,8 @@ bool MeshSession::connect(const std::string& device, int baud, std::string& erro
     nmeaSentences_ = 0;
     framesSeen_ = 0;
     radio_ = MeshRadioInfo{};
+    channelIndex_ = 0;
+    configId_ = 0;
     nodes_.clear();
     nodeIndex_.clear();
     pending_.clear();
@@ -134,6 +136,15 @@ void MeshSession::writeToRadio(const std::string& payload) {
 // Asks for the config download under a fresh id, stepping over the one id
 // the firmware reads as "no node database, please".
 void MeshSession::requestConfig(uint64_t now) {
+    // Each download must establish its own radio settings. A reboot or retry
+    // can omit records that the previous download supplied; those old values
+    // must not authorize a send or select a channel on the new configuration.
+    radio_ = MeshRadioInfo{};
+    channelIndex_ = 0;
+    configItems_ = 0;
+    configProgressMs_ = now;
+    for (MeshNode& node : nodes_) node.isSelf = false;
+    sortNodes();
     configId_ = nextPacketId();
     if (configId_ == kMeshNodelessConfigId) ++configId_;
     configSentMs_ = now;
@@ -152,6 +163,10 @@ void MeshSession::loseLink(const std::string& reason) {
 // somebody picks one.
 bool MeshSession::loraBlocked(std::string& error) const {
     if (radio_.loraReady()) return false;
+    if (!radio_.haveLora) {
+        error = "the radio has not reported its LoRa configuration";
+        return true;
+    }
     error = radio_.region == 0
                 ? "the radio has no LoRa region set, so it will not transmit"
                 : "the radio reports transmit disabled";
@@ -583,14 +598,15 @@ void MeshSession::handleFrame(const std::string& body, uint64_t now) {
         break;
 
     case MeshFromRadio::Kind::ConfigComplete:
-        if (frame.configCompleteId != configId_) break;
+        if (state_ != MeshState::Configuring || configId_ == 0 ||
+            frame.configCompleteId != configId_) break;
         state_ = MeshState::Ready;
         sortNodes();
         term_.addLine("-- meshtastic ready: " + std::to_string(nodes_.size()) +
                           " node(s), " + radio_.loraSummary() + " --",
                       radio_.loraReady() ? LineKind::Good : LineKind::Warn);
         if (!radio_.loraReady()) {
-            term_.addLine("-- this radio will not transmit until a region is set --",
+            term_.addLine("-- sending blocked: " + radio_.loraSummary() + " --",
                           LineKind::Warn);
         }
         setNote("mesh ready");
@@ -601,8 +617,7 @@ void MeshSession::handleFrame(const std::string& body, uint64_t now) {
         term_.addLine("-- the radio rebooted; requesting its node database again --",
                       LineKind::Warn);
         state_ = MeshState::Configuring;
-        configAttempts_ = 0;
-        configItems_ = 0;
+        configAttempts_ = 1;
         requestConfig(now);
         break;
 
@@ -688,7 +703,6 @@ void MeshSession::poll(uint64_t now) {
             break;
         }
         ++configAttempts_;
-        configItems_ = 0;
         requestConfig(now);
         term_.addLine("-- meshtastic: no reply, asking again (attempt " +
                           std::to_string(configAttempts_) + ") --",

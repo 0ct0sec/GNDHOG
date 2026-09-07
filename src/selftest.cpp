@@ -1808,6 +1808,137 @@ void testMeshConfigProgress() {
     mesh.disconnect();
 }
 
+void testMeshConfigLifecycle() {
+    section("mesh configuration restart and completion boundaries");
+    RawPty pty;
+    std::string error;
+    if (!pty.start(error)) {
+        check(false, "configuration fixture opens: " + error);
+        return;
+    }
+    Terminal term;
+    MeshSession mesh(term);
+    check(mesh.connect(pty.slave, 115200, error), "configuration client connects");
+    uint64_t now = nowMs();
+    const auto receive = [&](const pb::Writer& body) {
+        const int before = mesh.framesSeen();
+        pty.write(frameToRadio(body.data()));
+        const uint64_t deadline = nowMs() + 500;
+        do {
+            mesh.poll(now);
+            if (mesh.framesSeen() > before) return;
+            sleepMs(1);
+        } while (nowMs() < deadline);
+        check(false, "configuration fixture frame reaches the session");
+    };
+    const auto complete = [&](uint32_t id) {
+        pb::Writer frame;
+        frame.varint(7, id);
+        receive(frame);
+    };
+    const auto requestId = [&]() -> uint32_t {
+        std::string buffer;
+        const uint64_t deadline = nowMs() + 500;
+        do {
+            mesh.poll(now);
+            char bytes[512];
+            ssize_t n;
+            while ((n = ::read(pty.master, bytes, sizeof(bytes))) > 0) {
+                buffer.append(bytes, static_cast<size_t>(n));
+            }
+            std::vector<std::string> frames;
+            std::string console;
+            extractMeshFrames(buffer, frames, console);
+            for (const std::string& body : frames) {
+                pb::Reader reader(body);
+                while (reader.next()) {
+                    if (reader.field() == 3) return reader.u32();
+                }
+            }
+            sleepMs(1);
+        } while (nowMs() < deadline);
+        check(false, "the session emits a fresh configuration request");
+        return 0;
+    };
+    const auto loraAndChannel = [&]() {
+        pb::Writer lora, config, frame;
+        lora.varint(7, 3);
+        lora.boolean(9, true);
+        config.message(6, lora);
+        frame.message(5, config);
+        receive(frame);
+        pb::Writer settings, channel, channelFrame;
+        settings.bytes(3, "field channel");
+        channel.varint(1, 2);
+        channel.message(2, settings);
+        channel.varint(3, 1);
+        channelFrame.message(10, channel);
+        receive(channelFrame);
+    };
+    const auto reboot = [&]() {
+        pb::Writer frame;
+        frame.varint(8, 1);
+        receive(frame);
+    };
+
+    complete(0);
+    check(mesh.state() == MeshState::Waking,
+          "an unsolicited zero completion cannot bypass the wake and config request");
+    // Start afresh so the remaining checks also exercise an unfixed client.
+    mesh.connect(pty.slave, 115200, error);
+    now = nowMs() + 200;
+    uint32_t id = requestId();
+    loraAndChannel();
+    complete(id);
+    check(mesh.ready() && mesh.radio().loraReady() && mesh.channelIndex() == 2 &&
+              mesh.radio().channelCount == 1,
+          "a complete download supplies the current transmit settings and channel");
+    const uint64_t note = mesh.noteSequence();
+    complete(id);
+    check(mesh.noteSequence() == note,
+          "a duplicate completion cannot reannounce readiness or reset its heartbeat");
+
+    reboot();
+    check(!mesh.ready() && !mesh.radio().haveLora && mesh.radio().channelCount == 0 &&
+              mesh.radio().primaryChannel.empty() && mesh.channelIndex() == 0,
+          "reboot invalidates the prior radio settings before the next download");
+    id = requestId();
+    complete(id);
+    check(mesh.ready() && !mesh.radio().loraReady(),
+          "completion without a new LoRa record cannot inherit permission to transmit");
+    check(!mesh.sendText(kMeshBroadcast, "must wait for config", error) &&
+              error.find("not reported") != std::string::npos,
+          "the incomplete radio configuration refuses a send and names the missing evidence");
+
+    reboot();
+    const uint32_t abandonedId = requestId();
+    loraAndChannel();
+    now += 8001;
+    id = requestId();
+    check(id != abandonedId && !mesh.radio().haveLora && mesh.radio().channelCount == 0,
+          "retry discards settings from the abandoned partial download");
+    complete(abandonedId);
+    check(!mesh.ready(), "an old download completion cannot finish its replacement");
+    loraAndChannel();
+    complete(id);
+    check(mesh.ready() && mesh.radio().channelCount == 1,
+          "retried channel records are counted once in the new download");
+
+    reboot();
+    id = requestId();
+    for (int retry = 0; retry < 2; ++retry) {
+        now += 8001;
+        id = requestId();
+    }
+    now += 8001;
+    mesh.poll(now);
+    check(mesh.state() == MeshState::Failed,
+          "a rebooted radio has the same three-attempt timeout budget as a new link");
+    complete(id);
+    check(mesh.state() == MeshState::Failed,
+          "even the matching completion cannot revive a failed configuration download");
+}
+
 void testMeshSession() {
     section("meshtastic session (simulated radio over a pty)");
     SimMesh sim;
@@ -3911,6 +4042,7 @@ int runSelfTest() {
     testMeshSession();
     testMeshNmeaPort();
     testMeshConfigProgress();
+    testMeshConfigLifecycle();
     testMeshApp();
     testGnssBaudProbe();
     testFieldGeometry();
